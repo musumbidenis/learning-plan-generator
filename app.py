@@ -66,8 +66,38 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
+# Words kept lowercase inside a title (never at the start); acronyms kept upper.
+_TITLE_SMALL = {"a", "an", "and", "as", "at", "by", "for", "in", "of",
+                "on", "or", "the", "to", "with"}
+_TITLE_ACRONYMS = {"ICT", "IT", "AI", "OS", "CPU", "I/O", "SQL", "HTML", "CSS"}
+
+
+def _pretty_name(title: str) -> str:
+    """Readable Title Case from an ALL-CAPS CDACC unit title.
+
+    'APPLY COMMUNICATION SKILLS' -> 'Apply Communication Skills';
+    'COMPUTER ORGANISATION AND ARCHITECTURE' -> 'Computer Organisation and
+    Architecture'. Connector words are lowercased (except first), acronyms and
+    tokens containing digits are left untouched.
+    """
+    words = (title or "").split()
+    out = []
+    for i, w in enumerate(words):
+        up = w.upper()
+        if up in _TITLE_ACRONYMS:
+            out.append(up)
+        elif any(ch.isdigit() for ch in w):
+            out.append(w)
+        elif i != 0 and w.lower() in _TITLE_SMALL:
+            out.append(w.lower())
+        else:
+            out.append(w.lower().capitalize())
+    return " ".join(out) or (title or "")
+
+
 def _ref_label(ref) -> str:
-    return f"{ref.title}  ·  {ref.isced_code or ref.code or '?'}"
+    # readable name + a single unit code (the ISCED code, the reliable identifier)
+    return f"{_pretty_name(ref.title)}  ·  {ref.isced_code or ref.code or '?'}"
 
 
 def _invalidate_extraction() -> None:
