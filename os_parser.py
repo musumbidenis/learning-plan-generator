@@ -17,12 +17,15 @@ from pdf_utils import (
     Line,
     Page,
     RE_LEVEL,
-    RE_OS_CODE,
     clean_text,
     column_lines,
     detect_column_split,
+    find_isced_code,
+    find_tvet_code,
     is_noise_line,
     load_document,
+    page_starts_unit,
+    unit_title_above_code,
 )
 
 # Header / boilerplate lines that appear inside the Element|PC table and must
@@ -79,32 +82,9 @@ def _is_header_line(text: str) -> bool:
 # Unit boundary detection
 # --------------------------------------------------------------------------- #
 def _unit_start_pages(pages: List[Page]) -> List[int]:
-    """Pages that begin a unit: contain ISCED UNIT CODE and UNIT DESCRIPTION."""
-    starts = []
-    for p in pages:
-        up = p.text.upper()
-        if "ISCED UNIT CODE" in up and "UNIT DESCRIPTION" in up:
-            starts.append(p.index)
-    return starts
-
-
-def _unit_title_from_first_page(page: Page) -> str:
-    """The ALL-CAPS line directly above 'ISCED UNIT CODE:'."""
-    # Reconstruct full-width lines from words (top-to-bottom).
-    lines = column_lines(page.words, x_min=0, x_max=10_000)
-    for idx, ln in enumerate(lines):
-        if "ISCED UNIT CODE" in ln.text.upper():
-            # walk backwards to the nearest non-noise ALL-CAPS title line
-            for back in range(idx - 1, -1, -1):
-                cand = lines[back].text.strip()
-                if not cand or is_noise_line(cand):
-                    continue
-                letters = [c for c in cand if c.isalpha()]
-                if letters and all(c.isupper() for c in letters):
-                    return clean_text(cand)
-                # first meaningful non-caps line above -> stop
-                return clean_text(cand)
-    return ""
+    """Pages that begin a unit, detected by the ISCED code SHAPE (not a label),
+    so differently-worded headers across documents are handled identically."""
+    return [p.index for p in pages if page_starts_unit(p)]
 
 
 # --------------------------------------------------------------------------- #
@@ -319,21 +299,14 @@ def _cover_level(pages: List[Page]) -> str:
     return ""
 
 
-def _isced_of(page_text: str) -> str:
-    m = re.search(r"ISCED\s+UNIT\s+CODE\s*:?\s*([0-9][0-9A-Za-z ]+)", page_text, re.I)
-    return clean_text(m.group(1)) if m else ""
-
-
 def _build_unit(unit_pages: List[Page], cover_level: str) -> Unit:
     """Full deterministic extraction for ONE unit (its page span)."""
     first = unit_pages[0]
     unit = Unit()
-    unit.unit_title = _unit_title_from_first_page(first)
+    unit.unit_title = unit_title_above_code(first)
 
-    mcode = RE_OS_CODE.search(first.text)
-    if mcode:
-        unit.os_code = mcode.group(1).strip()
-    unit.isced_code = _isced_of(first.text)
+    unit.os_code = find_tvet_code(first.text)
+    unit.isced_code = find_isced_code(first.text)
     mlevel = RE_LEVEL.search(first.text)
     unit.level = mlevel.group(1) if mlevel else cover_level
 
@@ -356,11 +329,10 @@ def index_os_units(pages: List[Page]) -> List[UnitRef]:
         first = by_index.get(start)
         if first is None:
             continue
-        title = _unit_title_from_first_page(first)
-        mcode = RE_OS_CODE.search(first.text)
-        code = mcode.group(1).strip() if mcode else ""
+        title = unit_title_above_code(first)
+        code = find_tvet_code(first.text)
         if title:
-            refs.append(UnitRef(title=title, isced_code=_isced_of(first.text),
+            refs.append(UnitRef(title=title, isced_code=find_isced_code(first.text),
                                 code=code, source="OS",
                                 start_page=start, end_page=end))
     return refs
