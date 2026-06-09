@@ -96,8 +96,8 @@ def _pretty_name(title: str) -> str:
 
 
 def _ref_label(ref) -> str:
-    # readable name + a single unit code (the ISCED code, the reliable identifier)
-    return f"{_pretty_name(ref.title)}  ·  {ref.isced_code or ref.code or '?'}"
+    # show only the readable unit name in the dropdown (no codes)
+    return _pretty_name(ref.title)
 
 
 def _invalidate_extraction() -> None:

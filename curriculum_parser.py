@@ -25,8 +25,12 @@ from pdf_utils import (
     Page,
     clean_text,
     column_lines,
+    find_isced_code,
+    find_tvet_code,
     is_noise_line,
     load_document,
+    page_starts_unit,
+    unit_title_above_code,
 )
 
 # Column boundaries (tuned to CDACC curriculum layout).
@@ -41,39 +45,18 @@ _RE_SUBTOPIC = re.compile(r"^(\d+\.\d+)(?!\.\d)\s+(.*\S)")      # '1.1 Title' (e
 _RE_KEYPOINT = re.compile(r"^(\d+\.\d+(?:\.\d+)+)\s+(.*\S)")    # '1.1.1 ...' (x.y.z+)
 
 
-# An ISCED unit code looks like '0612 351 03A' (4 digits, 3 digits, 2 digits +
-# letter). A real unit header is "[ISCED] UNIT CODE:" immediately followed by
-# such a code. Anchoring on this code shape (rather than the literal "ISCED"
-# label) tolerates the real-world header typos seen in CDACC curricula:
-#   * missing prefix      -> "UNIT CODE: 0612 351 03A"          (Computer Network Setup)
-#   * transposed 'ISCDE'  -> "ISCDE UNIT CODE: 0612 441 07A"    (Network Design & Mgmt)
-# It still rejects the TVET code line ("...UNIT CODE: IT/CU/...", letters, not
-# digits) and summary/overview tables (whose 'UNIT CODE' header is not directly
-# followed by a code).
-_ISCED_CODE = r"\d{4}\s*\d{3}\s*\d{2}\s*[A-Za-z]"
-# '[ISCED] UNIT CODE: <code>' incl. typo'd/absent prefix, plus a safety net for
-# the normal label followed by any digit.
-_RE_UNIT_HEADER = re.compile(
-    r"(?:ISC[ED]{2}\s+)?UNIT\s+CODE\s*:?\s*" + _ISCED_CODE
-    + r"|ISC[ED]{2}\s+UNIT\s+CODE\s*:?\s*[0-9]",
-    re.I)
-# Capturing variant used to read the ISCED code off a unit's first page.
-_RE_ISCED_CODE = re.compile(
-    r"(?:ISC[ED]{2}\s+)?UNIT\s+CODE\s*:?\s*(" + _ISCED_CODE + r")", re.I)
-
-
 def _unit_start_pages(pages: List[Page]) -> List[int]:
-    """Pages that begin a unit, anchored on the 'ISCED UNIT CODE: <code>' header.
+    """Pages that begin a unit, detected by the ISCED code SHAPE (not a label)
+    via the shared `page_starts_unit`.
 
-    We previously also required 'RELATIONSHIP TO' on the same page, but some unit
-    headers fall at the very bottom of a page (right after the previous unit's
-    resources table, or a module-summary table) with the rest of the unit -
-    including 'Relationship to Occupational Standards' - on the FOLLOWING page.
-    Those units (e.g. Entrepreneurial Skills and Discrete Mathematical Concepts
-    in the ICT curriculum) were silently dropped, so their OS counterparts showed
-    as 'OS only'. Anchoring on the header label + code reliably marks each unit.
+    Earlier versions matched a 'UNIT CODE: <code>' label, which broke on
+    differently-worded headers and on module-summary tables. `page_starts_unit`
+    anchors on the code shape and guards against those tables (exactly one ISCED
+    code per page + a non-empty title above it), so it captures each unit's
+    first page - including units whose header sits at the bottom of a page with
+    the rest of the unit overflowing onto the next.
     """
-    return [p.index for p in pages if _RE_UNIT_HEADER.search(p.text)]
+    return [p.index for p in pages if page_starts_unit(p)]
 
 
 def _table_window(unit_pages: List[Page]):
@@ -120,17 +103,6 @@ def parse_curriculum_pages(pages: List[Page]) -> List[CurriculumUnit]:
     return units
 
 
-def _title_from_first_page(first: Page) -> str:
-    lines = column_lines(first.words, 0, 10_000)   # reconstruct once, not per row
-    for idx, ln in enumerate(lines):
-        if _RE_ISCED_CODE.search(ln.text):         # the '[ISCED] UNIT CODE: <code>' line
-            for back in range(idx - 1, -1, -1):
-                cand = lines[back].text.strip()
-                if cand and not is_noise_line(cand):
-                    return clean_text(cand)
-    return ""
-
-
 def index_curriculum_units(pages: List[Page]) -> List[UnitRef]:
     """Cheap pass: list every curriculum unit's identity WITHOUT extracting the
     full content table."""
@@ -142,14 +114,10 @@ def index_curriculum_units(pages: List[Page]) -> List[UnitRef]:
         first = by_index.get(start)
         if first is None:
             continue
-        title = _title_from_first_page(first)
-        mcode = re.search(r"TVET\s+CDACC\s+UNIT\s+CODE\s*:?\s*([A-Z0-9/]+)",
-                          first.text, re.I)
-        code = mcode.group(1).strip() if mcode else ""
-        misced = _RE_ISCED_CODE.search(first.text)
-        isced = clean_text(misced.group(1)) if misced else ""
+        title = unit_title_above_code(first)
         if title:
-            refs.append(UnitRef(title=title, isced_code=isced, code=code,
+            refs.append(UnitRef(title=title, isced_code=find_isced_code(first.text),
+                                code=find_tvet_code(first.text),
                                 source="CU", start_page=start, end_page=end))
     return refs
 
@@ -164,23 +132,10 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
     first = unit_pages[0]
     unit = CurriculumUnit()
 
-    # title = the line above the '[ISCED] UNIT CODE: <code>' header
-    lines = column_lines(first.words, 0, 10_000)
-    for idx, ln in enumerate(lines):
-        if _RE_ISCED_CODE.search(ln.text):
-            for back in range(idx - 1, -1, -1):
-                cand = lines[back].text.strip()
-                if cand and not is_noise_line(cand):
-                    unit.unit_title = clean_text(cand)
-                    break
-            break
-
-    mcode = re.search(r"TVET\s+CDACC\s+UNIT\s+CODE\s*:?\s*([A-Z0-9/]+)", first.text, re.I)
-    if mcode:
-        unit.curriculum_code = mcode.group(1).strip()
-    misced = _RE_ISCED_CODE.search(first.text)
-    if misced:
-        unit.isced_code = clean_text(misced.group(1))
+    # Unit identity by code shape, label-independent (see pdf_utils helpers).
+    unit.unit_title = unit_title_above_code(first)
+    unit.curriculum_code = find_tvet_code(first.text)
+    unit.isced_code = find_isced_code(first.text)
     mdesc = re.search(r"Unit\s+Description\s*:?(.*?)Summary\s+of\s+Learning",
                       first.text, re.S | re.I)
     if mdesc:

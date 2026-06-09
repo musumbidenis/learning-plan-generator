@@ -277,3 +277,84 @@ def load_document(path: str) -> List[Page]:
 RE_ISCED = re.compile(r"ISCED\s+UNIT\s+CODE\s*:?\s*([0-9][0-9A-Za-z ]+?)(?:\s{2,}|$)", re.I)
 RE_OS_CODE = re.compile(r"TVET\s+CDACC\s+(?:UNIT\s+)?CODE\s*:?\s*([A-Z0-9/]+)", re.I)
 RE_LEVEL = re.compile(r"(?:KNQF\s+)?LEVEL\s*[:\-]?\s*(\d+)", re.I)
+
+
+# --------------------------------------------------------------------------- #
+# Unit identity by CODE SHAPE (label-independent)
+#
+# Every CDACC unit carries two codes with distinctive shapes, regardless of how
+# the surrounding label is spelt ("ISCED UNIT CODE", "UNIT CODE", a typo'd
+# "ISCDE", or no prefix at all). Anchoring on the shape - not the label - lets a
+# single code path locate units across documents whose labels differ in wording.
+#   * ISCED code:      '0612 351 03A'         -> 4 digits, 3 digits, 2 digits, letter
+#   * TVET CDACC code: 'IT/OS/ICTA/CR/01/4/MA' -> slash-delimited upper/numeric tokens
+# --------------------------------------------------------------------------- #
+RE_ISCED_CODE_SHAPE = re.compile(r"(\d{4}\s*\d{3}\s*\d{2}\s*[A-Za-z])")
+RE_TVET_CODE_SHAPE = re.compile(r"([A-Z]{2,}(?:/[A-Z0-9]+){4,})")
+
+
+def find_isced_code(text: str) -> str:
+    """First ISCED-shaped code in *text* (cleaned), or '' - label-independent."""
+    m = RE_ISCED_CODE_SHAPE.search(text or "")
+    return clean_text(m.group(1)) if m else ""
+
+
+def find_tvet_code(text: str) -> str:
+    """First TVET-CDACC-shaped code in *text*, or '' - label-independent."""
+    m = RE_TVET_CODE_SHAPE.search(text or "")
+    return m.group(1) if m else ""
+
+
+# A code line carries either of the two code shapes, or is a bare 'UNIT CODE:'
+# label whose code wrapped onto the next line. The unit name is never one of
+# these, so title resolution must walk past them.
+RE_CODE_LABEL = re.compile(r"\bCODE\s*:?\s*$", re.I)
+
+
+def _is_code_line(text: str) -> bool:
+    return bool(RE_TVET_CODE_SHAPE.search(text)
+                or RE_ISCED_CODE_SHAPE.search(text)
+                or RE_CODE_LABEL.search(text.strip()))
+
+
+def unit_title_above_code(page: "Page") -> str:
+    """The unit name = the nearest non-noise, non-code line ABOVE the line that
+    bears the ISCED code. Anchoring on the code shape (not a label) makes this
+    work whatever the document calls its code field.
+
+    Skipping code lines is essential: some documents order the header
+    title -> TVET code -> ISCED code, so the line directly above the ISCED
+    anchor is the TVET CDACC code, not the title. Walking past any code line
+    reaches the real name regardless of how the two codes are ordered."""
+    lines = column_lines(page.words, 0, 10_000)
+    for idx, ln in enumerate(lines):
+        if RE_ISCED_CODE_SHAPE.search(ln.text):
+            for back in range(idx - 1, -1, -1):
+                cand = lines[back].text.strip()
+                if cand and not is_noise_line(cand) and not _is_code_line(cand):
+                    return clean_text(cand)
+    return ""
+
+
+def page_starts_unit(page: "Page") -> bool:
+    """True when *page* is a unit's FIRST page, detected purely by code shape.
+
+    Two label-free guards reject the summary / MODULE / CATEGORY tables that also
+    contain codes (both verified against the shipped CDACC PDFs):
+      1. exactly ONE distinct ISCED code on the page - real unit pages carry one,
+         those tables list several (the dropped pages had 2-14);
+      2. a non-empty title resolved above that code.
+    The code must also occur in a header context - its line carries a 'CODE'
+    token, or a TVET code co-occurs on the page - which matches the real header
+    block and rejects incidental code mentions.
+    """
+    lines = column_lines(page.words, 0, 10_000)
+    code_line = next((ln for ln in lines if RE_ISCED_CODE_SHAPE.search(ln.text)), None)
+    if code_line is None:
+        return False
+    if "CODE" not in code_line.text.upper() and not RE_TVET_CODE_SHAPE.search(page.text):
+        return False
+    distinct = {re.sub(r"\s+", "", c) for c in RE_ISCED_CODE_SHAPE.findall(page.text)}
+    if len(distinct) != 1:
+        return False
+    return bool(unit_title_above_code(page))
