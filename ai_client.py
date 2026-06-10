@@ -24,10 +24,8 @@ from models import Session, Unit
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Hard-coded Gemini key (per request) so it is NOT entered in the UI.
-# SECURITY NOTE: this key is now embedded in source - do NOT commit/share this
-# file publicly or the key leaks. An env var GEMINI_API_KEY (in .env) overrides it.
-DEFAULT_API_KEY = "AQ.Ab8RN6JsVvoaxpg8WEMZIIg1BEo2Q4Qajxd5qhHKysHxVzCwvg"
+# The Gemini key is read from the environment / .env (GEMINI_API_KEY) - see
+# load_api_key(). It is never hard-coded in source and never entered in the UI.
 
 # Ordered model "switch case": the single call walks this chain top-to-bottom and
 # advances to the NEXT model the instant the current one is unavailable (quota
@@ -417,11 +415,33 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
-def load_api_key() -> str:
-    """The hard-coded key, overridable by GEMINI_API_KEY in the environment/.env."""
+def _config(name: str) -> str:
+    """Read a config value from the environment / .env, then Streamlit secrets.
+
+    Locally the value comes from .env (loaded into os.environ). On Streamlit
+    Community Cloud there is no .env - secrets are set in the app's Secrets box
+    and exposed via st.secrets, which this falls back to. No secret is ever
+    hard-coded in source or committed to the repo.
+    """
     from dotenv import load_dotenv
     load_dotenv()
-    return os.getenv("GEMINI_API_KEY", "").strip() or DEFAULT_API_KEY
+    val = os.getenv(name, "").strip()
+    if val:
+        return val
+    try:                                   # only present when running under Streamlit
+        import streamlit as st
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
+def load_api_key() -> str:
+    """The Gemini key, read from GEMINI_API_KEY (env / .env, then st.secrets).
+
+    Returns '' when unset; callers treat an empty key as "no key" (offline mode,
+    or an AIError when offline is not allowed). No key is hard-coded in source.
+    """
+    return _config("GEMINI_API_KEY")
 
 
 def load_model_chain() -> List[str]:
@@ -432,11 +452,8 @@ def load_model_chain() -> List[str]:
     built-in MODEL_CHAIN. The primary is always tried first, so listing 2.0 there
     keeps it preferred whenever a billing-enabled key makes it available.
     """
-    from dotenv import load_dotenv
-    load_dotenv()
-    primary = os.getenv("GEMINI_MODEL", "").strip()
-    fb_raw = (os.getenv("GEMINI_FALLBACK_MODELS", "").strip()
-              or os.getenv("GEMINI_FALLBACK_MODEL", "").strip())
+    primary = _config("GEMINI_MODEL")
+    fb_raw = _config("GEMINI_FALLBACK_MODELS") or _config("GEMINI_FALLBACK_MODEL")
     if not primary and not fb_raw:
         return list(MODEL_CHAIN)
     chain: List[str] = [primary] if primary else [MODEL_CHAIN[0]]
