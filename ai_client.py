@@ -1,4 +1,4 @@
-"""Module C - THE SINGLE AI CALL (Google Gemini, ONE grounded request).
+"""Module C - THE SINGLE AI CALL (Mistral, ONE grounded request).
 
 The ONLY place AI is used in the whole pipeline. It fills the columns AI is good
 at - learning_outcomes, trainee_activities, resources, assessments - grounded in
@@ -22,32 +22,19 @@ import requests
 import runlog
 from models import Session, Unit
 
-GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
-# The Gemini key is read from the environment / .env (GEMINI_API_KEY) - see
+# The Mistral key is read from the environment / .env (MISTRAL_API_KEY) - see
 # load_api_key(). It is never hard-coded in source and never entered in the UI.
 
-# Ordered model "switch case": the single call walks this chain top-to-bottom and
-# advances to the NEXT model the instant the current one is unavailable (quota
-# exhausted / HTTP 429 / transient error), returning the first one that responds.
-#
-# Gemini 2.0 is listed FIRST (preferred) so it is used the moment a billing-enabled
-# key makes it available. NOTE: on free-tier keys Google currently reports
-# `quota limit: 0` for the entire 2.0 family AND the *-pro tiers, so those are
-# skipped instantly and the call lands on the first working flash model (2.5+).
-# Override the whole chain with GEMINI_MODEL / GEMINI_FALLBACK_MODELS in .env.
+# Ordered model chain: the single call walks this chain top-to-bottom and
+# advances to the NEXT model when the current one is unavailable (quota/rate
+# limit/transient error) or returns unusable output.
+# Override the chain with MISTRAL_MODEL / MISTRAL_FALLBACK_MODELS in .env.
 MODEL_CHAIN = [
-    "gemini-2.0-flash",          # preferred; quota-limited on free-tier keys
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",          # first model that works on a free-tier key
-    "gemini-2.5-flash-lite",
-    "gemini-3-flash-preview",
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
-    "gemini-2.5-pro",            # high-quality last resorts (quota permitting)
-    "gemini-pro-latest",
+    "mistral-large-latest",
+    "mistral-medium-latest",
+    "mistral-small-latest",
 ]
 DEFAULT_MODEL = MODEL_CHAIN[0]
 DEFAULT_FALLBACK_MODELS = MODEL_CHAIN[1:]
@@ -62,16 +49,16 @@ class AIError(RuntimeError):
 # Response schema (forces valid structured JSON)
 # --------------------------------------------------------------------------- #
 def _response_schema() -> dict:
-    str_array = {"type": "ARRAY", "items": {"type": "STRING"}}
+    str_array = {"type": "array", "items": {"type": "string"}}
     return {
-        "type": "ARRAY",
+        "type": "array",
         "items": {
-            "type": "OBJECT",
+            "type": "object",
             "properties": {
-                "week": {"type": "INTEGER"},
-                "session_no": {"type": "STRING"},
-                "is_cat": {"type": "BOOLEAN"},
-                "session_title": {"type": "STRING"},
+                "week": {"type": "integer"},
+                "session_no": {"type": "string"},
+                "is_cat": {"type": "boolean"},
+                "session_title": {"type": "string"},
                 "learning_outcomes": str_array,
                 "key_points": str_array,
                 "trainee_activities": str_array,
@@ -129,49 +116,71 @@ TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONL
 # HTTP call
 # --------------------------------------------------------------------------- #
 def _post(model: str, api_key: str, prompt: str, timeout: int = 180) -> dict:
-    url = GEMINI_ENDPOINT.format(model=model)
     body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.35,
-            "maxOutputTokens": 32000,
-            "responseMimeType": "application/json",
-            "responseSchema": _response_schema(),
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.35,
+        "max_tokens": 32000,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "learning_plan_sessions",
+                "schema": _response_schema(),
+                "strict": True,
+            },
         },
     }
-    resp = requests.post(url, params={"key": api_key},
-                         headers={"Content-Type": "application/json"},
+    resp = requests.post(MISTRAL_ENDPOINT,
+                         headers={
+                             "Authorization": f"Bearer {api_key}",
+                             "Content-Type": "application/json",
+                         },
                          json=body, timeout=timeout)
     return resp
 
 
 def _extract_text(payload: dict) -> str:
-    cands = payload.get("candidates") or []
-    if not cands:
-        raise AIError("Gemini returned no candidates: " + json.dumps(payload)[:300])
-    parts = cands[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    """Pull the text out of a Mistral chat-completions response, defensively.
+
+    The API can return a 200 with no usable assistant content, for example an
+    empty choices list or a choice that only carries a finish reason. Each of
+    those raises AIError so call_mistral() can log it and try the next model.
+    """
+    choices = payload.get("choices") or []
+    if not choices:
+        raise AIError("Mistral returned no choices: " + json.dumps(payload)[:300])
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        text = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    else:
+        text = str(content)
+    if not text:
+        reason = choice.get("finish_reason") or "no assistant content"
+        raise AIError(f"Mistral returned an empty response (finish_reason: {reason})")
+    return text
 
 
 def _quota_reason(resp) -> str:
-    """Short human note for a 429: flag the 'free-tier quota is 0' case so the log
-    explains WHY a model is being skipped (vs a transient per-minute rate limit)."""
-    body = resp.text or ""
-    if "limit: 0" in body or '"limit": 0' in body or '"limit":0' in body:
-        return " - free-tier quota is 0 for this model (billing required)"
-    return ""
+    """Short human note for a 429 response."""
+    return f" - {resp.text[:160]}" if getattr(resp, "text", "") else ""
 
 
-def call_gemini(prompt: str, api_key: str, model: str,
-                fallback_model=None, max_retries: int = 3) -> List[dict]:
-    """One grounded request that walks an ordered model chain ("switch case").
+def call_mistral(prompt: str, api_key: str, model: str,
+                 fallback_model=None, max_retries: int = 3) -> List[dict]:
+    """One grounded request that walks an ordered model chain.
 
     Tries `model`, then each entry of `fallback_model` (a name or list of names),
     advancing to the NEXT model the moment the current one is unavailable - quota
-    exhausted (429), invalid output, or a transient/server error. Returns the JSON
-    rows from the first model that responds. Each attempt is logged so the UI Log
-    viewer shows the chain progressing. A 401/403 aborts immediately (the key,
-    not the model, is the problem). `max_retries` is accepted for back-compat.
+    exhausted (429), empty/blocked response, invalid output, or a transient/server
+    error. Returns the JSON rows from the first model that responds. Each attempt
+    is logged so the run log shows the chain progressing. A 401/403 aborts
+    immediately (the key, not the model, is the problem). `max_retries` is
+    accepted for back-compat; fallback models are tried once each.
     """
     if fallback_model is None:
         fallbacks = []
@@ -192,7 +201,12 @@ def call_gemini(prompt: str, api_key: str, model: str,
             continue
 
         if resp.status_code == 200:
-            text = _extract_text(resp.json())
+            try:
+                text = _extract_text(resp.json())
+            except AIError as e:
+                last_err = f"{mdl}: {e}"
+                runlog.warn(f"AI: {mdl} returned no usable text ({e}) - trying next model")
+                continue
             try:
                 data = json.loads(text)
             except json.JSONDecodeError as e:
@@ -210,10 +224,8 @@ def call_gemini(prompt: str, api_key: str, model: str,
 
         if resp.status_code in (401, 403):
             raise AIError(
-                "Gemini auth failed (HTTP %d). Your GEMINI_API_KEY is invalid, "
-                "expired, or lacks access. Note: AI-Studio keys (incl. AQ.* "
-                "OAuth-style keys) are passed via ?key= and CAN expire - "
-                "regenerate one at aistudio.google.com." % resp.status_code)
+                "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
+                "expired, or lacks access." % resp.status_code)
 
         if resp.status_code == 429:
             reason = _quota_reason(resp)
@@ -225,8 +237,11 @@ def call_gemini(prompt: str, api_key: str, model: str,
         last_err = f"{mdl}: HTTP {resp.status_code} {resp.text[:200]}"
         runlog.warn(f"AI: {mdl} HTTP {resp.status_code} - trying next model")
 
-    raise AIError(last_err or "All Gemini models in the fallback chain were "
-                  "unavailable. Add a billing-enabled GEMINI_API_KEY to .env.")
+    raise AIError(last_err or "All Mistral models in the fallback chain were "
+                  "unavailable. Add a valid MISTRAL_API_KEY to .env.")
+
+
+call_gemini = call_mistral  # Back-compat for older tests/imports.
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +414,7 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
         if offline_ok:
             runlog.warn("AI: no API key - using grounded offline defaults")
             return merge_ai_into_sessions(sessions, [], unit)
-        raise AIError("No Gemini API key available.")
+        raise AIError("No Mistral API key available.")
 
     # Resolve the model chain (env-overridable) unless the caller pinned one.
     if model is None or fallback_model is None:
@@ -411,20 +426,31 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     runlog.log(f"AI: model chain = {[model] + list(fallback_model)}")
 
     prompt = build_prompt(unit, sessions)
-    ai_rows = call_gemini(prompt, api_key, model, fallback_model)
+    ai_rows = call_mistral(prompt, api_key, model, fallback_model)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
+
+
+_ENV_LOADED = False
+
+
+def _ensure_env_loaded() -> None:
+    """Load .env into os.environ exactly once per process (idempotent)."""
+    global _ENV_LOADED
+    if not _ENV_LOADED:
+        from dotenv import load_dotenv
+        load_dotenv()
+        _ENV_LOADED = True
 
 
 def _config(name: str) -> str:
     """Read a config value from the environment / .env, then Streamlit secrets.
 
-    Locally the value comes from .env (loaded into os.environ). On Streamlit
+    Locally the value comes from .env (loaded into os.environ once). On Streamlit
     Community Cloud there is no .env - secrets are set in the app's Secrets box
     and exposed via st.secrets, which this falls back to. No secret is ever
     hard-coded in source or committed to the repo.
     """
-    from dotenv import load_dotenv
-    load_dotenv()
+    _ensure_env_loaded()
     val = os.getenv(name, "").strip()
     if val:
         return val
@@ -436,24 +462,23 @@ def _config(name: str) -> str:
 
 
 def load_api_key() -> str:
-    """The Gemini key, read from GEMINI_API_KEY (env / .env, then st.secrets).
+    """The Mistral key, read from MISTRAL_API_KEY (env / .env, then st.secrets).
 
     Returns '' when unset; callers treat an empty key as "no key" (offline mode,
     or an AIError when offline is not allowed). No key is hard-coded in source.
     """
-    return _config("GEMINI_API_KEY")
+    return _config("MISTRAL_API_KEY")
 
 
 def load_model_chain() -> List[str]:
     """Ordered model chain, overridable via .env.
 
-    GEMINI_MODEL sets the primary model; GEMINI_FALLBACK_MODELS (comma-separated,
-    or the singular GEMINI_FALLBACK_MODEL) sets the rest. Omit both to use the
-    built-in MODEL_CHAIN. The primary is always tried first, so listing 2.0 there
-    keeps it preferred whenever a billing-enabled key makes it available.
+    MISTRAL_MODEL sets the primary model; MISTRAL_FALLBACK_MODELS (comma-separated,
+    or the singular MISTRAL_FALLBACK_MODEL) sets the rest. Omit both to use the
+    built-in MODEL_CHAIN. The primary is always tried first.
     """
-    primary = _config("GEMINI_MODEL")
-    fb_raw = _config("GEMINI_FALLBACK_MODELS") or _config("GEMINI_FALLBACK_MODEL")
+    primary = _config("MISTRAL_MODEL")
+    fb_raw = _config("MISTRAL_FALLBACK_MODELS") or _config("MISTRAL_FALLBACK_MODEL")
     if not primary and not fb_raw:
         return list(MODEL_CHAIN)
     chain: List[str] = [primary] if primary else [MODEL_CHAIN[0]]
@@ -465,71 +490,3 @@ def load_model_chain() -> List[str]:
             seen.add(m)
             out.append(m)
     return out or list(MODEL_CHAIN)
-
-
-# --------------------------------------------------------------------------- #
-# Tiny AI fallback for OS parsing (ONLY when deterministic parsing yields zero
-# units, e.g. a scanned / garbled OS). This is a safety hatch, not the norm.
-# --------------------------------------------------------------------------- #
-def ai_extract_unit_fallback(raw_text: str, api_key: str,
-                             model: str = "gemini-2.5-flash",
-                             fallback_model: str = "gemini-2.5-flash-lite") -> Unit:
-    from models import Element, PerformanceCriterion
-    schema = {
-        "type": "OBJECT",
-        "properties": {
-            "unit_title": {"type": "STRING"},
-            "os_code": {"type": "STRING"},
-            "level": {"type": "STRING"},
-            "description": {"type": "STRING"},
-            "assessment_methods": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "elements": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "number": {"type": "STRING"},
-                        "title": {"type": "STRING"},
-                        "performance_criteria": {
-                            "type": "ARRAY",
-                            "items": {
-                                "type": "OBJECT",
-                                "properties": {"number": {"type": "STRING"},
-                                               "text": {"type": "STRING"}},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
-    prompt = ("Extract the Kenya CDACC unit of competency from this Occupational "
-              "Standard text. Return ONLY JSON with unit_title, os_code, level, "
-              "description, assessment_methods[], and elements[] each with number, "
-              "title and performance_criteria[] (number like '1.1', text).\n\n"
-              + raw_text[:14000])
-    body_schema = schema
-    # reuse the HTTP path but with this object schema
-    url = GEMINI_ENDPOINT.format(model=model)
-    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 8000,
-                                 "responseMimeType": "application/json",
-                                 "responseSchema": body_schema}}
-    resp = requests.post(url, params={"key": api_key},
-                         headers={"Content-Type": "application/json"},
-                         json=body, timeout=120)
-    if resp.status_code != 200:
-        raise AIError(f"OS fallback failed: HTTP {resp.status_code} {resp.text[:200]}")
-    data = json.loads(_extract_text(resp.json()))
-    unit = Unit(unit_title=data.get("unit_title", ""), os_code=data.get("os_code", ""),
-                level=str(data.get("level", "")), description=data.get("description", ""),
-                assessment_methods=_as_list(data.get("assessment_methods")))
-    unit.skill_task = unit.description
-    for el in data.get("elements", []):
-        e = Element(number=str(el.get("number", "")), title=el.get("title", ""))
-        for pc in el.get("performance_criteria", []):
-            e.performance_criteria.append(
-                PerformanceCriterion(number=str(pc.get("number", "")),
-                                     text=pc.get("text", "")))
-        unit.elements.append(e)
-    return unit

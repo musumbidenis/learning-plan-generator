@@ -5,12 +5,10 @@ Manual, sequential flow (the two source documents are chosen independently):
   1. Upload the Occupational Standard  -> units auto-extracted -> pick the OS unit
   2. Upload the Curriculum             -> units auto-extracted -> pick the CU unit
   3. Extract unit details (deterministic, no AI) -> preview
-  4. Generate Learning Plan (one grounded Gemini call) -> .docx
+  4. Generate Learning Plan (one grounded Mistral call) -> .docx
 
-The Gemini key + model are configured in ai_client.py (not entered in the UI).
+The Mistral key + model are configured in ai_client.py (not entered in the UI).
 Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency).
-A Log viewer at the bottom shows what happens behind the scenes (loading,
-indexing, extraction, AI call, timings).
 """
 
 from __future__ import annotations
@@ -100,6 +98,18 @@ def _ref_label(ref) -> str:
     return _pretty_name(ref.title)
 
 
+def _no_units_message(pages, doc: str) -> str:
+    """Explain why a successfully-loaded document yielded zero units, pointing at
+    the likely cause: a scanned/image-only PDF (no extractable text) vs. a
+    text-based file whose layout the parser did not recognise."""
+    has_text = any(getattr(p, "words", None) for p in (pages or []))
+    if not has_text:
+        return (f"Couldn't read any text from the {doc} - it looks scanned or "
+                "image-only. Upload a text-based PDF (or run OCR on it first).")
+    return (f"No units found in the {doc}. The file may use an unexpected layout "
+            "or may not be a CDACC unit document. Try the official PDF.")
+
+
 def _invalidate_extraction() -> None:
     ss.extracted = False
     ss.extracted_key = None
@@ -182,9 +192,9 @@ def render_preview_and_generate() -> None:
     st.subheader("4. Generate Learning Plan")
     offline = st.checkbox("Offline mode (skip the AI call, use grounded defaults)",
                           value=False, key="f_offline",
-                          help="Tick to build the plan without calling Gemini.")
+                          help="Tick to build the plan without calling Mistral.")
     use_ai = not offline
-    st.caption("Will make one grounded Gemini 2.0 call to fill the generative "
+    st.caption("Will make one grounded Mistral call to fill the generative "
                "columns." if use_ai
                else "Offline mode - generative columns filled with grounded defaults.")
 
@@ -199,7 +209,7 @@ def render_preview_and_generate() -> None:
                  f"(CATs at weeks {', '.join(map(str, sorted(set(cat_weeks))))}).")
         try:
             with st.spinner("Filling generative columns "
-                            + ("via one Gemini call..." if use_ai else "...")):
+                            + ("via one Mistral call..." if use_ai else "...")):
                 with runlog.timed("AI generate sessions" if use_ai
                                   else "Fill generative columns (offline defaults)"):
                     sessions = ai_client.generate_sessions(
@@ -241,7 +251,7 @@ def render_preview_and_generate() -> None:
 # Header
 # --------------------------------------------------------------------------- #
 st.title("Learning Plan Generator")
-st.caption("Deterministic parsing - one grounded AI call (Gemini 2.0) - "
+st.caption("Deterministic parsing - one grounded AI call (Mistral) - "
            "RVNP .docx - REF KTTC/TP/LP/F07")
 
 
@@ -273,6 +283,7 @@ if os_file is not None:
                 runlog.log(f"Indexed {len(ss.os_refs)} OS units")
             except Exception as e:  # noqa: BLE001
                 ss.os_refs = []
+                ss.os_pages = None
                 runlog.error(f"Failed to read Occupational Standard: {e}")
                 st.error(f"Failed to read the Occupational Standard: {e}")
 
@@ -287,6 +298,8 @@ if ss.os_refs:
         key=f"os_pick::{ss.os_sig}")
     if os_idx is not None:
         os_ref = ss.os_refs[os_idx]
+elif ss.os_pages is not None:
+    st.error(_no_units_message(ss.os_pages, "Occupational Standard"))
 elif os_file is None:
     st.info("Upload the Occupational Standard to begin.")
 
@@ -316,6 +329,7 @@ if os_ref is not None:
                     runlog.log(f"Indexed {len(ss.cu_refs)} curriculum units")
                 except Exception as e:  # noqa: BLE001
                     ss.cu_refs = []
+                    ss.cu_pages = None
                     runlog.error(f"Failed to read Curriculum: {e}")
                     st.error(f"Failed to read the Curriculum: {e}")
 
@@ -329,6 +343,8 @@ if os_ref is not None:
             key=f"cu_pick::{ss.cu_sig}")
         if cu_idx is not None:
             cu_ref = ss.cu_refs[cu_idx]
+    elif ss.cu_pages is not None:
+        st.error(_no_units_message(ss.cu_pages, "Curriculum"))
     elif cu_file is None:
         st.info("Upload the Curriculum, then select the matching unit.")
 
@@ -366,21 +382,3 @@ if os_ref is not None and cu_ref is not None:
         render_preview_and_generate()
     elif ss.extracted and ss.extracted_key != cur_key:
         st.info("Selection changed - click **Extract unit details** again.")
-
-
-# =========================================================================== #
-# Log viewer
-# =========================================================================== #
-st.divider()
-st.subheader("Log viewer")
-st.caption("What is happening behind the scenes - document loading, indexing, "
-           "extraction, the AI call, and per-step timings.")
-lc1, lc2, _ = st.columns([1, 1, 6])
-if lc1.button("Refresh"):
-    pass  # the rerun re-reads the log buffer below
-if lc2.button("Clear log"):
-    runlog.clear()
-log_text = runlog.as_text() or ("No activity yet. Upload the Occupational Standard "
-                                "to see the log fill in.")
-with st.container(height=320):
-    st.code(log_text, language="text")
