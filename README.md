@@ -36,13 +36,8 @@ streamlit run app.py
 ```
 
 The API key is sent as a Bearer token to Mistral's chat completions API. Default
-model chain: `mistral-large-latest`, then `mistral-medium-latest`, then
-`mistral-small-latest`; HTTP 429 advances to the next model, while 401/403
-surfaces a clear "key invalid/expired" message.
-
-**Offline mode**: leave the key blank (or tick *Offline mode*) and the app fills
-the generative columns with grounded deterministic defaults — you still get a
-complete, correctly-shaped document.
+model: `mistral-large-latest`; 401/403 surfaces a clear "key invalid/expired"
+message and 429 is reported as a Mistral API error.
 
 ## Modules
 

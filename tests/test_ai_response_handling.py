@@ -3,8 +3,7 @@
 
 Covers the case that motivated the hardening: the provider returns HTTP 200 but
 the choice carries only a finish reason and no assistant content.
-That must NOT crash with a KeyError/AttributeError - it should raise a clean
-AIError so `call_mistral` can log it and advance to the next model in the chain.
+That must raise a clean AIError and stop, not fall back to another model.
 """
 
 import pytest
@@ -53,49 +52,31 @@ def test_extract_text_surfaces_finish_reason():
 
 
 # --------------------------------------------------------------------------- #
-# call_mistral chain behaviour
+# call_mistral behaviour
 # --------------------------------------------------------------------------- #
-def test_call_mistral_advances_past_empty_choice(monkeypatch):
-    """First model returns 200-but-blocked; the chain should fall through to the
-    second model and return its rows instead of failing."""
-    responses = {
-        "m1": FakeResp(200, {"choices": [{"finish_reason": "content_filter"}]}),
-        "m2": FakeResp(200, _ok_payload('[{"week": 1}]')),
-    }
-    monkeypatch.setattr(ai_client, "_post",
-                        lambda model, api_key, prompt, timeout=180: responses[model])
-    rows = call_mistral("prompt", "key", "m1", fallback_model=["m2"])
-    assert rows == [{"week": 1}]
-
-
-def test_call_mistral_raises_aierror_when_all_models_empty(monkeypatch):
+def test_call_mistral_raises_aierror_on_empty_choice(monkeypatch):
     monkeypatch.setattr(
         ai_client, "_post",
         lambda model, api_key, prompt, timeout=180:
             FakeResp(200, {"choices": [{"finish_reason": "content_filter"}]}))
     with pytest.raises(AIError):
-        call_mistral("prompt", "key", "m1", fallback_model=["m2"])
+        call_mistral("prompt", "key", "m1")
 
 
-def test_call_mistral_advances_past_invalid_json(monkeypatch):
-    responses = {
-        "m1": FakeResp(200, _ok_payload("not json at all")),
-        "m2": FakeResp(200, _ok_payload('[{"week": 2}]')),
-    }
-    monkeypatch.setattr(ai_client, "_post",
-                        lambda model, api_key, prompt, timeout=180: responses[model])
-    assert call_mistral("p", "k", "m1", fallback_model=["m2"]) == [{"week": 2}]
+def test_call_mistral_raises_aierror_on_invalid_json(monkeypatch):
+    monkeypatch.setattr(
+        ai_client, "_post",
+        lambda model, api_key, prompt, timeout=180:
+            FakeResp(200, _ok_payload("not json at all")))
+    with pytest.raises(AIError):
+        call_mistral("p", "k", "m1")
 
 
 def test_call_mistral_aborts_immediately_on_403(monkeypatch):
-    """A 403 is a key problem, not a model problem - abort, do not try fallbacks."""
-    calls = []
-
+    """A 403 is a key problem, not a model problem."""
     def fake_post(model, api_key, prompt, timeout=180):
-        calls.append(model)
         return FakeResp(403, text="PERMISSION_DENIED")
 
     monkeypatch.setattr(ai_client, "_post", fake_post)
     with pytest.raises(AIError):
-        call_mistral("p", "k", "m1", fallback_model=["m2"])
-    assert calls == ["m1"]      # never advanced to m2
+        call_mistral("p", "k", "m1")

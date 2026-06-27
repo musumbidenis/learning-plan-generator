@@ -190,17 +190,10 @@ def render_preview_and_generate() -> None:
 
     # ----- generate --------------------------------------------------------- #
     st.subheader("4. Generate Learning Plan")
-    offline = st.checkbox("Offline mode (skip the AI call, use grounded defaults)",
-                          value=False, key="f_offline",
-                          help="Tick to build the plan without calling Mistral.")
-    use_ai = not offline
-    st.caption("Will make one grounded Mistral call to fill the generative "
-               "columns." if use_ai
-               else "Offline mode - generative columns filled with grounded defaults.")
+    st.caption("Will make one grounded Mistral call to fill the generative columns.")
 
     if st.button("Generate Learning Plan", type="primary"):
-        runlog.log(f"Generate Learning Plan (offline={offline}) for "
-                   f"{ss.display_code or os_unit.unit_title}")
+        runlog.log(f"Generate Learning Plan for {ss.display_code or os_unit.unit_title}")
         with runlog.timed("Plan sessions"):
             sessions = planner.plan_sessions(curr_unit, os_unit, inputs)
         runlog.log(f"Planned {len(sessions)} sessions across {inputs.term_weeks} weeks")
@@ -208,18 +201,14 @@ def render_preview_and_generate() -> None:
                  f"**{inputs.term_weeks}** weeks "
                  f"(CATs at weeks {', '.join(map(str, sorted(set(cat_weeks))))}).")
         try:
-            with st.spinner("Filling generative columns "
-                            + ("via one Mistral call..." if use_ai else "...")):
-                with runlog.timed("AI generate sessions" if use_ai
-                                  else "Fill generative columns (offline defaults)"):
-                    sessions = ai_client.generate_sessions(
-                        os_unit, sessions, api_key="" if offline else None,
-                        offline_ok=True)
+            with st.spinner("Filling generative columns via one Mistral call..."):
+                with runlog.timed("AI generate sessions"):
+                    sessions = ai_client.generate_sessions(os_unit, sessions,
+                                                           api_key=None)
         except ai_client.AIError as e:
             runlog.error(f"AI call failed: {e}")
             st.error(f"AI call failed: {e}")
-            st.info("Falling back to grounded defaults so you still get a document.")
-            sessions = ai_client.merge_ai_into_sessions(sessions, [], os_unit)
+            return
 
         with runlog.timed("Build .docx"):
             docx_bytes = doc_builder.document_to_bytes(os_unit, sessions, inputs,

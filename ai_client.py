@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from typing import List, Optional
 
 import requests
@@ -27,18 +26,7 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 # The Mistral key is read from the environment / .env (MISTRAL_API_KEY) - see
 # load_api_key(). It is never hard-coded in source and never entered in the UI.
 
-# Ordered model chain: the single call walks this chain top-to-bottom and
-# advances to the NEXT model when the current one is unavailable (quota/rate
-# limit/transient error) or returns unusable output.
-# Override the chain with MISTRAL_MODEL / MISTRAL_FALLBACK_MODELS in .env.
-MODEL_CHAIN = [
-    "mistral-large-latest",
-    "mistral-medium-latest",
-    "mistral-small-latest",
-]
-DEFAULT_MODEL = MODEL_CHAIN[0]
-DEFAULT_FALLBACK_MODELS = MODEL_CHAIN[1:]
-DEFAULT_FALLBACK_MODEL = DEFAULT_FALLBACK_MODELS[0]  # back-compat
+DEFAULT_MODEL = "mistral-large-latest"
 
 
 class AIError(RuntimeError):
@@ -144,7 +132,7 @@ def _extract_text(payload: dict) -> str:
 
     The API can return a 200 with no usable assistant content, for example an
     empty choices list or a choice that only carries a finish reason. Each of
-    those raises AIError so call_mistral() can log it and try the next model.
+    those raises AIError so the caller can surface the error immediately.
     """
     choices = payload.get("choices") or []
     if not choices:
@@ -165,83 +153,39 @@ def _extract_text(payload: dict) -> str:
     return text
 
 
-def _quota_reason(resp) -> str:
-    """Short human note for a 429 response."""
-    return f" - {resp.text[:160]}" if getattr(resp, "text", "") else ""
+def call_mistral(prompt: str, api_key: str, model: str) -> List[dict]:
+    """One grounded request with no fallback chain."""
+    runlog.log(f"AI: trying model {model}")
+    try:
+        resp = _post(model, api_key, prompt)
+    except requests.RequestException as e:
+        raise AIError(f"{model}: network error: {e}") from e
 
-
-def call_mistral(prompt: str, api_key: str, model: str,
-                 fallback_model=None, max_retries: int = 3) -> List[dict]:
-    """One grounded request that walks an ordered model chain.
-
-    Tries `model`, then each entry of `fallback_model` (a name or list of names),
-    advancing to the NEXT model the moment the current one is unavailable - quota
-    exhausted (429), empty/blocked response, invalid output, or a transient/server
-    error. Returns the JSON rows from the first model that responds. Each attempt
-    is logged so the run log shows the chain progressing. A 401/403 aborts
-    immediately (the key, not the model, is the problem). `max_retries` is
-    accepted for back-compat; fallback models are tried once each.
-    """
-    if fallback_model is None:
-        fallbacks = []
-    elif isinstance(fallback_model, (list, tuple)):
-        fallbacks = list(fallback_model)
-    else:
-        fallbacks = [fallback_model]
-    models = [model] + fallbacks
-    last_err: Optional[str] = None
-
-    for mdl in models:
-        runlog.log(f"AI: trying model {mdl}")
+    if resp.status_code == 200:
         try:
-            resp = _post(mdl, api_key, prompt)
-        except requests.RequestException as e:
-            last_err = f"{mdl}: network error: {e}"
-            runlog.warn(f"AI: {mdl} network error ({e}) - trying next model")
-            continue
+            text = _extract_text(resp.json())
+        except AIError as e:
+            raise AIError(f"{model}: {e}") from e
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise AIError(f"{model} returned invalid JSON: {e}") from e
+        if isinstance(data, dict):
+            data = data.get("sessions") or data.get("data") or [data]
+        if not isinstance(data, list):
+            raise AIError(f"{model} did not return a JSON array")
+        runlog.log(f"AI: {model} succeeded ({len(data)} session rows)")
+        return data
 
-        if resp.status_code == 200:
-            try:
-                text = _extract_text(resp.json())
-            except AIError as e:
-                last_err = f"{mdl}: {e}"
-                runlog.warn(f"AI: {mdl} returned no usable text ({e}) - trying next model")
-                continue
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError as e:
-                last_err = f"{mdl} returned invalid JSON: {e}"
-                runlog.warn(f"AI: {mdl} returned invalid JSON - trying next model")
-                continue
-            if isinstance(data, dict):
-                data = data.get("sessions") or data.get("data") or [data]
-            if not isinstance(data, list):
-                last_err = f"{mdl} did not return a JSON array"
-                runlog.warn(f"AI: {mdl} returned non-array JSON - trying next model")
-                continue
-            runlog.log(f"AI: {mdl} succeeded ({len(data)} session rows)")
-            return data
+    if resp.status_code in (401, 403):
+        raise AIError(
+            "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
+            "expired, or lacks access." % resp.status_code)
 
-        if resp.status_code in (401, 403):
-            raise AIError(
-                "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
-                "expired, or lacks access." % resp.status_code)
+    if resp.status_code == 429:
+        raise AIError(f"{model}: rate/quota limited (HTTP 429){resp.text[:160]}")
 
-        if resp.status_code == 429:
-            reason = _quota_reason(resp)
-            last_err = f"{mdl}: rate/quota limited (HTTP 429){reason}"
-            runlog.warn(f"AI: {mdl} unavailable (429{reason}) - trying next model")
-            continue
-
-        # any other error (4xx/5xx): skip to the next model
-        last_err = f"{mdl}: HTTP {resp.status_code} {resp.text[:200]}"
-        runlog.warn(f"AI: {mdl} HTTP {resp.status_code} - trying next model")
-
-    raise AIError(last_err or "All Mistral models in the fallback chain were "
-                  "unavailable. Add a valid MISTRAL_API_KEY to .env.")
-
-
-call_gemini = call_mistral  # Back-compat for older tests/imports.
+    raise AIError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -354,8 +298,8 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
         elif s.is_cat:
             s.key_points = _cat_keypoints()
         else:
-            # offline fallback: render the curriculum content as CAPS headings so
-            # the no-AI path still matches the RVNP Learning-Key-Points style.
+            # Deterministic formatting keeps the curriculum key points usable
+            # when the AI output does not supply a replacement.
             s.key_points = _format_curriculum_keypoints(s.key_points) \
                 or [s.session_title.upper()]
         s.trainee_activities = acts if len(acts) >= 3 else _default_activities(s)
@@ -393,40 +337,25 @@ def _format_curriculum_keypoints(points: List[str]) -> List[str]:
 # Public orchestration
 # --------------------------------------------------------------------------- #
 def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
-                      model: Optional[str] = None,
-                      fallback_model=None,
-                      offline_ok: bool = False) -> List[Session]:
+                      model: Optional[str] = None) -> List[Session]:
     """Run the single grounded AI call and merge the result into the skeleton.
 
-    If `offline_ok` and no key is present, fall back to deterministic defaults so
-    the pipeline still yields a complete document (used for tests / no-key demos).
-    The model chain (`model` + `fallback_model`) defaults to the .env-overridable
-    MODEL_CHAIN when the caller does not pass explicit values.
+    The model defaults to `mistral-large-latest` unless the caller pins a
+    different one via `model` or `MISTRAL_MODEL`.
     """
     # Key semantics: api_key=None  -> use the configured (.env / hard-coded) key
-    #                api_key=""    -> caller FORCES offline (no API call)
-    # (Previously the key was only loaded when offline_ok was False, so the app's
-    #  online call - api_key=None, offline_ok=True - never loaded a key and always
-    #  fell back to offline defaults. That was the real "AI never goes through" bug.)
     if api_key is None:
         api_key = load_api_key()
     if not api_key:
-        if offline_ok:
-            runlog.warn("AI: no API key - using grounded offline defaults")
-            return merge_ai_into_sessions(sessions, [], unit)
         raise AIError("No Mistral API key available.")
 
-    # Resolve the model chain (env-overridable) unless the caller pinned one.
-    if model is None or fallback_model is None:
-        chain = load_model_chain()
-        if model is None:
-            model = chain[0]
-        if fallback_model is None:
-            fallback_model = chain[1:]
-    runlog.log(f"AI: model chain = {[model] + list(fallback_model)}")
+    # Resolve the model unless the caller pinned one.
+    if model is None:
+        model = load_model_name()
+    runlog.log(f"AI: model = {model}")
 
     prompt = build_prompt(unit, sessions)
-    ai_rows = call_mistral(prompt, api_key, model, fallback_model)
+    ai_rows = call_mistral(prompt, api_key, model)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
@@ -464,29 +393,13 @@ def _config(name: str) -> str:
 def load_api_key() -> str:
     """The Mistral key, read from MISTRAL_API_KEY (env / .env, then st.secrets).
 
-    Returns '' when unset; callers treat an empty key as "no key" (offline mode,
-    or an AIError when offline is not allowed). No key is hard-coded in source.
+    Returns '' when unset; callers treat an empty key as an error. No key is
+    hard-coded in source.
     """
     return _config("MISTRAL_API_KEY")
 
 
-def load_model_chain() -> List[str]:
-    """Ordered model chain, overridable via .env.
-
-    MISTRAL_MODEL sets the primary model; MISTRAL_FALLBACK_MODELS (comma-separated,
-    or the singular MISTRAL_FALLBACK_MODEL) sets the rest. Omit both to use the
-    built-in MODEL_CHAIN. The primary is always tried first.
-    """
+def load_model_name() -> str:
+    """Primary model, overridable via `.env`."""
     primary = _config("MISTRAL_MODEL")
-    fb_raw = _config("MISTRAL_FALLBACK_MODELS") or _config("MISTRAL_FALLBACK_MODEL")
-    if not primary and not fb_raw:
-        return list(MODEL_CHAIN)
-    chain: List[str] = [primary] if primary else [MODEL_CHAIN[0]]
-    chain += [m.strip() for m in fb_raw.split(",") if m.strip()]
-    # de-duplicate while preserving order
-    seen, out = set(), []
-    for m in chain:
-        if m not in seen:
-            seen.add(m)
-            out.append(m)
-    return out or list(MODEL_CHAIN)
+    return primary or DEFAULT_MODEL
