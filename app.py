@@ -14,6 +14,7 @@ Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency)
 from __future__ import annotations
 
 import datetime as _dt
+import inspect
 import os
 import re
 import tempfile
@@ -207,13 +208,22 @@ def render_preview_and_generate() -> None:
             progress_messages.append(message)
             status_placeholder.code("\n".join(progress_messages[-25:]), language="text")
 
+        # Streamlit Cloud reruns this script on change but may keep a previously
+        # imported ai_client cached, so right after a redeploy the loaded module
+        # can predate progress_cb. Adapt to whichever signature is live.
+        supports_progress = "progress_cb" in inspect.signature(
+            ai_client.generate_sessions).parameters
         try:
             with st.spinner("Filling generative columns via one Mistral call..."):
                 st.caption("Live AI activity")
                 with runlog.timed("AI generate sessions"):
-                    sessions = ai_client.generate_sessions(os_unit, sessions,
-                                                           api_key=None,
-                                                           progress_cb=_push_progress)
+                    if supports_progress:
+                        sessions = ai_client.generate_sessions(
+                            os_unit, sessions, api_key=None,
+                            progress_cb=_push_progress)
+                    else:
+                        sessions = ai_client.generate_sessions(
+                            os_unit, sessions, api_key=None)
         except ai_client.AIError as e:
             runlog.error(f"AI call failed: {e}")
             st.error(f"AI call failed: {e}")
