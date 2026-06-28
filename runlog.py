@@ -1,9 +1,10 @@
-"""Lightweight in-memory run log shared across the pipeline and the UI.
+"""Lightweight in-memory run log shared across the pipeline.
 
-Keeps a bounded, process-global list of timestamped entries so the Streamlit
-"Log viewer" can show what is happening behind the scenes - document loading,
-unit indexing, deterministic extraction, the single AI call and per-step
-timings. No external dependencies, so any module can import it safely.
+Keeps a bounded, process-global list of timestamped entries capturing what
+happens behind the scenes - document loading, unit indexing, deterministic
+extraction, the single AI call and per-step timings. Used for internal
+diagnostics (and surfaced in server logs); no external dependencies, so any
+module can import it safely.
 """
 
 from __future__ import annotations
@@ -61,17 +62,3 @@ def timed(label: str) -> Iterator[None]:
         raise
     else:
         log(f"{label} - done in {time.perf_counter() - start:.2f}s", level="TIMING")
-
-
-def entries() -> List[LogEntry]:
-    """A snapshot copy of the current log entries (oldest first)."""
-    return list(_ENTRIES)
-
-
-def clear() -> None:
-    _ENTRIES.clear()
-
-
-def as_text() -> str:
-    """Render the whole log as plain lines for a text/code view or download."""
-    return "\n".join(f"[{e.stamp}] {e.level:<6} {e.msg}" for e in _ENTRIES)

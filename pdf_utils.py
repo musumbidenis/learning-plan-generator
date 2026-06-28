@@ -358,3 +358,11 @@ def page_starts_unit(page: "Page") -> bool:
     if len(distinct) != 1:
         return False
     return bool(unit_title_above_code(page))
+
+
+def unit_start_pages(pages: List["Page"]) -> List[int]:
+    """Indexes of pages that begin a unit, by ISCED code SHAPE (label-independent).
+
+    Shared by both the OS and curriculum parsers so unit-boundary detection has a
+    single source of truth (see `page_starts_unit`)."""
+    return [p.index for p in pages if page_starts_unit(p)]

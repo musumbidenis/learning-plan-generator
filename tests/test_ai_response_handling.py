@@ -10,6 +10,7 @@ import pytest
 
 import ai_client
 from ai_client import AIError, _extract_text, call_mistral
+from models import Session, Unit
 
 
 class FakeResp:
@@ -80,3 +81,19 @@ def test_call_mistral_aborts_immediately_on_403(monkeypatch):
     monkeypatch.setattr(ai_client, "_post", fake_post)
     with pytest.raises(AIError):
         call_mistral("p", "k", "m1")
+
+
+def test_build_prompt_includes_curriculum_only_instruction():
+    unit = Unit(unit_title="Install and Configure Software", os_code="IT/OS/123",
+                level="5", assessment_methods=["Observation"],
+                required_knowledge=["Troubleshooting basics"])
+    session = Session(week=1, session_no="1", is_cat=False,
+                      session_title="Software installation",
+                      pcs=["1.1 Install software"],
+                      key_points=["Install software safely"])
+
+    prompt = ai_client.build_prompt(unit, [session])
+
+    assert "Use only the supplied curriculum information." in prompt
+    assert "Return only the JSON array." in prompt
+    assert "ASSESSMENT COVERAGE" in prompt

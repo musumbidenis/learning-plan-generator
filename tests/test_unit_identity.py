@@ -12,6 +12,7 @@ from pdf_utils import (
     find_isced_code,
     find_tvet_code,
     page_starts_unit,
+    unit_start_pages,
     unit_title_above_code,
 )
 
@@ -97,3 +98,20 @@ def test_code_without_title_is_not_a_unit_start():
     page = _page([(30, "ISCED UNIT CODE: 0031 441 01A"),
                   (44, "UNIT DESCRIPTION")])
     assert not page_starts_unit(page)
+
+
+def test_unit_start_pages_indexes_only_real_unit_pages():
+    """The shared `unit_start_pages` (used by both parsers) returns the indexes of
+    real unit pages only - skipping a code-less cover page and a multi-code
+    summary table."""
+    cover = _page([(10, "NATIONAL OCCUPATIONAL STANDARDS"),
+                   (30, "INFORMATION MANAGER")])            # no code -> not a start
+    unit = _page([(10, "APPLY DIGITAL LITERACY"),
+                  (28, "ISCED Unit Code: 0611 551 01A"),
+                  (44, "UNIT DESCRIPTION")])
+    unit.index = 1
+    summary = _page([(10, "BASIC UNITS OF COMPETENCY"),
+                     (30, "UNIT CODE: 0031 441 01A"),
+                     (44, "UNIT CODE: 0417 441 02A")])       # several codes -> not a start
+    summary.index = 2
+    assert unit_start_pages([cover, unit, summary]) == [1]

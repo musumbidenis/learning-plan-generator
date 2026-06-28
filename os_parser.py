@@ -24,7 +24,7 @@ from pdf_utils import (
     find_tvet_code,
     is_noise_line,
     load_document,
-    page_starts_unit,
+    unit_start_pages,
     unit_title_above_code,
 )
 
@@ -76,15 +76,6 @@ _RE_ACTION_VERB = re.compile(
 def _is_header_line(text: str) -> bool:
     low = text.lower().strip()
     return any(low.startswith(p) or low == p for p in _HEADER_PHRASES)
-
-
-# --------------------------------------------------------------------------- #
-# Unit boundary detection
-# --------------------------------------------------------------------------- #
-def _unit_start_pages(pages: List[Page]) -> List[int]:
-    """Pages that begin a unit, detected by the ISCED code SHAPE (not a label),
-    so differently-worded headers across documents are handled identically."""
-    return [p.index for p in pages if page_starts_unit(p)]
 
 
 # --------------------------------------------------------------------------- #
@@ -321,7 +312,7 @@ def _build_unit(unit_pages: List[Page], cover_level: str) -> Unit:
 def index_os_units(pages: List[Page]) -> List[UnitRef]:
     """Cheap pass: list every unit's identity (title + codes) WITHOUT extracting
     elements/PCs. Used to populate the unit-selection list quickly."""
-    starts = _unit_start_pages(pages)
+    starts = unit_start_pages(pages)
     by_index = {p.index: p for p in pages}
     refs: List[UnitRef] = []
     for si, start in enumerate(starts):
@@ -347,7 +338,7 @@ def parse_os_unit(pages: List[Page], ref: UnitRef) -> Unit:
 
 def parse_os_pages(pages: List[Page]) -> List[Unit]:
     cover_level = _cover_level(pages)
-    starts = _unit_start_pages(pages)
+    starts = unit_start_pages(pages)
     units: List[Unit] = []
     for si, start in enumerate(starts):
         end = starts[si + 1] if si + 1 < len(starts) else len(pages)

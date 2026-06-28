@@ -29,7 +29,7 @@ from pdf_utils import (
     find_tvet_code,
     is_noise_line,
     load_document,
-    page_starts_unit,
+    unit_start_pages,
     unit_title_above_code,
 )
 
@@ -43,20 +43,6 @@ _RE_TABLE_END = re.compile(r"(Suggested\s+Delivery\s+Methods|Recommended\s+Resou
 _RE_LO = re.compile(r"^(\d+)\.(?!\d)\s+(.*\S)")                 # '1. Apply ...'
 _RE_SUBTOPIC = re.compile(r"^(\d+\.\d+)(?!\.\d)\s+(.*\S)")      # '1.1 Title' (exactly x.y)
 _RE_KEYPOINT = re.compile(r"^(\d+\.\d+(?:\.\d+)+)\s+(.*\S)")    # '1.1.1 ...' (x.y.z+)
-
-
-def _unit_start_pages(pages: List[Page]) -> List[int]:
-    """Pages that begin a unit, detected by the ISCED code SHAPE (not a label)
-    via the shared `page_starts_unit`.
-
-    Earlier versions matched a 'UNIT CODE: <code>' label, which broke on
-    differently-worded headers and on module-summary tables. `page_starts_unit`
-    anchors on the code shape and guards against those tables (exactly one ISCED
-    code per page + a non-empty title above it), so it captures each unit's
-    first page - including units whose header sits at the bottom of a page with
-    the rest of the unit overflowing onto the next.
-    """
-    return [p.index for p in pages if page_starts_unit(p)]
 
 
 def _table_window(unit_pages: List[Page]):
@@ -92,7 +78,7 @@ def parse_curriculum(path: str) -> List[CurriculumUnit]:
 
 
 def parse_curriculum_pages(pages: List[Page]) -> List[CurriculumUnit]:
-    starts = _unit_start_pages(pages)
+    starts = unit_start_pages(pages)
     units: List[CurriculumUnit] = []
     for si, start in enumerate(starts):
         end = starts[si + 1] if si + 1 < len(starts) else len(pages)
@@ -106,7 +92,7 @@ def parse_curriculum_pages(pages: List[Page]) -> List[CurriculumUnit]:
 def index_curriculum_units(pages: List[Page]) -> List[UnitRef]:
     """Cheap pass: list every curriculum unit's identity WITHOUT extracting the
     full content table."""
-    starts = _unit_start_pages(pages)
+    starts = unit_start_pages(pages)
     by_index = {p.index: p for p in pages}
     refs: List[UnitRef] = []
     for si, start in enumerate(starts):
