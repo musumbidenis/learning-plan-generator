@@ -133,7 +133,7 @@ def render_preview_and_generate() -> None:
     m3.metric("Curriculum sub-topics", n_sub)
     m4.metric("Level", os_unit.level or "-")
 
-    with st.expander("Performance criteria (from Occupational Standard)"):
+    with st.expander("Performance criteria - from the Occupational Standard"):
         for el in os_unit.elements:
             st.markdown(f"**{el.number}. {el.title}**")
             for pc in el.performance_criteria:
@@ -142,7 +142,7 @@ def render_preview_and_generate() -> None:
             st.caption("Evidence-Guide assessment methods: "
                        + ", ".join(os_unit.assessment_methods))
 
-    with st.expander("Learning key points (from Curriculum)"):
+    with st.expander("Learning key points - from the Curriculum"):
         for lo in curr_unit.learning_outcomes:
             st.markdown(f"**{lo.number}. {lo.title}**")
             for stp in lo.sub_topics:
@@ -156,7 +156,7 @@ def render_preview_and_generate() -> None:
     institution = d2.text_input("Institution",
                                 value="The Rift Valley National Polytechnic",
                                 key="f_inst")
-    level = d3.text_input("Level", value=os_unit.level or "6", key="f_level")
+    level = d3.text_input("Level", value=os_unit.level or "", key="f_level")
 
     d4, d5, d6 = st.columns(3)
     num_trainees = d4.text_input("Number of trainees", value="25", key="f_num")
@@ -164,9 +164,9 @@ def render_preview_and_generate() -> None:
     date_prep = d6.date_input("Date of preparation", _dt.date.today(), key="f_date")
 
     s1, s2, s3 = st.columns(3)
-    term_weeks = s1.number_input("Term length (weeks)", 1, 30, 13, key="f_weeks")
-    spw = s2.number_input("Sessions per week", 1, 4, 2, key="f_spw")
-    cat_count = s3.number_input("Number of CATs", 0, 6, 3, key="f_cats")
+    term_weeks = s1.number_input("Term length (weeks)", 1, 30, 12, key="f_weeks")
+    spw = s2.number_input("Sessions per week", 1, 10, 2, key="f_spw")
+    cat_count = s3.number_input("Number of CATs", 0, 10, 2, key="f_cats")
 
     default_cats: List[int] = []
     if cat_count:
@@ -191,7 +191,6 @@ def render_preview_and_generate() -> None:
 
     # ----- generate --------------------------------------------------------- #
     st.subheader("4. Generate Learning Plan")
-    st.caption("Will make one grounded Mistral call to fill the generative columns.")
 
     if st.button("Generate Learning Plan", type="primary"):
         runlog.log(f"Generate Learning Plan for {ss.display_code or os_unit.unit_title}")
@@ -214,8 +213,8 @@ def render_preview_and_generate() -> None:
         supports_progress = "progress_cb" in inspect.signature(
             ai_client.generate_sessions).parameters
         try:
-            with st.spinner("Filling generative columns via one Mistral call..."):
-                st.caption("Live AI activity")
+            with st.spinner("Filling generative columns..."):
+                st.caption("Logs")
                 with runlog.timed("AI generate sessions"):
                     if supports_progress:
                         sessions = ai_client.generate_sessions(
@@ -226,7 +225,7 @@ def render_preview_and_generate() -> None:
                             os_unit, sessions, api_key=None)
         except ai_client.AIError as e:
             runlog.error(f"AI call failed: {e}")
-            st.error(f"AI call failed: {e}")
+            st.error(f"Generation failed: {e}")
             return
 
         with runlog.timed("Build .docx"):
@@ -259,8 +258,6 @@ def render_preview_and_generate() -> None:
 # Header
 # --------------------------------------------------------------------------- #
 st.title("Learning Plan Generator")
-st.caption("Deterministic parsing - one grounded AI call (Mistral) - "
-           "RVNP .docx - REF KTTC/TP/LP/F07")
 
 
 # =========================================================================== #
@@ -373,7 +370,7 @@ if os_ref is not None and cu_ref is not None:
                ss.cu_sig, cu_ref.isced_code, cu_ref.title)
 
     if st.button("Extract unit details", type="primary"):
-        with st.spinner("Deterministically extracting the selected units..."):
+        with st.spinner("Extracting the selected units..."):
             runlog.log(f"Extracting OS unit '{os_ref.title}' + "
                        f"Curriculum unit '{cu_ref.title}'")
             with runlog.timed("Extract selected units"):
