@@ -200,11 +200,20 @@ def render_preview_and_generate() -> None:
         st.write(f"Planned **{len(sessions)}** sessions across "
                  f"**{inputs.term_weeks}** weeks "
                  f"(CATs at weeks {', '.join(map(str, sorted(set(cat_weeks))))}).")
+        progress_messages: List[str] = []
+        status_placeholder = st.empty()
+
+        def _push_progress(message: str) -> None:
+            progress_messages.append(message)
+            status_placeholder.code("\n".join(progress_messages[-25:]), language="text")
+
         try:
             with st.spinner("Filling generative columns via one Mistral call..."):
+                st.caption("Live AI activity")
                 with runlog.timed("AI generate sessions"):
                     sessions = ai_client.generate_sessions(os_unit, sessions,
-                                                           api_key=None)
+                                                           api_key=None,
+                                                           progress_cb=_push_progress)
         except ai_client.AIError as e:
             runlog.error(f"AI call failed: {e}")
             st.error(f"AI call failed: {e}")

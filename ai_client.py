@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import List, Optional
 
 import requests
@@ -26,7 +27,7 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 # The Mistral key is read from the environment / .env (MISTRAL_API_KEY) - see
 # load_api_key(). It is never hard-coded in source and never entered in the UI.
 
-DEFAULT_MODEL = "mistral-large-latest"
+DEFAULT_MODEL = "mistral-small-latest"
 
 
 class AIError(RuntimeError):
@@ -73,176 +74,42 @@ def build_prompt(unit: Unit, sessions: List[Session]) -> str:
     skeleton_json = json.dumps(skeleton, ensure_ascii=False, indent=1)
     level = unit.level or "6"
 
-    return f"""You are an experienced senior TVET Trainer and Industry expert preparing a Learning Plan.
+    verbs = "Identify, Explain, Apply, Demonstrate, Evaluate, Implement" \
+        if str(level) >= "6" else "Identify, Explain, Apply, Demonstrate"
 
-MANDATORY RULES
-- Use only the supplied curriculum information.
-- Never invent, infer, extrapolate, merge, expand, summarize, or introduce curriculum topics that are not explicitly present in the supplied Curriculum Learning Key Points, Performance Criteria, Required Knowledge, or Evidence Guide. If information is absent, leave it absent rather than generating new content.
-- Preserve the official curriculum meaning when formatting the key points.
-- Preserve the order of sessions exactly as supplied.
-- Avoid repeating identical learning outcomes, trainee activities, resources, or assessment statements across consecutive sessions unless required by the supplied curriculum.
-- When multiple valid outputs are possible, choose the version that most closely reflects standard TVET instructional practice and competency-based training methodology while remaining strictly within the supplied curriculum.
-- Return only a valid JSON array.
-- The JSON must conform exactly to the required schema.
-- Do not include explanations, markdown, comments, or code fences.
+    return f"""You are a senior TVET trainer and industry expert, creating a Learning Plan. You are GIVEN the unit, the term schedule, and - for each session - the official Curriculum Learning Key Points. Do NOT invent syllabus content; use what is given.
 
-UNIT INFORMATION
-Unit Title: {unit.unit_title}
-OS Code: {unit.os_code}
-Level: {level}
-
-Performance Criteria:
+UNIT: {unit.unit_title} | CODE: {unit.os_code} | LEVEL: {level}
+OS PERFORMANCE CRITERIA:
 {pcs}
+OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
+OS REQUIRED KNOWLEDGE (underpinning topics for this unit): {knowledge or "(none listed)"}
 
-Evidence Guide – Assessment Methods:
-{methods}
-
-Required Knowledge:
-{knowledge or "(none listed)"}
-
-SESSION DATA
+SESSIONS (fill each; key_points are AUTHORITATIVE, keep them):
 {skeleton_json}
 
-Each session already contains the official Curriculum Learning Key Points.
-Use those key points exactly as supplied.
+For EACH session output:
+- learning_outcomes: an array of 3 strings labelled "a.", "b.", "c.", trainee-centred, the list should always be introduced as follows: "By the end of the session, the trainee should be able to; {{The labeled list starts below}}...", rewritten from the session's PCs. Use level-appropriate verbs ({verbs}).
+- key_points: keep the supplied Curriculum content. Format as 2-3 CAPITALISED headings, each followed by ~3 short bullet sub-points drawn from the supplied content. Do NOT invent new topics. If a session's supplied key_points only restate the performance criterion (i.e. no curriculum content was available for this unit), you MAY draw concrete, relevant sub-points from the OS REQUIRED KNOWLEDGE topics listed above.
+- trainee_activities: EXACTLY 3 bullets, each starting "- " and NAMING an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then a line "Follow up Activity:", then "1. <assignment>."
+- resources: at least 2 bullets - real textbooks, presentations, tools, or online docs relevant to the topic.
+- assessments: derived from the Evidence-Guide methods, grouped under "Knowledge Checks:", "Skills:" and "Attitudes:" with numbered items.
 
-OUTPUT REQUIREMENTS
-Generate one JSON object for every session.
+CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = graded Knowledge plus Attitudes (self-reflection).
 
-Each session object must contain these fields:
-- week
-- session_no
-- is_cat
-- session_title
-- learning_outcomes
-- key_points
-- trainee_activities
-- resources
-- assessments
-
-LEARNING OUTCOMES
-Generate at least three learning outcomes unless the session is a CAT session.
-Requirements:
-- Return an array containing at least three strings.
-- Label them:
-  - a.
-  - b.
-  - c.
-  - etc.
-- Use measurable action verbs such as Identify, Explain, Demonstrate, Apply, Analyse, Evaluate, Interpret, Perform, Construct, or Differentiate.
-- Every learning outcome must be traceable to one or more supplied Curriculum Learning Key Points and support the supplied Performance Criteria.
-- Where appropriate, incorporate the Required Knowledge.
-- Do not introduce topics that are not present in the supplied curriculum.
-
-KEY POINTS
-- Use only the supplied Curriculum Learning Key Points.
-- Do not invent, expand, summarize, merge, reorder, or omit curriculum content.
-- Improve formatting only.
-- Convert each major topic into a CAPITALISED heading.
-- Preserve the existing topic hierarchy.
-- List the supplied content beneath the appropriate heading using bullet points.
-- Preserve all curriculum wording and meaning.
-
-TRAINEE ACTIVITIES
-Generate at least three trainee activities unless the session is a CAT session.
-Requirements:
-- Each activity must directly support one or more learning outcomes.
-- Each activity must use an active-learning method appropriate for competency-based training.
-- Activities should progress logically from knowledge acquisition to practical application where appropriate.
-
-RESOURCES
-Provide at least two appropriate instructional resources.
-Resources must directly support the trainee activities and be relevant to the unit of competency.
-Use realistic resources such as:
-- Learning Guides
-- Whiteboard
-- Flip charts
-- Projector
-- Samples
-- Manuals
-- Internet resources
-- Relevant tools and equipment
-Do not include resources that are unrelated to the supplied curriculum.
-
-ASSESSMENTS
-Return an object containing exactly these sections:
-- Knowledge Checks
-- Skills
-- Attitudes
-Each assessment activity must directly measure one or more generated learning outcomes and align with the supplied Evidence Guide Assessment Methods and Performance Criteria.
-
-SPECIAL RULES FOR CAT SESSIONS
-If "is_cat" is true, override the normal rules with the following requirements.
-
-Learning Outcomes
-- Generate exactly one assessment-focused learning outcome.
-
-Key Points
-Use exactly this heading:
-- ASSESSMENT COVERAGE
-Do not use any additional headings.
-
-Trainee Activities
-Include exactly this activity:
-- Complete the Continuous Assessment Test (CAT)
-Do not generate teaching or learning activities for CAT sessions.
-
-Resources
-Include at minimum:
-- Assessment Tool
-- Writing materials
-Additional relevant assessment resources may be included.
-
-Assessments
-Include at least:
-- Knowledge Checks
-- Attitudes
-Include Skills only where appropriate.
-
-TERMINOLOGY
-Always use:
-- trainee
-- trainer
-- unit of competency
-- learning outcome
-- performance criteria
-- competency
-- assessment
-- Continuous Assessment Test (CAT)
-
-Never use:
-- student
-- learner
-- pupil
-- teacher
-- lecturer
-- notes
-
-FINAL VALIDATION
-Before returning the JSON:
-- Validate that the JSON conforms exactly to the required schema.
-- Validate that every session object contains every required field.
-- Validate that the sessions remain in the supplied order.
-- Validate that non-CAT sessions contain at least three learning outcomes and at least three trainee activities.
-- Validate that CAT sessions follow all CAT-specific rules.
-- Validate that all assessments align with the generated learning outcomes, Performance Criteria, and Evidence Guide.
-- Validate that no curriculum content has been invented, inferred, expanded, merged, or omitted.
-- Validate that the required terminology has been used consistently.
-- If any validation fails, correct the output before returning it.
-- Return only the JSON array.
-- Return only the JSON array and no additional text.
+TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY the JSON array.
 """
 
 
 # --------------------------------------------------------------------------- #
 # HTTP call
 # --------------------------------------------------------------------------- #
-def _post(model: str, api_key: str, prompt: str, timeout: int = 180) -> dict:
+def _post(model: str, api_key: str, prompt: str, timeout: int = 120) -> dict:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.35,
-        "max_tokens": 32000,
+        "temperature": 0.2,
+        "max_tokens": 14000,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -287,39 +154,63 @@ def _extract_text(payload: dict) -> str:
     return text
 
 
-def call_mistral(prompt: str, api_key: str, model: str) -> List[dict]:
-    """One grounded request with no fallback chain."""
-    runlog.log(f"AI: trying model {model}")
-    try:
-        resp = _post(model, api_key, prompt)
-    except requests.RequestException as e:
-        raise AIError(f"{model}: network error: {e}") from e
-
-    if resp.status_code == 200:
+def _emit_progress(progress_cb, message: str) -> None:
+    runlog.log(message)
+    if progress_cb is not None:
         try:
-            text = _extract_text(resp.json())
-        except AIError as e:
-            raise AIError(f"{model}: {e}") from e
+            progress_cb(message)
+        except Exception:  # noqa: BLE001 - never break generation because UI logging failed
+            pass
+
+
+def call_mistral(prompt: str, api_key: str, model: str,
+                 progress_cb=None) -> List[dict]:
+    """One grounded request with short retry for transient network failures."""
+    _emit_progress(progress_cb, f"AI: trying model {model}")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, 4):
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            raise AIError(f"{model} returned invalid JSON: {e}") from e
-        if isinstance(data, dict):
-            data = data.get("sessions") or data.get("data") or [data]
-        if not isinstance(data, list):
-            raise AIError(f"{model} did not return a JSON array")
-        runlog.log(f"AI: {model} succeeded ({len(data)} session rows)")
-        return data
+            resp = _post(model, api_key, prompt)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_error = e
+            if attempt < 3:
+                _emit_progress(progress_cb,
+                               f"AI: transient network issue for {model}, retrying ({attempt}/3)")
+                time.sleep(attempt * 0.5)
+                continue
+            raise AIError(f"{model}: network error: {e}") from e
+        except requests.RequestException as e:
+            raise AIError(f"{model}: network error: {e}") from e
 
-    if resp.status_code in (401, 403):
-        raise AIError(
-            "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
-            "expired, or lacks access." % resp.status_code)
+        if resp.status_code == 200:
+            try:
+                text = _extract_text(resp.json())
+            except AIError as e:
+                raise AIError(f"{model}: {e}") from e
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as e:
+                raise AIError(f"{model} returned invalid JSON: {e}") from e
+            if isinstance(data, dict):
+                data = data.get("sessions") or data.get("data") or [data]
+            if not isinstance(data, list):
+                raise AIError(f"{model} did not return a JSON array")
+            _emit_progress(progress_cb, f"AI: {model} succeeded ({len(data)} session rows)")
+            return data
 
-    if resp.status_code == 429:
-        raise AIError(f"{model}: rate/quota limited (HTTP 429){resp.text[:160]}")
+        if resp.status_code in (401, 403):
+            raise AIError(
+                "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
+                "expired, or lacks access." % resp.status_code)
 
-    raise AIError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
+        if resp.status_code == 429:
+            raise AIError(f"{model}: rate/quota limited (HTTP 429){resp.text[:160]}")
+
+        raise AIError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
+
+    if last_error is not None:
+        raise AIError(f"{model}: network error: {last_error}") from last_error
+    raise AIError(f"{model}: request failed")
 
 
 # --------------------------------------------------------------------------- #
@@ -471,7 +362,7 @@ def _format_curriculum_keypoints(points: List[str]) -> List[str]:
 # Public orchestration
 # --------------------------------------------------------------------------- #
 def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
-                      model: Optional[str] = None) -> List[Session]:
+                      model: Optional[str] = None, progress_cb=None) -> List[Session]:
     """Run the single grounded AI call and merge the result into the skeleton.
 
     The model defaults to `mistral-large-latest` unless the caller pins a
@@ -489,7 +380,8 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     runlog.log(f"AI: model = {model}")
 
     prompt = build_prompt(unit, sessions)
-    ai_rows = call_mistral(prompt, api_key, model)
+    _emit_progress(progress_cb, "AI: prompt prepared")
+    ai_rows = call_mistral(prompt, api_key, model, progress_cb=progress_cb)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 

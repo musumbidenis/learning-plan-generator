@@ -7,6 +7,7 @@ That must raise a clean AIError and stop, not fall back to another model.
 """
 
 import pytest
+import requests
 
 import ai_client
 from ai_client import AIError, _extract_text, call_mistral
@@ -83,6 +84,45 @@ def test_call_mistral_aborts_immediately_on_403(monkeypatch):
         call_mistral("p", "k", "m1")
 
 
+def test_call_mistral_retries_transient_timeouts(monkeypatch):
+    attempts = []
+
+    def fake_post(model, api_key, prompt, timeout=180):
+        attempts.append(timeout)
+        if len(attempts) < 3:
+            raise requests.Timeout("timed out")
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
+
+    assert call_mistral("p", "k", "m1") == []
+    assert len(attempts) == 3
+
+
+def test_call_mistral_retries_connection_reset(monkeypatch):
+    attempts = []
+
+    def fake_post(model, api_key, prompt, timeout=180):
+        attempts.append(timeout)
+        if len(attempts) < 3:
+            raise requests.ConnectionError(
+                "Connection aborted.",
+                ConnectionResetError(10054, "An existing connection was forcibly closed", None, 10054, None),
+            )
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
+
+    assert call_mistral("p", "k", "m1") == []
+    assert len(attempts) == 3
+
+
+def test_default_model_prefers_smaller_variant():
+    assert ai_client.DEFAULT_MODEL == "mistral-small-latest"
+
+
 def test_build_prompt_includes_curriculum_only_instruction():
     unit = Unit(unit_title="Install and Configure Software", os_code="IT/OS/123",
                 level="5", assessment_methods=["Observation"],
@@ -94,6 +134,6 @@ def test_build_prompt_includes_curriculum_only_instruction():
 
     prompt = ai_client.build_prompt(unit, [session])
 
-    assert "Use only the supplied curriculum information." in prompt
-    assert "Return only the JSON array." in prompt
+    assert "Do NOT invent syllabus content; use what is given." in prompt
+    assert "Return ONLY the JSON array." in prompt
     assert "ASSESSMENT COVERAGE" in prompt
