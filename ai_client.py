@@ -104,7 +104,7 @@ The supplied session titles and Curriculum Learning Key Points are auto-extracte
 - Every key point you output must be a complete, coherent sentence traceable to the supplied curriculum, Performance Criteria, or Required Knowledge.
 - Apply the same repairs to each session_title: return a clean, complete, correctly-capitalised title with the same meaning; never output a truncated or fragmentary title.
 
-CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = graded Knowledge plus Attitudes (self-reflection).
+CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = "-Graded Knowledge.".
 
 TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY the JSON array.
 """
@@ -273,22 +273,14 @@ def _default_learning_outcomes(s: Session) -> List[str]:
 
 
 def _default_activities(s: Session) -> List[str]:
-    marks = 0 if s.is_cat else 15
-    if s.is_cat:
-        return [
-            "- Engage in a Quiz Game to review key concepts.",
-            "- Participate in Q&A Sessions to clarify doubts.",
-            "- Complete the CAT.",
-            "Follow up Activity:",
-            "1. Review feedback and identify areas for improvement. (0 Marks)",
-            "Due date:",
-        ]
+    # CAT rows are handled deterministically before this point; this default
+    # only ever fills content (non-CAT) sessions.
     return [
         "- Engage in a Group Discussion to explore the topic.",
         "- Participate in a Think-Pair-Share on key concepts.",
         "- Conduct a Case Study applying the concepts.",
         "Follow up Activity:",
-        f"1. Complete a practical exercise on {s.session_title.lower()}. ({marks} Marks)",
+        f"1. Complete a practical exercise on {s.session_title.lower()}. (15 Marks)",
         "Due date:",
     ]
 
@@ -303,8 +295,8 @@ def _default_assessments(unit: Unit, s: Session) -> List[str]:
 
 
 def _default_resources(s: Session) -> List[str]:
-    if s.is_cat:
-        return ["- CAT question paper", "- Writing materials", "- Course notes and textbooks"]
+    # CAT rows are handled deterministically before this point; this default
+    # only ever fills content (non-CAT) sessions.
     return [f"- Textbooks on {s.session_title}", "- PowerPoint presentations on the topic",
             "- Relevant online documentation"]
 
@@ -319,6 +311,16 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     """
     for i, s in enumerate(sessions):
         row = ai_rows[i] if i < len(ai_rows) else {}
+
+        # CAT rows are fully deterministic - fixed wording every time, never the
+        # AI's output. The planner already gives them a clean title.
+        if s.is_cat:
+            s.learning_outcomes = _cat_learning_outcomes()
+            s.key_points = _cat_keypoints()
+            s.trainee_activities = _cat_activities()
+            s.resources = _cat_resources()
+            s.assessments = _cat_assessments()
+            continue
 
         # session_title: accept the AI's data-quality-repaired title if given,
         # otherwise keep the deterministic skeleton title. Set before the
@@ -336,8 +338,6 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
         s.learning_outcomes = lo or _default_learning_outcomes(s)
         if ai_kp:
             s.key_points = ai_kp                       # AI already CAPS-formatted
-        elif s.is_cat:
-            s.key_points = _cat_keypoints()
         else:
             # Deterministic formatting keeps the curriculum key points usable
             # when the AI output does not supply a replacement.
@@ -350,8 +350,27 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     return sessions
 
 
+def _cat_learning_outcomes() -> List[str]:
+    return [
+        "By the end of the session, the trainee should be able to:",
+        "a. Demonstrate competence in the learning outcomes covered.",
+    ]
+
+
 def _cat_keypoints() -> List[str]:
-    return ["ASSESSMENT COVERAGE", "ASSESSMENT STRATEGY"]
+    return ["ASSESSMENT COVERAGE"]
+
+
+def _cat_activities() -> List[str]:
+    return ["- Complete the Continous Assessment Test(CAT)."]
+
+
+def _cat_resources() -> List[str]:
+    return ["Assessment Tool(s) and/or Observation Checklist", "Assessor Guide"]
+
+
+def _cat_assessments() -> List[str]:
+    return ["-Graded Knowledge."]
 
 
 def _format_curriculum_keypoints(points: List[str]) -> List[str]:

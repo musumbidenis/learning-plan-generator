@@ -27,6 +27,7 @@ from docx.shared import Pt, RGBColor, Cm
 from models import PlanInputs, Session, Unit
 
 FONT_NAME = "Times New Roman"
+FONT_SIZE = 12.0          # body / table font size (pt) for the whole plan
 
 SESSION_HEADERS = [
     "Week", "Session No", "Session Title", "Specific Learning Outcomes",
@@ -41,7 +42,7 @@ SESSION_WIDTHS = [0.55, 0.7, 1.5, 2.1, 2.3, 2.4, 1.8, 1.9, 1.2]
 # Low-level helpers
 # --------------------------------------------------------------------------- #
 def _set_cell_text(cell, lines: List[str], bold_predicate: Optional[Callable] = None,
-                   size: float = 8.0, header: bool = False) -> None:
+                   size: float = FONT_SIZE, header: bool = False) -> None:
     """Write `lines` into a table cell, one paragraph per line.
 
     `bold_predicate(line) -> bool` decides which whole lines render bold.
@@ -140,7 +141,7 @@ def _add_label_value_row(table, l1, v1, l2, v2) -> None:
     value2 = c[7].merge(c[8])
     for cell, text, is_label in ((label1, l1, True), (value1, v1, False),
                                  (label2, l2, True), (value2, v2, False)):
-        _set_cell_text(cell, [text], size=10)
+        _set_cell_text(cell, [text], size=FONT_SIZE)
         if is_label:
             for p in cell.paragraphs:
                 for r in p.runs:
@@ -153,7 +154,7 @@ def _add_fullwidth_row(table, lines, bold_predicate) -> None:
     merged = c[0]
     for cell in c[1:]:
         merged = merged.merge(cell)
-    _set_cell_text(merged, lines, size=10, bold_predicate=bold_predicate)
+    _set_cell_text(merged, lines, size=FONT_SIZE, bold_predicate=bold_predicate)
 
 
 def _skill_task_lines(unit: Unit) -> List[str]:
@@ -204,22 +205,22 @@ def add_session_grid(table, sessions: List[Session]) -> None:
     """Append the column-header row and one row per session to the table."""
     head_cells = table.add_row().cells
     for cell, head in zip(head_cells, SESSION_HEADERS):
-        _set_cell_text(cell, [head], size=8, header=True)
+        _set_cell_text(cell, [head], size=FONT_SIZE, header=True)
 
     for s in sessions:
         cells = table.add_row().cells
-        _set_cell_text(cells[0], [str(s.week)], size=8)
-        _set_cell_text(cells[1], [s.session_no], size=8)
-        _set_cell_text(cells[2], [s.session_title], size=8)
-        _set_cell_text(cells[3], s.learning_outcomes, size=8,
+        _set_cell_text(cells[0], [str(s.week)], size=FONT_SIZE)
+        _set_cell_text(cells[1], [s.session_no], size=FONT_SIZE)
+        _set_cell_text(cells[2], [s.session_title], size=FONT_SIZE)
+        _set_cell_text(cells[3], s.learning_outcomes, size=FONT_SIZE,
                        bold_predicate=_outcome_bold)
-        _set_cell_text(cells[4], s.key_points, size=8, bold_predicate=_keypoint_bold)
-        _set_cell_text(cells[5], s.trainee_activities, size=8,
+        _set_cell_text(cells[4], s.key_points, size=FONT_SIZE, bold_predicate=_keypoint_bold)
+        _set_cell_text(cells[5], s.trainee_activities, size=FONT_SIZE,
                        bold_predicate=_activity_bold)
-        _set_cell_text(cells[6], s.resources, size=8)
-        _set_cell_text(cells[7], s.assessments, size=8,
+        _set_cell_text(cells[6], s.resources, size=FONT_SIZE)
+        _set_cell_text(cells[7], s.assessments, size=FONT_SIZE,
                        bold_predicate=_assessment_bold)
-        _set_cell_text(cells[8], [""], size=8)        # Reflections & Date - blank
+        _set_cell_text(cells[8], [""], size=FONT_SIZE)   # Reflections & Date - blank
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +237,7 @@ def _setup_page(doc: Document) -> None:
     # default style font
     normal = doc.styles["Normal"]
     normal.font.name = FONT_NAME
-    normal.font.size = Pt(10)
+    normal.font.size = Pt(FONT_SIZE)
     rpr = normal.element.get_or_add_rPr()
     rfonts = rpr.find(qn("w:rFonts"))
     if rfonts is None:
