@@ -102,8 +102,9 @@ def plan_sessions(curriculum_unit: CurriculumUnit, os_unit: Optional[Unit],
         wi += 1
 
     # 4) flatten + stamp deterministic fields
+    #    Each session is numbered by its slot WITHIN the week, so a 2-per-week
+    #    term reads 1, 2 each week (never a single combined "1&2" label).
     planned: List[Session] = []
-    session_no = "1&2" if spw == 2 else None
     for wi, week_sessions in enumerate(weeks, start=1):
         is_final_week = (wi == term_weeks)
         # In the final week, push any CAT to the end of the week.
@@ -113,10 +114,6 @@ def plan_sessions(curriculum_unit: CurriculumUnit, os_unit: Optional[Unit],
             week_sessions = non + cats
         for slot, s in enumerate(week_sessions, start=1):
             s.week = wi
-            if session_no:
-                s.session_no = session_no
-            else:
-                # e.g. spw=1 -> "1"; spw=3 -> "1&2&3" style not needed, label slot
-                s.session_no = str(slot)
+            s.session_no = str(slot)
             planned.append(s)
     return planned

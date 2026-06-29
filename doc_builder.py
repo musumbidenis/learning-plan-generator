@@ -1,8 +1,10 @@
 """Module D - doc_builder: render the Learning Plan to a .docx (RVNP format).
 
-A4 portrait, Times New Roman, "Table Grid". Two tables:
-  1) a header-info table (paired label/value cells + merged Skill/Benchmark rows)
-  2) the 9-column session table (REF KTTC/TP/LP/F07).
+A4 LANDSCAPE, Times New Roman, "Table Grid". ONE combined table that autofits
+the page width:
+  * header-info rows (paired label/value cells + merged Skill/Benchmark rows),
+    laid onto the 9-column grid via cell merges, then
+  * the 9-column session grid (REF KTTC/TP/LP/F07).
 
 Every list is rendered LINE-BY-LINE (each string -> its own paragraph). We never
 iterate a raw string, which is what causes the 'G / r / o / u / p' char-splitting
@@ -18,6 +20,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor, Cm
 
@@ -99,25 +102,58 @@ def _outcome_bold(line: str) -> bool:
     return line.strip().lower().startswith("by the end")
 
 
-def _set_col_widths(table, widths_cm: List[float]) -> None:
-    table.autofit = False
+def _set_table_width_pct(table, pct: int = 100) -> None:
+    """Force the table preferred width to `pct`% of the page (AutoFit to Window)."""
+    tblPr = table._element.tblPr
+    tblW = tblPr.find(qn("w:tblW"))
+    if tblW is None:
+        tblW = OxmlElement("w:tblW")
+        tblPr.append(tblW)
+    tblW.set(qn("w:type"), "pct")
+    tblW.set(qn("w:w"), str(int(pct * 50)))   # width in fiftieths of a percent
+
+
+def _autofit_widths(table, widths_cm: List[float]) -> None:
+    """AutoFit the table to the page width while keeping column proportions.
+
+    `table.autofit = True` lets Word recompute column widths; the preferred
+    cell widths (set only on full 9-cell grid rows) seed the proportions, and a
+    100%-of-page table width stretches the grid to fill the landscape page.
+    """
+    table.autofit = True
+    _set_table_width_pct(table, 100)
     for row in table.rows:
+        if len(row.cells) != len(widths_cm):
+            continue   # skip merged header rows; the grid columns drive their span
         for cell, w in zip(row.cells, widths_cm):
             cell.width = Cm(w)
 
 
 # --------------------------------------------------------------------------- #
-# Header info table
+# Header info rows (laid onto the shared 9-column grid via cell merges)
 # --------------------------------------------------------------------------- #
 def _add_label_value_row(table, l1, v1, l2, v2) -> None:
-    row = table.add_row().cells
-    for cell, text, is_label in ((row[0], l1, True), (row[1], v1, False),
-                                 (row[2], l2, True), (row[3], v2, False)):
+    c = table.add_row().cells          # 9 grid cells
+    label1 = c[0].merge(c[1]).merge(c[2])
+    value1 = c[3].merge(c[4])
+    label2 = c[5].merge(c[6])
+    value2 = c[7].merge(c[8])
+    for cell, text, is_label in ((label1, l1, True), (value1, v1, False),
+                                 (label2, l2, True), (value2, v2, False)):
         _set_cell_text(cell, [text], size=10)
         if is_label:
             for p in cell.paragraphs:
                 for r in p.runs:
                     r.bold = True
+
+
+def _add_fullwidth_row(table, lines, bold_predicate) -> None:
+    """A single row whose 9 grid cells are merged into one full-width cell."""
+    c = table.add_row().cells
+    merged = c[0]
+    for cell in c[1:]:
+        merged = merged.merge(cell)
+    _set_cell_text(merged, lines, size=10, bold_predicate=bold_predicate)
 
 
 def _skill_task_lines(unit: Unit) -> List[str]:
@@ -135,12 +171,9 @@ def _benchmark_lines(unit: Unit) -> List[str]:
     return out
 
 
-def build_header_table(doc: Document, unit: Unit, inputs: PlanInputs,
-                       display_code: str) -> None:
-    table = doc.add_table(rows=0, cols=4)
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-
+def add_header_rows(table, unit: Unit, inputs: PlanInputs,
+                    display_code: str) -> None:
+    """Append the header-info rows to the shared 9-column session table."""
     _add_label_value_row(table, "Unit of Competence", unit.unit_title,
                          "Unit Code", display_code)
     _add_label_value_row(table, "Name of Trainer", inputs.trainer_name,
@@ -153,17 +186,13 @@ def build_header_table(doc: Document, unit: Unit, inputs: PlanInputs,
                          "Class", inputs.class_code)
 
     # Merged 'Skill or Job Task' row
-    srow = table.add_row().cells
-    smerged = srow[0].merge(srow[1]).merge(srow[2]).merge(srow[3])
-    _set_cell_text(smerged, ["Skill or Job Task:"] + _skill_task_lines(unit), size=10,
-                   bold_predicate=lambda l: l.strip().lower().startswith("skill or job"))
+    _add_fullwidth_row(
+        table, ["Skill or Job Task:"] + _skill_task_lines(unit),
+        bold_predicate=lambda l: l.strip().lower().startswith("skill or job"))
 
     # Merged 'Benchmark or Criteria' row
-    brow = table.add_row().cells
-    bmerged = brow[0].merge(brow[1]).merge(brow[2]).merge(brow[3])
-    _set_cell_text(
-        bmerged, ["Benchmark or Criteria to be used:"] + _benchmark_lines(unit),
-        size=10,
+    _add_fullwidth_row(
+        table, ["Benchmark or Criteria to be used:"] + _benchmark_lines(unit),
         bold_predicate=lambda l: l.strip().lower().startswith("benchmark or criteria")
         or bool(re.match(r"^\d+\.\s+\D", l.strip())))
 
@@ -171,13 +200,10 @@ def build_header_table(doc: Document, unit: Unit, inputs: PlanInputs,
 # --------------------------------------------------------------------------- #
 # Session table
 # --------------------------------------------------------------------------- #
-def build_session_table(doc: Document, sessions: List[Session]) -> None:
-    table = doc.add_table(rows=1, cols=9)
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-
-    # header row
-    for cell, head in zip(table.rows[0].cells, SESSION_HEADERS):
+def add_session_grid(table, sessions: List[Session]) -> None:
+    """Append the column-header row and one row per session to the table."""
+    head_cells = table.add_row().cells
+    for cell, head in zip(head_cells, SESSION_HEADERS):
         _set_cell_text(cell, [head], size=8, header=True)
 
     for s in sessions:
@@ -195,22 +221,16 @@ def build_session_table(doc: Document, sessions: List[Session]) -> None:
                        bold_predicate=_assessment_bold)
         _set_cell_text(cells[8], [""], size=8)        # Reflections & Date - blank
 
-    # widths
-    usable = 19.0   # cm (A4 portrait, ~1cm margins)
-    total = sum(SESSION_WIDTHS)
-    widths = [w / total * usable for w in SESSION_WIDTHS]
-    _set_col_widths(table, widths)
-
 
 # --------------------------------------------------------------------------- #
 # Document assembly
 # --------------------------------------------------------------------------- #
 def _setup_page(doc: Document) -> None:
     sec = doc.sections[0]
-    # A4 portrait
-    sec.orientation = WD_ORIENT.PORTRAIT
-    sec.page_width = Cm(21.0)
-    sec.page_height = Cm(29.7)
+    # A4 landscape
+    sec.orientation = WD_ORIENT.LANDSCAPE
+    sec.page_width = Cm(29.7)
+    sec.page_height = Cm(21.0)
     for m in ("top_margin", "bottom_margin", "left_margin", "right_margin"):
         setattr(sec, m, Cm(1.0))
     # default style font
@@ -238,9 +258,18 @@ def build_document(unit: Unit, sessions: List[Session], inputs: PlanInputs,
     trun.font.name = FONT_NAME
     trun.font.size = Pt(14)
 
-    build_header_table(doc, unit, inputs, display_code or unit.os_code)
-    doc.add_paragraph()
-    build_session_table(doc, sessions)
+    # One combined table: header-info rows first, then the 9-column session grid.
+    table = doc.add_table(rows=0, cols=9)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    add_header_rows(table, unit, inputs, display_code or unit.os_code)
+    add_session_grid(table, sessions)
+
+    # AutoFit the single table to the landscape page width.
+    total = sum(SESSION_WIDTHS)
+    usable = 27.7   # cm (A4 landscape, ~1cm margins)
+    widths = [w / total * usable for w in SESSION_WIDTHS]
+    _autofit_widths(table, widths)
     return doc
 
 

@@ -118,7 +118,7 @@ class Session:
     """
     # --- deterministic skeleton -------------------------------------------- #
     week: int = 0
-    session_no: str = "1&2"
+    session_no: str = "1"
     is_cat: bool = False
     session_title: str = ""
     pcs: List[str] = field(default_factory=list)          # full PC strings (x.y text)

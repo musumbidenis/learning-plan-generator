@@ -19,7 +19,11 @@ def test_schedule_spans_exact_term_weeks(prog_curr_unit, prog_os_unit):
     sessions = planner.plan_sessions(prog_curr_unit, prog_os_unit, inp)
     weeks = sorted({s.week for s in sessions})
     assert weeks[0] == 1 and weeks[-1] == 13
-    assert all(s.session_no == "1&2" for s in sessions)
+    # Each week numbers its sessions 1, 2, ... separately (never a combined "1&2").
+    assert all("&" not in s.session_no for s in sessions)
+    for w in weeks:
+        nos = [s.session_no for s in sessions if s.week == w]
+        assert nos == [str(i) for i in range(1, len(nos) + 1)]
 
 
 def test_cats_placed_at_configured_weeks(prog_curr_unit, prog_os_unit):

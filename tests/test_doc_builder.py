@@ -22,20 +22,29 @@ def _build(prog_curr_unit, prog_os_unit):
     return Document(io.BytesIO(data)), sessions
 
 
-def test_two_tables_and_headers(prog_curr_unit, prog_os_unit):
+# Combined table layout: 5 label/value rows + 2 full-width rows = 7 header-info
+# rows (indices 0-6), then the session column-header row (index 7), then one row
+# per session (indices 8+).
+_SESSION_HEADER_ROW = 7
+_FIRST_SESSION_ROW = 8
+
+
+def test_single_combined_table(prog_curr_unit, prog_os_unit):
     doc, sessions = _build(prog_curr_unit, prog_os_unit)
-    assert len(doc.tables) == 2
-    header = [c.text for c in doc.tables[1].rows[0].cells]
+    assert len(doc.tables) == 1
+    table = doc.tables[0]
+    header = [c.text for c in table.rows[_SESSION_HEADER_ROW].cells]
     assert header == doc_builder.SESSION_HEADERS
     # session rows == planned sessions
-    assert len(doc.tables[1].rows) - 1 == len(sessions)
+    assert len(table.rows) - _FIRST_SESSION_ROW == len(sessions)
 
 
-def test_header_table_values(prog_curr_unit, prog_os_unit):
+def test_header_rows_values(prog_curr_unit, prog_os_unit):
     doc, _ = _build(prog_curr_unit, prog_os_unit)
     rows = doc.tables[0].rows
-    assert rows[0].cells[1].text == "APPLY COMPUTER PROGRAMMING PRINCIPLES"
-    assert rows[0].cells[3].text == "IT/CU/ICTA/CC/02/5/MA"
+    # value1 spans grid cols 3-4, value2 spans cols 7-8 (merged cells repeat)
+    assert rows[0].cells[3].text == "APPLY COMPUTER PROGRAMMING PRINCIPLES"
+    assert rows[0].cells[7].text == "IT/CU/ICTA/CC/02/5/MA"
     # Skill/Job task row lists the element titles
     assert "Apply computer programming skills" in rows[5].cells[0].text
     # Benchmark row keeps PC numbering
@@ -44,7 +53,7 @@ def test_header_table_values(prog_curr_unit, prog_os_unit):
 
 def test_no_char_splitting_in_cells(prog_curr_unit, prog_os_unit):
     doc, _ = _build(prog_curr_unit, prog_os_unit)
-    activities_cell = doc.tables[1].rows[1].cells[5]
+    activities_cell = doc.tables[0].rows[_FIRST_SESSION_ROW].cells[5]
     # each activity is its own paragraph; none is a single character
     paras = [p.text for p in activities_cell.paragraphs if p.text]
     assert len(paras) >= 3
@@ -53,5 +62,5 @@ def test_no_char_splitting_in_cells(prog_curr_unit, prog_os_unit):
 
 def test_reflections_column_blank(prog_curr_unit, prog_os_unit):
     doc, _ = _build(prog_curr_unit, prog_os_unit)
-    for row in doc.tables[1].rows[1:]:
+    for row in doc.tables[0].rows[_FIRST_SESSION_ROW:]:
         assert row.cells[8].text.strip() == ""
