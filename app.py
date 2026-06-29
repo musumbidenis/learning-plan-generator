@@ -1,17 +1,11 @@
 """Streamlit UI - Learning Plan Generator (KSTVET REF KTTC/TP/LP/F07, RVNP).
 
-A 3-step FORM WIZARD (one focus per screen, validated before advancing):
+Manual, sequential flow (the two source documents are chosen independently):
 
-  1. Occupational Standard      -> upload -> auto-extract units -> pick OS unit
-  2. Curriculum                 -> upload -> auto-extract units -> pick CU unit
-     (leaving step 2 deterministically extracts both selected units)
-  3. Plan details & generate    -> unit summary + form + one grounded Mistral
-                                   call -> download .docx
-
-Navigation is a `streamlit-antd-components` stepper plus Back/Next buttons,
-driven by `ss.step`. Future steps stay locked until the current one validates;
-the generated plan is cached (keyed by the units + inputs) so going Back and
-Next again never repeats the paid AI call unless something actually changed.
+  1. Upload the Occupational Standard  -> units auto-extracted -> pick the OS unit
+  2. Upload the Curriculum             -> units auto-extracted -> pick the CU unit
+  3. Extract unit details (deterministic, no AI) -> preview
+  4. Generate Learning Plan (one grounded Mistral call) -> .docx
 
 The Mistral key + model are configured in ai_client.py (not entered in the UI).
 Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency).
@@ -19,16 +13,14 @@ Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency)
 
 from __future__ import annotations
 
-import dataclasses
 import datetime as _dt
 import inspect
 import os
 import re
 import tempfile
-from typing import List, Optional
+from typing import List
 
 import streamlit as st
-import streamlit_antd_components as sac
 
 import ai_client
 import curriculum_parser as cp
@@ -43,17 +35,13 @@ st.set_page_config(page_title="Learning Plan Generator", layout="wide")
 
 ss = st.session_state
 _DEFAULTS = dict(
-    # wizard position
-    step=1, nav_error=None,
     # Occupational Standard side
-    os_sig=None, os_path=None, os_pages=None, os_refs=[], os_ref=None,
+    os_sig=None, os_path=None, os_pages=None, os_refs=[],
     # Curriculum side
-    cu_sig=None, cu_path=None, cu_pages=None, cu_refs=[], cu_ref=None,
+    cu_sig=None, cu_path=None, cu_pages=None, cu_refs=[],
     # extraction output
     extracted=False, extracted_key=None,
     os_unit=None, curr_unit=None, display_code="",
-    # generation cache
-    gen_key=None, docx_bytes=None, sessions=None,
 )
 for _k, _v in _DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -61,16 +49,9 @@ for _k, _v in _DEFAULTS.items():
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument."
              "wordprocessingml.document")
 
-STEP_DEFS = [
-    ("Occupational Standard", "Upload & pick the OS unit"),
-    ("Curriculum", "Upload & pick the curriculum unit"),
-    ("Plan details & generate", "Configure, then create & download"),
-]
-N_STEPS = len(STEP_DEFS)
-
 
 # --------------------------------------------------------------------------- #
-# Generic helpers
+# Helpers
 # --------------------------------------------------------------------------- #
 def _save_upload(uploaded) -> str:
     suffix = os.path.splitext(uploaded.name)[1] or ".pdf"
@@ -130,257 +111,21 @@ def _no_units_message(pages, doc: str) -> str:
             "or may not be a CDACC unit document. Try the official PDF.")
 
 
-# --------------------------------------------------------------------------- #
-# State invalidation (a changed choice clears everything downstream of it)
-# --------------------------------------------------------------------------- #
-def _reset_extraction_and_generation() -> None:
+def _invalidate_extraction() -> None:
     ss.extracted = False
     ss.extracted_key = None
     ss.os_unit = None
     ss.curr_unit = None
-    ss.display_code = ""
-    ss.gen_key = None
-    ss.docx_bytes = None
-    ss.sessions = None
 
 
-def _reset_os_downstream() -> None:
-    """A new OS file invalidates the OS units, the curriculum choice, and below."""
-    ss.os_refs = []
-    ss.os_pages = None
-    ss.os_ref = None
-    ss.cu_sig = None
-    ss.cu_path = None
-    ss.cu_pages = None
-    ss.cu_refs = []
-    ss.cu_ref = None
-    _reset_extraction_and_generation()
-
-
-def _reset_cu_downstream() -> None:
-    """A new Curriculum file invalidates the curriculum units and below."""
-    ss.cu_refs = []
-    ss.cu_pages = None
-    ss.cu_ref = None
-    _reset_extraction_and_generation()
-
-
-# --------------------------------------------------------------------------- #
-# Navigation
-#
-# All navigation runs in widget CALLBACKS (on_click / on_change), which fire
-# before the script re-renders. That means a single rerun per click (no extra
-# st.rerun(), so no double work / lag) and the body renders the new step
-# immediately. Because sac.steps is driven by st.session_state["wizard_stepper"]
-# once it has a key, every navigation also writes that key so the stepper
-# highlight tracks Next/Back instantly instead of lagging a click behind.
-# --------------------------------------------------------------------------- #
-def _set_step(step: int) -> None:
-    ss.step = max(1, min(N_STEPS, step))
-    ss["wizard_stepper"] = ss.step - 1     # keep the stepper highlight in sync
-    ss.nav_error = None
-
-
-def _validate_step(step: int) -> Optional[str]:
-    """Return an error message if `step` is not yet complete, else None.
-
-    Step 3 is terminal; the Course requirement is enforced at the Generate
-    button instead of a Next transition.
-    """
-    if step == 1 and ss.os_ref is None:
-        return "Select an Occupational Standard unit to continue."
-    if step == 2 and ss.cu_ref is None:
-        return "Select a Curriculum unit to continue."
-    return None
-
-
-def _extract_units() -> Optional[str]:
-    """Parse the two selected units (cached by key). Returns an error or None.
-
-    UI-free so it can run inside a navigation callback (no spinner/st.error).
-    """
-    key = (ss.os_sig, ss.os_ref.isced_code, ss.os_ref.title,
-           ss.cu_sig, ss.cu_ref.isced_code, ss.cu_ref.title)
-    if ss.extracted and ss.extracted_key == key and ss.os_unit is not None:
-        return None
-    try:
-        runlog.log(f"Extracting OS unit '{ss.os_ref.title}' + "
-                   f"Curriculum unit '{ss.cu_ref.title}'")
-        with runlog.timed("Extract selected units"):
-            ou = os_parser.parse_os_unit(ss.os_pages, ss.os_ref)
-            cu = cp.parse_curriculum_unit(ss.cu_pages, ss.cu_ref)
-    except Exception as e:  # noqa: BLE001
-        runlog.error(f"Extraction failed: {e}")
-        return f"Could not extract the selected units: {e}"
-    ss.os_unit = ou
-    ss.curr_unit = cu
-    ss.display_code = (cu.curriculum_code or ou.os_code
-                       or ou.isced_code or cu.isced_code)
-    ss.extracted = True
-    ss.extracted_key = key
-    ss.gen_key = None          # units changed -> force a fresh generation
-    return None
-
-
-def _go_next() -> None:
-    err = _validate_step(ss.step)
-    if not err and ss.step == 2:        # extract on leaving the Curriculum step
-        err = _extract_units()
-    if err:
-        ss.nav_error = err
-        return
-    _set_step(ss.step + 1)
-
-
-def _go_back() -> None:
-    _set_step(ss.step - 1)
-
-
-def _on_stepper_change() -> None:
-    """A backward click on a completed step (future steps are locked)."""
-    idx = ss.get("wizard_stepper")
-    if isinstance(idx, int):
-        ss.step = idx + 1
-        ss.nav_error = None
-
-
-def _render_stepper() -> None:
-    """The Ant-Design stepper. Future steps are locked; click a past step to go back.
-
-    A stable `key` keeps the component mounted across reruns so it stays static
-    (no reload/flicker); navigation callbacks keep its highlight in sync.
-    """
-    items = [sac.StepsItem(title=t, description=d, disabled=(i > ss.step - 1))
-             for i, (t, d) in enumerate(STEP_DEFS)]
-    sac.steps(items, index=ss.step - 1, return_index=True,
-              key="wizard_stepper", on_change=_on_stepper_change)
-
-
-def _render_nav() -> None:
-    st.divider()
-    c1, _, c3 = st.columns([1, 6, 1])
-    if ss.step > 1:
-        c1.button("◀ Back", use_container_width=True,
-                  key="nav_back", on_click=_go_back)
-    if ss.step < N_STEPS:
-        c3.button("Next ▶", type="primary", use_container_width=True,
-                  key="nav_next", on_click=_go_next)
-    if ss.get("nav_error"):
-        st.warning(ss.nav_error)
-
-
-# --------------------------------------------------------------------------- #
-# Step 1 - Occupational Standard
-# --------------------------------------------------------------------------- #
-def render_step1_os() -> None:
-    st.subheader("Upload the Occupational Standard")
-    os_file = st.file_uploader("Occupational Standard (PDF/DOCX)",
-                               type=["pdf", "docx"], key="os_file")
-
-    if os_file is not None:
-        sig = (os_file.name, os_file.size)
-        if sig != ss.os_sig:
-            ss.os_sig = sig
-            ss.os_path = _save_upload(os_file)
-            _reset_os_downstream()
-            with st.spinner("Reading the Occupational Standard and extracting units..."):
-                try:
-                    runlog.log("Loading Occupational Standard")
-                    with runlog.timed("Load Occupational Standard"):
-                        ss.os_pages = load_document(ss.os_path)
-                    with runlog.timed("Index OS units"):
-                        ss.os_refs = os_parser.index_os_units(ss.os_pages)
-                    runlog.log(f"Indexed {len(ss.os_refs)} OS units")
-                except Exception as e:  # noqa: BLE001
-                    ss.os_refs = []
-                    ss.os_pages = None
-                    runlog.error(f"Failed to read Occupational Standard: {e}")
-                    st.error(f"Failed to read the Occupational Standard: {e}")
-
-    if ss.os_refs:
-        st.success(f"Extracted **{len(ss.os_refs)}** units from the Occupational Standard.")
-        os_idx = st.selectbox(
-            "Select the OS unit of competency",
-            range(len(ss.os_refs)), index=None,
-            placeholder="- select an OS unit -",
-            format_func=lambda i: _ref_label(ss.os_refs[i]),
-            key=f"os_pick::{ss.os_sig}")
-        new_ref = ss.os_refs[os_idx] if os_idx is not None else None
-        if new_ref is not ss.os_ref:
-            ss.os_ref = new_ref
-            # a different OS unit invalidates the prior extraction + generation
-            ss.extracted_key = None
-            ss.gen_key = None
-    elif ss.os_pages is not None:
-        st.error(_no_units_message(ss.os_pages, "Occupational Standard"))
-    else:
-        st.info("Upload the Occupational Standard to begin.")
-
-
-# --------------------------------------------------------------------------- #
-# Step 2 - Curriculum
-# --------------------------------------------------------------------------- #
-def render_step2_curriculum() -> None:
-    st.subheader("Upload the Curriculum")
-    cu_file = st.file_uploader("Curriculum (PDF/DOCX)",
-                               type=["pdf", "docx"], key=f"cu_file::{ss.os_sig}")
-
-    if cu_file is not None:
-        sig = (cu_file.name, cu_file.size)
-        if sig != ss.cu_sig:
-            ss.cu_sig = sig
-            ss.cu_path = _save_upload(cu_file)
-            _reset_cu_downstream()
-            with st.spinner("Reading the Curriculum and extracting units..."):
-                try:
-                    runlog.log("Loading Curriculum")
-                    with runlog.timed("Load Curriculum"):
-                        ss.cu_pages = load_document(ss.cu_path)
-                    with runlog.timed("Index Curriculum units"):
-                        ss.cu_refs = cp.index_curriculum_units(ss.cu_pages)
-                    runlog.log(f"Indexed {len(ss.cu_refs)} curriculum units")
-                except Exception as e:  # noqa: BLE001
-                    ss.cu_refs = []
-                    ss.cu_pages = None
-                    runlog.error(f"Failed to read Curriculum: {e}")
-                    st.error(f"Failed to read the Curriculum: {e}")
-
-    if ss.cu_refs:
-        st.success(f"Extracted **{len(ss.cu_refs)}** units from the Curriculum.")
-        cu_idx = st.selectbox(
-            "Select the Curriculum unit of learning",
-            range(len(ss.cu_refs)), index=None,
-            placeholder="- select a curriculum unit -",
-            format_func=lambda i: _ref_label(ss.cu_refs[i]),
-            key=f"cu_pick::{ss.cu_sig}")
-        new_ref = ss.cu_refs[cu_idx] if cu_idx is not None else None
-        if new_ref is not ss.cu_ref:
-            ss.cu_ref = new_ref
-            ss.extracted_key = None
-            ss.gen_key = None
-
-        if (ss.os_ref and ss.cu_ref and ss.os_ref.isced_code and ss.cu_ref.isced_code
-                and _norm(ss.os_ref.isced_code) != _norm(ss.cu_ref.isced_code)):
-            st.warning("Selected OS and Curriculum units have different ISCED codes "
-                       f"({ss.os_ref.isced_code} vs {ss.cu_ref.isced_code}) - confirm "
-                       "they correspond.")
-    elif ss.cu_pages is not None:
-        st.error(_no_units_message(ss.cu_pages, "Curriculum"))
-    else:
-        st.info("Upload the Curriculum, then select the matching unit.")
-
-
-# --------------------------------------------------------------------------- #
-# Step 3 - Plan details (unit summary + inputs form)
-# --------------------------------------------------------------------------- #
-def render_step3_plan_details() -> None:
+# =========================================================================== #
+# Stage 3/4 body - preview + generate (reads ss.os_unit / ss.curr_unit)
+# =========================================================================== #
+def render_preview_and_generate() -> None:
     os_unit: Unit = ss.os_unit
     curr_unit: CurriculumUnit = ss.curr_unit
-    if os_unit is None or curr_unit is None:   # defensive: shouldn't happen
-        st.info("Go back and select both units first.")
-        return
 
-    st.subheader(f"Plan details — {os_unit.unit_title}")
+    st.subheader(f"Unit details - {os_unit.unit_title}")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Elements", len(os_unit.elements))
     m2.metric("Performance criteria", len(os_unit.all_pcs))
@@ -404,22 +149,25 @@ def render_step3_plan_details() -> None:
                 st.markdown(f"- *{stp.number} {stp.title}* - "
                             + "; ".join(stp.key_points[:4]))
 
-    st.divider()
+    # ----- plan details ----------------------------------------------------- #
+    st.subheader("Plan details")
     d1, d2, d3, d4 = st.columns(4)
-    d1.text_input("Trainer name", key="f_trainer")
-    d2.text_input("Institution", value="The Rift Valley National Polytechnic",
-                  key="f_inst")
-    d3.text_input("Course *", key="f_course", placeholder="e.g. ICT Technician")
-    d4.text_input("Level", value=os_unit.level or "", key="f_level")
+    trainer = d1.text_input("Trainer name", key="f_trainer")
+    institution = d2.text_input("Institution",
+                                value="The Rift Valley National Polytechnic",
+                                key="f_inst")
+    course = d3.text_input("Course", key="f_course",
+                           placeholder="e.g. ICT Technician")
+    level = d4.text_input("Level", value=os_unit.level or "", key="f_level")
 
     d5, d6, d7 = st.columns(3)
-    d5.text_input("Number of trainees", value="25", key="f_num")
-    d6.text_input("Class code", key="f_class")
-    d7.date_input("Date of preparation", _dt.date.today(), key="f_date")
+    num_trainees = d5.text_input("Number of trainees", value="25", key="f_num")
+    class_code = d6.text_input("Class code", key="f_class")
+    date_prep = d7.date_input("Date of preparation", _dt.date.today(), key="f_date")
 
     s1, s2, s3 = st.columns(3)
     term_weeks = s1.number_input("Term length (weeks)", 1, 30, 12, key="f_weeks")
-    s2.number_input("Sessions per week", 1, 10, 2, key="f_spw")
+    spw = s2.number_input("Sessions per week", 1, 10, 2, key="f_spw")
     cat_count = s3.number_input("Number of CATs", 0, 10, 2, key="f_cats")
 
     default_cats: List[int] = []
@@ -428,152 +176,218 @@ def render_step3_plan_details() -> None:
         default_cats = sorted({min(int(term_weeks), step * (i + 1))
                                for i in range(int(cat_count))})
         default_cats[-1] = int(term_weeks)
-    st.text_input("CAT weeks (comma-separated)",
-                  value=", ".join(map(str, default_cats)), key="f_catweeks")
-    st.caption("Fields marked * are required.")
-
-    st.divider()
-    _render_generate_section(os_unit, curr_unit)
-
-
-def _collect_inputs(os_unit: Unit) -> PlanInputs:
-    """Read the step-3 widget values (persisted by key) into a PlanInputs."""
-    date_prep = ss.get("f_date", _dt.date.today())
-    date_str = (date_prep.strftime("%d-%m-%Y")
-                if hasattr(date_prep, "strftime") else str(date_prep))
+    cat_weeks_str = st.text_input("CAT weeks (comma-separated)",
+                                  value=", ".join(map(str, default_cats)),
+                                  key="f_catweeks")
     try:
-        cat_weeks = [int(x) for x in str(ss.get("f_catweeks", "")).split(",") if x.strip()]
+        cat_weeks = [int(x) for x in cat_weeks_str.split(",") if x.strip()]
     except ValueError:
-        cat_weeks = []
-    return PlanInputs(
-        trainer_name=str(ss.get("f_trainer", "")),
-        institution=str(ss.get("f_inst", "")),
-        course=str(ss.get("f_course", "")),
-        level=str(ss.get("f_level", "")) or (os_unit.level if os_unit else ""),
-        num_trainees=str(ss.get("f_num", "25")),
-        class_code=str(ss.get("f_class", "")),
-        date_of_preparation=date_str,
-        term_weeks=int(ss.get("f_weeks", 12)),
-        cat_weeks=cat_weeks,
-        sessions_per_week=int(ss.get("f_spw", 2)),
-    )
+        cat_weeks = default_cats
+        st.warning("Could not parse CAT weeks; using defaults.")
 
+    inputs = PlanInputs(
+        trainer_name=trainer, institution=institution, course=course, level=level,
+        num_trainees=num_trainees, class_code=class_code,
+        date_of_preparation=date_prep.strftime("%d-%m-%Y"),
+        term_weeks=int(term_weeks), cat_weeks=cat_weeks, sessions_per_week=int(spw))
 
-# --------------------------------------------------------------------------- #
-# Step 4 - Generate (cached by unit + inputs)
-# --------------------------------------------------------------------------- #
-def _gen_key(os_unit: Unit, curr_unit: CurriculumUnit, inputs: PlanInputs):
-    return (ss.display_code, os_unit.unit_title, os_unit.os_code,
-            getattr(curr_unit, "curriculum_code", ""),
-            dataclasses.astuple(inputs))
+    # ----- generate --------------------------------------------------------- #
+    st.subheader("4. Generate Learning Plan")
 
+    if st.button("Generate Learning Plan", type="primary"):
+        runlog.log(f"Generate Learning Plan for {ss.display_code or os_unit.unit_title}")
+        with runlog.timed("Plan sessions"):
+            sessions = planner.plan_sessions(curr_unit, os_unit, inputs)
+        runlog.log(f"Planned {len(sessions)} sessions across {inputs.term_weeks} weeks")
+        st.write(f"Planned **{len(sessions)}** sessions across "
+                 f"**{inputs.term_weeks}** weeks "
+                 f"(CATs at weeks {', '.join(map(str, sorted(set(cat_weeks))))}).")
+        progress_messages: List[str] = []
+        status_placeholder = st.empty()
 
-def _do_generate(os_unit: Unit, curr_unit: CurriculumUnit,
-                 inputs: PlanInputs, key) -> bool:
-    runlog.log(f"Generate Learning Plan for {ss.display_code or os_unit.unit_title}")
-    with runlog.timed("Plan sessions"):
-        sessions = planner.plan_sessions(curr_unit, os_unit, inputs)
-    runlog.log(f"Planned {len(sessions)} sessions across {inputs.term_weeks} weeks")
+        def _push_progress(message: str) -> None:
+            progress_messages.append(message)
+            status_placeholder.code("\n".join(progress_messages[-25:]), language="text")
 
-    progress_messages: List[str] = []
-    status_placeholder = st.empty()
+        # Streamlit Cloud reruns this script on change but may keep a previously
+        # imported ai_client cached, so right after a redeploy the loaded module
+        # can predate progress_cb. Adapt to whichever signature is live.
+        supports_progress = "progress_cb" in inspect.signature(
+            ai_client.generate_sessions).parameters
+        try:
+            with st.spinner("Filling generative columns..."):
+                st.caption("Logs")
+                with runlog.timed("AI generate sessions"):
+                    if supports_progress:
+                        sessions = ai_client.generate_sessions(
+                            os_unit, sessions, api_key=None,
+                            progress_cb=_push_progress)
+                    else:
+                        sessions = ai_client.generate_sessions(
+                            os_unit, sessions, api_key=None)
+        except ai_client.AIError as e:
+            runlog.error(f"AI call failed: {e}")
+            st.error(f"Generation failed: {e}")
+            return
 
-    def _push_progress(message: str) -> None:
-        progress_messages.append(message)
-        status_placeholder.code("\n".join(progress_messages[-25:]), language="text")
-
-    # Streamlit Cloud may keep a previously-imported ai_client cached, so right
-    # after a redeploy the loaded module can predate progress_cb. Adapt to the
-    # live signature.
-    supports_progress = "progress_cb" in inspect.signature(
-        ai_client.generate_sessions).parameters
-    try:
-        with st.spinner("Filling generative columns..."):
-            with runlog.timed("AI generate sessions"):
-                if supports_progress:
-                    sessions = ai_client.generate_sessions(
-                        os_unit, sessions, api_key=None, progress_cb=_push_progress)
-                else:
-                    sessions = ai_client.generate_sessions(
-                        os_unit, sessions, api_key=None)
-    except ai_client.AIError as e:
-        runlog.error(f"AI call failed: {e}")
-        st.error(f"Generation failed: {e}")
-        return False
-
-    with runlog.timed("Build .docx"):
-        ss.docx_bytes = doc_builder.document_to_bytes(
-            os_unit, sessions, inputs, display_code=ss.display_code)
-    ss.sessions = sessions
-    ss.gen_key = key
-    runlog.log("Learning Plan document ready")
-    return True
-
-
-def _download_and_preview() -> None:
-    fname = f"Learning_Plan_{(ss.display_code or 'unit').replace('/', '_')}.docx"
-    st.download_button("Download Learning Plan (.docx)", data=ss.docx_bytes,
-                       file_name=fname, mime=DOCX_MIME)
-    with st.expander("Preview sessions", expanded=True):
-        for s in ss.sessions:
-            tag = "[CAT] " if s.is_cat else ""
-            st.markdown(f"**Week {s.week} · Session {s.session_no} · "
-                        f"{tag}{s.session_title}**")
-            a, b = st.columns(2)
-            a.markdown("*Specific learning outcomes*")
-            a.write("\n".join(s.learning_outcomes))
-            a.markdown("*Learning key points*")
-            a.write("\n".join(s.key_points))
-            b.markdown("*Trainee activities*")
-            b.write("\n".join(s.trainee_activities))
-            b.markdown("*Resources / Learning checks & assessments*")
-            b.write("\n".join(s.resources + ["-"] + s.assessments))
-            st.divider()
-
-
-def _render_generate_section(os_unit: Unit, curr_unit: CurriculumUnit) -> None:
-    inputs = _collect_inputs(os_unit)
-
-    st.subheader("Generate Learning Plan")
-    cats = ", ".join(map(str, sorted(set(inputs.cat_weeks)))) or "—"
-    st.caption(
-        f"Trainer: {inputs.trainer_name or '—'} · Course: {inputs.course or '—'} · "
-        f"Class: {inputs.class_code or '—'} · Level: {inputs.level or '—'}  |  "
-        f"{inputs.term_weeks} weeks · {inputs.sessions_per_week}/week · CATs at {cats}")
-
-    key = _gen_key(os_unit, curr_unit, inputs)
-    fresh = ss.gen_key == key and ss.docx_bytes is not None
-
-    if not fresh:
-        if st.button("Generate Learning Plan", type="primary"):
-            if not str(ss.get("f_course", "")).strip():
-                st.warning("Enter the Course (marked *) before generating.")
-            elif _do_generate(os_unit, curr_unit, inputs, key):
-                fresh = True
-
-    if fresh:
+        with runlog.timed("Build .docx"):
+            docx_bytes = doc_builder.document_to_bytes(os_unit, sessions, inputs,
+                                                       display_code=ss.display_code)
+        runlog.log("Learning Plan document ready")
         st.success("Learning Plan ready.")
-        _download_and_preview()
-        if st.button("Regenerate"):
-            ss.gen_key = None
-            ss.docx_bytes = None
-            ss.sessions = None
-            st.rerun()
+        fname = f"Learning_Plan_{(ss.display_code or 'unit').replace('/', '_')}.docx"
+        st.download_button("Download Learning Plan (.docx)", data=docx_bytes,
+                           file_name=fname, mime=DOCX_MIME)
+
+        with st.expander("Preview sessions", expanded=True):
+            for s in sessions:
+                tag = "[CAT] " if s.is_cat else ""
+                st.markdown(f"**Week {s.week} · Session {s.session_no} · "
+                            f"{tag}{s.session_title}**")
+                a, b = st.columns(2)
+                a.markdown("*Specific learning outcomes*")
+                a.write("\n".join(s.learning_outcomes))
+                a.markdown("*Learning key points*")
+                a.write("\n".join(s.key_points))
+                b.markdown("*Trainee activities*")
+                b.write("\n".join(s.trainee_activities))
+                b.markdown("*Resources / Learning checks & assessments*")
+                b.write("\n".join(s.resources + ["-"] + s.assessments))
+                st.divider()
 
 
-# =========================================================================== #
-# Main controller
-# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# Header
+# --------------------------------------------------------------------------- #
 st.markdown(
     "<h1 style='text-align:center; margin-bottom:0.5rem;'>Learning Plan Generator</h1>",
     unsafe_allow_html=True)
-_render_stepper()
 
-if ss.step == 1:
-    render_step1_os()
-elif ss.step == 2:
-    render_step2_curriculum()
-else:
-    render_step3_plan_details()
 
-_render_nav()
+# =========================================================================== #
+# 1. Upload the Occupational Standard -> auto-extract units -> pick a unit
+# =========================================================================== #
+st.header("1. Upload the Occupational Standard")
+os_file = st.file_uploader("Occupational Standard (PDF/DOCX)",
+                           type=["pdf", "docx"], key="os_file")
+
+if os_file is not None:
+    sig = (os_file.name, os_file.size)
+    if sig != ss.os_sig:
+        ss.os_sig = sig
+        ss.os_path = _save_upload(os_file)
+        # a new OS invalidates the curriculum choice and any extraction
+        ss.cu_sig = None
+        ss.cu_path = None
+        ss.cu_pages = None
+        ss.cu_refs = []
+        _invalidate_extraction()
+        with st.spinner("Reading the Occupational Standard and extracting units..."):
+            try:
+                runlog.log("Loading Occupational Standard")
+                with runlog.timed("Load Occupational Standard"):
+                    ss.os_pages = load_document(ss.os_path)
+                with runlog.timed("Index OS units"):
+                    ss.os_refs = os_parser.index_os_units(ss.os_pages)
+                runlog.log(f"Indexed {len(ss.os_refs)} OS units")
+            except Exception as e:  # noqa: BLE001
+                ss.os_refs = []
+                ss.os_pages = None
+                runlog.error(f"Failed to read Occupational Standard: {e}")
+                st.error(f"Failed to read the Occupational Standard: {e}")
+
+os_ref = None
+if ss.os_refs:
+    st.success(f"Extracted **{len(ss.os_refs)}** units from the Occupational Standard.")
+    os_idx = st.selectbox(
+        "Select the OS unit of competency",
+        range(len(ss.os_refs)), index=None,
+        placeholder="- select an OS unit -",
+        format_func=lambda i: _ref_label(ss.os_refs[i]),
+        key=f"os_pick::{ss.os_sig}")
+    if os_idx is not None:
+        os_ref = ss.os_refs[os_idx]
+elif ss.os_pages is not None:
+    st.error(_no_units_message(ss.os_pages, "Occupational Standard"))
+elif os_file is None:
+    st.info("Upload the Occupational Standard to begin.")
+
+
+# =========================================================================== #
+# 2. Upload the Curriculum -> auto-extract units -> pick a unit
+# =========================================================================== #
+cu_ref = None
+if os_ref is not None:
+    st.header("2. Upload the Curriculum")
+    cu_file = st.file_uploader("Curriculum (PDF/DOCX)",
+                               type=["pdf", "docx"], key=f"cu_file::{ss.os_sig}")
+
+    if cu_file is not None:
+        sig = (cu_file.name, cu_file.size)
+        if sig != ss.cu_sig:
+            ss.cu_sig = sig
+            ss.cu_path = _save_upload(cu_file)
+            _invalidate_extraction()
+            with st.spinner("Reading the Curriculum and extracting units..."):
+                try:
+                    runlog.log("Loading Curriculum")
+                    with runlog.timed("Load Curriculum"):
+                        ss.cu_pages = load_document(ss.cu_path)
+                    with runlog.timed("Index Curriculum units"):
+                        ss.cu_refs = cp.index_curriculum_units(ss.cu_pages)
+                    runlog.log(f"Indexed {len(ss.cu_refs)} curriculum units")
+                except Exception as e:  # noqa: BLE001
+                    ss.cu_refs = []
+                    ss.cu_pages = None
+                    runlog.error(f"Failed to read Curriculum: {e}")
+                    st.error(f"Failed to read the Curriculum: {e}")
+
+    if ss.cu_refs:
+        st.success(f"Extracted **{len(ss.cu_refs)}** units from the Curriculum.")
+        cu_idx = st.selectbox(
+            "Select the Curriculum unit of learning",
+            range(len(ss.cu_refs)), index=None,
+            placeholder="- select a curriculum unit -",
+            format_func=lambda i: _ref_label(ss.cu_refs[i]),
+            key=f"cu_pick::{ss.cu_sig}")
+        if cu_idx is not None:
+            cu_ref = ss.cu_refs[cu_idx]
+    elif ss.cu_pages is not None:
+        st.error(_no_units_message(ss.cu_pages, "Curriculum"))
+    elif cu_file is None:
+        st.info("Upload the Curriculum, then select the matching unit.")
+
+
+# =========================================================================== #
+# 3. Extract unit details (deterministic) -> preview + generate
+# =========================================================================== #
+if os_ref is not None and cu_ref is not None:
+    st.header("3. Extract unit details")
+
+    if (os_ref.isced_code and cu_ref.isced_code
+            and _norm(os_ref.isced_code) != _norm(cu_ref.isced_code)):
+        st.warning("Selected OS and Curriculum units have different ISCED codes "
+                   f"({os_ref.isced_code} vs {cu_ref.isced_code}) - confirm they "
+                   "correspond.")
+
+    cur_key = (ss.os_sig, os_ref.isced_code, os_ref.title,
+               ss.cu_sig, cu_ref.isced_code, cu_ref.title)
+
+    if st.button("Extract unit details", type="primary"):
+        with st.spinner("Extracting the selected units..."):
+            runlog.log(f"Extracting OS unit '{os_ref.title}' + "
+                       f"Curriculum unit '{cu_ref.title}'")
+            with runlog.timed("Extract selected units"):
+                ou = os_parser.parse_os_unit(ss.os_pages, os_ref)
+                cu = cp.parse_curriculum_unit(ss.cu_pages, cu_ref)
+            ss.os_unit = ou
+            ss.curr_unit = cu
+            ss.display_code = (cu.curriculum_code or ou.os_code
+                               or ou.isced_code or cu.isced_code)
+            ss.extracted = True
+            ss.extracted_key = cur_key
+
+    if ss.extracted and ss.extracted_key == cur_key and ss.os_unit is not None:
+        render_preview_and_generate()
+    elif ss.extracted and ss.extracted_key != cur_key:
+        st.info("Selection changed - click **Extract unit details** again.")
