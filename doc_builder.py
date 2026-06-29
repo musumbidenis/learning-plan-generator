@@ -18,7 +18,8 @@ from typing import Callable, List, Optional
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import (WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE,
+                             WD_TABLE_ALIGNMENT)
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -28,6 +29,7 @@ from models import PlanInputs, Session, Unit
 
 FONT_NAME = "Times New Roman"
 FONT_SIZE = 12.0          # body / table font size (pt) for the whole plan
+HEADING_ROW_HEIGHT = 0.8  # cm - the 5 label/value rows of the heading section
 
 SESSION_HEADERS = [
     "Week", "Session No", "Session Title", "Specific Learning Outcomes",
@@ -103,6 +105,37 @@ def _outcome_bold(line: str) -> bool:
     return line.strip().lower().startswith("by the end")
 
 
+def _set_table_cell_margins(table, top: float, bottom: float,
+                            left: float, right: float) -> None:
+    """Uniform interior padding (cm) for EVERY cell in the table.
+
+    Written as a table-level <w:tblCellMar>, inserted in its correct schema
+    slot (before tblLook/tblCaption/tblDescription) so Word never flags the
+    document for repair.
+    """
+    tblPr = table._element.tblPr
+    mar = tblPr.find(qn("w:tblCellMar"))
+    if mar is None:
+        mar = OxmlElement("w:tblCellMar")
+        anchor = None
+        for tag in ("w:tblLook", "w:tblCaption", "w:tblDescription"):
+            anchor = tblPr.find(qn(tag))
+            if anchor is not None:
+                break
+        if anchor is not None:
+            anchor.addprevious(mar)
+        else:
+            tblPr.append(mar)
+    for tag, cm in (("w:top", top), ("w:left", left),
+                    ("w:bottom", bottom), ("w:right", right)):
+        el = mar.find(qn(tag))
+        if el is None:
+            el = OxmlElement(tag)
+            mar.append(el)
+        el.set(qn("w:w"), str(int(round(Cm(cm).pt * 20))))   # dxa = twentieths of a pt
+        el.set(qn("w:type"), "dxa")
+
+
 def _set_table_width_pct(table, pct: int = 100) -> None:
     """Force the table preferred width to `pct`% of the page (AutoFit to Window)."""
     tblPr = table._element.tblPr
@@ -134,7 +167,11 @@ def _autofit_widths(table, widths_cm: List[float]) -> None:
 # Header info rows (laid onto the shared 9-column grid via cell merges)
 # --------------------------------------------------------------------------- #
 def _add_label_value_row(table, l1, v1, l2, v2) -> None:
-    c = table.add_row().cells          # 9 grid cells
+    row = table.add_row()
+    # Keep the heading rows a neat, uniform height (grows only if a value wraps).
+    row.height = Cm(HEADING_ROW_HEIGHT)
+    row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+    c = row.cells                      # 9 grid cells
     label1 = c[0].merge(c[1]).merge(c[2])
     value1 = c[3].merge(c[4])
     label2 = c[5].merge(c[6])
@@ -142,6 +179,9 @@ def _add_label_value_row(table, l1, v1, l2, v2) -> None:
     for cell, text, is_label in ((label1, l1, True), (value1, v1, False),
                                  (label2, l2, True), (value2, v2, False)):
         _set_cell_text(cell, [text], size=FONT_SIZE)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER  # centre vertically
+        for p in cell.paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT                    # align left
         if is_label:
             for p in cell.paragraphs:
                 for r in p.runs:
@@ -265,6 +305,9 @@ def build_document(unit: Unit, sessions: List[Session], inputs: PlanInputs,
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     add_header_rows(table, unit, inputs, display_code or unit.os_code)
     add_session_grid(table, sessions)
+
+    # Breathing room inside every cell so the grid reads cleanly.
+    _set_table_cell_margins(table, top=0.1, bottom=0.1, left=0.15, right=0.15)
 
     # AutoFit the single table to the landscape page width.
     total = sum(SESSION_WIDTHS)
