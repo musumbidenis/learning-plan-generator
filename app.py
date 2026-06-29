@@ -44,7 +44,7 @@ st.set_page_config(page_title="Learning Plan Generator", layout="wide")
 ss = st.session_state
 _DEFAULTS = dict(
     # wizard position
-    step=1,
+    step=1, nav_error=None,
     # Occupational Standard side
     os_sig=None, os_path=None, os_pages=None, os_refs=[], os_ref=None,
     # Curriculum side
@@ -167,10 +167,18 @@ def _reset_cu_downstream() -> None:
 
 # --------------------------------------------------------------------------- #
 # Navigation
+#
+# All navigation runs in widget CALLBACKS (on_click / on_change), which fire
+# before the script re-renders. That means a single rerun per click (no extra
+# st.rerun(), so no double work / lag) and the body renders the new step
+# immediately. Because sac.steps is driven by st.session_state["wizard_stepper"]
+# once it has a key, every navigation also writes that key so the stepper
+# highlight tracks Next/Back instantly instead of lagging a click behind.
 # --------------------------------------------------------------------------- #
-def _goto(step: int) -> None:
+def _set_step(step: int) -> None:
     ss.step = max(1, min(N_STEPS, step))
-    st.rerun()
+    ss["wizard_stepper"] = ss.step - 1     # keep the stepper highlight in sync
+    ss.nav_error = None
 
 
 def _validate_step(step: int) -> Optional[str]:
@@ -186,30 +194,24 @@ def _validate_step(step: int) -> Optional[str]:
     return None
 
 
-def _leave_step(step: int) -> bool:
-    """Side effects when advancing past `step`. Returns False to block advancing."""
-    if step == 2:
-        return _ensure_extracted()
-    return True
+def _extract_units() -> Optional[str]:
+    """Parse the two selected units (cached by key). Returns an error or None.
 
-
-def _ensure_extracted() -> bool:
-    """Deterministically parse the two selected units (cached by selection key)."""
+    UI-free so it can run inside a navigation callback (no spinner/st.error).
+    """
     key = (ss.os_sig, ss.os_ref.isced_code, ss.os_ref.title,
            ss.cu_sig, ss.cu_ref.isced_code, ss.cu_ref.title)
     if ss.extracted and ss.extracted_key == key and ss.os_unit is not None:
-        return True
+        return None
     try:
-        with st.spinner("Extracting the selected units..."):
-            runlog.log(f"Extracting OS unit '{ss.os_ref.title}' + "
-                       f"Curriculum unit '{ss.cu_ref.title}'")
-            with runlog.timed("Extract selected units"):
-                ou = os_parser.parse_os_unit(ss.os_pages, ss.os_ref)
-                cu = cp.parse_curriculum_unit(ss.cu_pages, ss.cu_ref)
+        runlog.log(f"Extracting OS unit '{ss.os_ref.title}' + "
+                   f"Curriculum unit '{ss.cu_ref.title}'")
+        with runlog.timed("Extract selected units"):
+            ou = os_parser.parse_os_unit(ss.os_pages, ss.os_ref)
+            cu = cp.parse_curriculum_unit(ss.cu_pages, ss.cu_ref)
     except Exception as e:  # noqa: BLE001
         runlog.error(f"Extraction failed: {e}")
-        st.error(f"Could not extract the selected units: {e}")
-        return False
+        return f"Could not extract the selected units: {e}"
     ss.os_unit = ou
     ss.curr_unit = cu
     ss.display_code = (cu.curriculum_code or ou.os_code
@@ -217,35 +219,54 @@ def _ensure_extracted() -> bool:
     ss.extracted = True
     ss.extracted_key = key
     ss.gen_key = None          # units changed -> force a fresh generation
-    return True
+    return None
+
+
+def _go_next() -> None:
+    err = _validate_step(ss.step)
+    if not err and ss.step == 2:        # extract on leaving the Curriculum step
+        err = _extract_units()
+    if err:
+        ss.nav_error = err
+        return
+    _set_step(ss.step + 1)
+
+
+def _go_back() -> None:
+    _set_step(ss.step - 1)
+
+
+def _on_stepper_change() -> None:
+    """A backward click on a completed step (future steps are locked)."""
+    idx = ss.get("wizard_stepper")
+    if isinstance(idx, int):
+        ss.step = idx + 1
+        ss.nav_error = None
 
 
 def _render_stepper() -> None:
     """The Ant-Design stepper. Future steps are locked; click a past step to go back.
 
     A stable `key` keeps the component mounted across reruns so it stays static
-    (no reload/flicker) when navigating with Next/Back.
+    (no reload/flicker); navigation callbacks keep its highlight in sync.
     """
     items = [sac.StepsItem(title=t, description=d, disabled=(i > ss.step - 1))
              for i, (t, d) in enumerate(STEP_DEFS)]
-    clicked = sac.steps(items, index=ss.step - 1, return_index=True,
-                        key="wizard_stepper")
-    if isinstance(clicked, int) and clicked < ss.step - 1:
-        _goto(clicked + 1)     # backward jump to a completed step
+    sac.steps(items, index=ss.step - 1, return_index=True,
+              key="wizard_stepper", on_change=_on_stepper_change)
 
 
 def _render_nav() -> None:
     st.divider()
     c1, _, c3 = st.columns([1, 6, 1])
-    if ss.step > 1 and c1.button("◀ Back", use_container_width=True):
-        _goto(ss.step - 1)
-    if ss.step < N_STEPS and c3.button("Next ▶", type="primary",
-                                       use_container_width=True):
-        err = _validate_step(ss.step)
-        if err:
-            st.warning(err)
-        elif _leave_step(ss.step):
-            _goto(ss.step + 1)
+    if ss.step > 1:
+        c1.button("◀ Back", use_container_width=True,
+                  key="nav_back", on_click=_go_back)
+    if ss.step < N_STEPS:
+        c3.button("Next ▶", type="primary", use_container_width=True,
+                  key="nav_next", on_click=_go_next)
+    if ss.get("nav_error"):
+        st.warning(ss.nav_error)
 
 
 # --------------------------------------------------------------------------- #
@@ -355,6 +376,9 @@ def render_step2_curriculum() -> None:
 def render_step3_plan_details() -> None:
     os_unit: Unit = ss.os_unit
     curr_unit: CurriculumUnit = ss.curr_unit
+    if os_unit is None or curr_unit is None:   # defensive: shouldn't happen
+        st.info("Go back and select both units first.")
+        return
 
     st.subheader(f"Plan details — {os_unit.unit_title}")
     m1, m2, m3, m4 = st.columns(4)
