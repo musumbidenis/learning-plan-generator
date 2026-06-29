@@ -43,6 +43,21 @@ SESSION_WIDTHS = [0.55, 0.7, 1.5, 2.1, 2.3, 2.4, 1.8, 1.9, 1.2]
 # --------------------------------------------------------------------------- #
 # Low-level helpers
 # --------------------------------------------------------------------------- #
+def _style_run(run, size: float = FONT_SIZE, bold: bool = False) -> None:
+    """Apply the plan font (Times New Roman, incl. East-Asian mapping) to a run."""
+    run.font.name = FONT_NAME
+    run.font.size = Pt(size)
+    rpr = run._element.get_or_add_rPr()
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = rpr.makeelement(qn("w:rFonts"), {})
+        rpr.append(rfonts)
+    rfonts.set(qn("w:ascii"), FONT_NAME)
+    rfonts.set(qn("w:hAnsi"), FONT_NAME)
+    if bold:
+        run.bold = True
+
+
 def _set_cell_text(cell, lines: List[str], bold_predicate: Optional[Callable] = None,
                    size: float = FONT_SIZE, header: bool = False) -> None:
     """Write `lines` into a table cell, one paragraph per line.
@@ -62,20 +77,8 @@ def _set_cell_text(cell, lines: List[str], bold_predicate: Optional[Callable] = 
         par.paragraph_format.space_after = Pt(0)
         par.paragraph_format.space_before = Pt(0)
         run = par.add_run(str(line))
-        run.font.name = FONT_NAME
-        run.font.size = Pt(size)
-        # ensure East-Asian font mapping too (avoids fallback fonts)
-        rpr = run._element.get_or_add_rPr()
-        rfonts = rpr.find(qn("w:rFonts"))
-        if rfonts is None:
-            rfonts = rpr.makeelement(qn("w:rFonts"), {})
-            rpr.append(rfonts)
-        rfonts.set(qn("w:ascii"), FONT_NAME)
-        rfonts.set(qn("w:hAnsi"), FONT_NAME)
-        if header:
-            run.bold = True
-        elif bold_predicate is not None and bold_predicate(str(line)):
-            run.bold = True
+        bold = header or bool(bold_predicate and bold_predicate(str(line)))
+        _style_run(run, size=size, bold=bold)
 
 
 def _is_caps_heading(line: str) -> bool:
@@ -166,26 +169,37 @@ def _autofit_widths(table, widths_cm: List[float]) -> None:
 # --------------------------------------------------------------------------- #
 # Header info rows (laid onto the shared 9-column grid via cell merges)
 # --------------------------------------------------------------------------- #
-def _add_label_value_row(table, l1, v1, l2, v2) -> None:
+def _set_label_value_cell(cell, label: str, value: str) -> None:
+    """Render '<bold label>: <value>' as one left-aligned, vertically-centred line."""
+    cell.text = ""                       # collapse a merged cell's empty paragraphs
+    par = cell.paragraphs[0]
+    par.paragraph_format.space_after = Pt(0)
+    par.paragraph_format.space_before = Pt(0)
+    par.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _style_run(par.add_run(f"{label}:"), bold=True)
+    if str(value).strip():
+        _style_run(par.add_run(f" {value}"), bold=False)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+
+def _add_two_col_heading_row(table, label_l, value_l, label_r, value_r) -> None:
+    """A heading row of TWO cells, each holding a bold 'Label: value' pair.
+
+    Left cell spans grid columns 0-4, right cell spans 5-8 (~half and half).
+    """
     row = table.add_row()
     # Keep the heading rows a neat, uniform height (grows only if a value wraps).
     row.height = Cm(HEADING_ROW_HEIGHT)
     row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
-    c = row.cells                      # 9 grid cells
-    label1 = c[0].merge(c[1]).merge(c[2])
-    value1 = c[3].merge(c[4])
-    label2 = c[5].merge(c[6])
-    value2 = c[7].merge(c[8])
-    for cell, text, is_label in ((label1, l1, True), (value1, v1, False),
-                                 (label2, l2, True), (value2, v2, False)):
-        _set_cell_text(cell, [text], size=FONT_SIZE)
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER  # centre vertically
-        for p in cell.paragraphs:
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT                    # align left
-        if is_label:
-            for p in cell.paragraphs:
-                for r in p.runs:
-                    r.bold = True
+    c = row.cells                        # 9 grid cells
+    left = c[0]
+    for cell in c[1:5]:
+        left = left.merge(cell)
+    right = c[5]
+    for cell in c[6:9]:
+        right = right.merge(cell)
+    _set_label_value_cell(left, label_l, value_l)
+    _set_label_value_cell(right, label_r, value_r)
 
 
 def _add_fullwidth_row(table, lines, bold_predicate) -> None:
@@ -198,8 +212,13 @@ def _add_fullwidth_row(table, lines, bold_predicate) -> None:
 
 
 def _skill_task_lines(unit: Unit) -> List[str]:
-    """'Skill or Job Task' = the numbered element titles (matches the gold)."""
-    return [f"{el.number}. {el.title}" for el in unit.elements] or [unit.skill_task]
+    """'Skill or Job Task' = the OS Unit Description from its first action verb.
+
+    Falls back to the numbered element titles only when no description was parsed.
+    """
+    if unit.skill_task.strip():
+        return [unit.skill_task]
+    return [f"{el.number}. {el.title}" for el in unit.elements] or [""]
 
 
 def _benchmark_lines(unit: Unit) -> List[str]:
@@ -215,16 +234,16 @@ def _benchmark_lines(unit: Unit) -> List[str]:
 def add_header_rows(table, unit: Unit, inputs: PlanInputs,
                     display_code: str) -> None:
     """Append the header-info rows to the shared 9-column session table."""
-    _add_label_value_row(table, "Unit of Competence", unit.unit_title,
-                         "Unit Code", display_code)
-    _add_label_value_row(table, "Name of Trainer", inputs.trainer_name,
-                         "Admission Number", "")
-    _add_label_value_row(table, "Institution", inputs.institution,
-                         "Level", inputs.level or unit.level)
-    _add_label_value_row(table, "Date of Preparation", inputs.date_of_preparation,
-                         "Date of Revision", "")
-    _add_label_value_row(table, "Number of Trainees", str(inputs.num_trainees),
-                         "Class", inputs.class_code)
+    _add_two_col_heading_row(table, "Unit of Competence", unit.unit_title,
+                             "Unit Code", display_code)
+    _add_two_col_heading_row(table, "Institution", inputs.institution,
+                             "Name of Trainer", inputs.trainer_name)
+    _add_two_col_heading_row(table, "Course", inputs.course,
+                             "Level", inputs.level or unit.level)
+    _add_two_col_heading_row(table, "Date of Preparation", inputs.date_of_preparation,
+                             "Date of Revision", "")
+    _add_two_col_heading_row(table, "Number of Trainees", str(inputs.num_trainees),
+                             "Class", inputs.class_code)
 
     # Merged 'Skill or Job Task' row
     _add_fullwidth_row(

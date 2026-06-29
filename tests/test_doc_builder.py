@@ -42,11 +42,15 @@ def test_single_combined_table(prog_curr_unit, prog_os_unit):
 def test_header_rows_values(prog_curr_unit, prog_os_unit):
     doc, _ = _build(prog_curr_unit, prog_os_unit)
     rows = doc.tables[0].rows
-    # value1 spans grid cols 3-4, value2 spans cols 7-8 (merged cells repeat)
-    assert rows[0].cells[3].text == "APPLY COMPUTER PROGRAMMING PRINCIPLES"
-    assert rows[0].cells[7].text == "IT/CU/ICTA/CC/02/5/MA"
-    # Skill/Job task row lists the element titles
-    assert "Apply computer programming skills" in rows[5].cells[0].text
+    # Two-column heading: each cell holds a bold "Label: value" pair. The left
+    # cell spans grid cols 0-4, the right cell spans 5-8 (merged cells repeat).
+    assert rows[0].cells[0].text == \
+        "Unit of Competence: APPLY COMPUTER PROGRAMMING PRINCIPLES"
+    assert rows[0].cells[5].text == "Unit Code: IT/CU/ICTA/CC/02/5/MA"
+    # Skill/Job task row = the OS Unit Description from its first action verb
+    skill = rows[5].cells[0].text
+    assert skill.startswith("Skill or Job Task:")
+    assert "apply" in skill.lower()
     # Benchmark row keeps PC numbering
     assert "1.1 Programming language types" in rows[6].cells[0].text
 

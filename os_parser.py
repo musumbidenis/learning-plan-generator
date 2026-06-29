@@ -70,7 +70,16 @@ _RE_ACTION_VERB = re.compile(
     r"managing|setup|set\s?up|install|installing|configure|configuring|"
     r"develop|developing|implement|implementing|maintain|maintaining|"
     r"identify|identifying|produce|producing|create|creating|conduct|"
-    r"conducting|operate|operating)\b", re.I)
+    r"conducting|operate|operating|lead|leading|supervise|supervising|"
+    r"coordinate|coordinating|plan|planning|monitor|monitoring|prepare|"
+    r"preparing|design|designing)\b", re.I)
+
+# OS unit descriptions read "This unit specifies the competences required to
+# <verb> ...". Anchoring on that lead-in lets us pick the Skill/Job Task from
+# the verb onwards regardless of which verb it is (e.g. Lead, not whitelisted).
+_RE_DESC_PREAMBLE = re.compile(
+    r"^.*?\b(?:competenc\w*\s+(?:required\s+)?to|required\s+to)\s+",
+    re.I | re.S)
 
 
 def _is_header_line(text: str) -> bool:
@@ -200,9 +209,16 @@ def _extract_description(first_page_text: str) -> str:
 
 
 def _skill_task_from_description(description: str) -> str:
-    """The description sentence, copied from its first action verb."""
+    """The Skill or Job Task = the unit description from its action verb.
+
+    Prefer stripping the "...competences required to " lead-in (verb-agnostic);
+    fall back to the action-verb search, then to the whole description.
+    """
     if not description:
         return ""
+    m = _RE_DESC_PREAMBLE.search(description)
+    if m and description[m.end():].strip():
+        return clean_text(description[m.end():])
     m = _RE_ACTION_VERB.search(description)
     if m:
         return clean_text(description[m.start():])

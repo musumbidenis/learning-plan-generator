@@ -151,17 +151,19 @@ def render_preview_and_generate() -> None:
 
     # ----- plan details ----------------------------------------------------- #
     st.subheader("Plan details")
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4 = st.columns(4)
     trainer = d1.text_input("Trainer name", key="f_trainer")
     institution = d2.text_input("Institution",
                                 value="The Rift Valley National Polytechnic",
                                 key="f_inst")
-    level = d3.text_input("Level", value=os_unit.level or "", key="f_level")
+    course = d3.text_input("Course", key="f_course",
+                           placeholder="e.g. ICT Technician")
+    level = d4.text_input("Level", value=os_unit.level or "", key="f_level")
 
-    d4, d5, d6 = st.columns(3)
-    num_trainees = d4.text_input("Number of trainees", value="25", key="f_num")
-    class_code = d5.text_input("Class code", key="f_class")
-    date_prep = d6.date_input("Date of preparation", _dt.date.today(), key="f_date")
+    d5, d6, d7 = st.columns(3)
+    num_trainees = d5.text_input("Number of trainees", value="25", key="f_num")
+    class_code = d6.text_input("Class code", key="f_class")
+    date_prep = d7.date_input("Date of preparation", _dt.date.today(), key="f_date")
 
     s1, s2, s3 = st.columns(3)
     term_weeks = s1.number_input("Term length (weeks)", 1, 30, 12, key="f_weeks")
@@ -184,7 +186,7 @@ def render_preview_and_generate() -> None:
         st.warning("Could not parse CAT weeks; using defaults.")
 
     inputs = PlanInputs(
-        trainer_name=trainer, institution=institution, level=level,
+        trainer_name=trainer, institution=institution, course=course, level=level,
         num_trainees=num_trainees, class_code=class_code,
         date_of_preparation=date_prep.strftime("%d-%m-%Y"),
         term_weeks=int(term_weeks), cat_weeks=cat_weeks, sessions_per_week=int(spw))

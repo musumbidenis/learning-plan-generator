@@ -147,6 +147,7 @@ class PlanInputs:
     """UI-supplied metadata for the header table and scheduling."""
     trainer_name: str = ""
     institution: str = ""
+    course: str = ""
     level: str = ""
     num_trainees: str = ""
     class_code: str = ""
