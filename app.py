@@ -1,12 +1,12 @@
 """Streamlit UI - Learning Plan Generator (KSTVET REF KTTC/TP/LP/F07, RVNP).
 
-A 4-step FORM WIZARD (one focus per screen, validated before advancing):
+A 3-step FORM WIZARD (one focus per screen, validated before advancing):
 
-  1. Occupational Standard  -> upload -> auto-extract units -> pick the OS unit
-  2. Curriculum             -> upload -> auto-extract units -> pick the CU unit
+  1. Occupational Standard      -> upload -> auto-extract units -> pick OS unit
+  2. Curriculum                 -> upload -> auto-extract units -> pick CU unit
      (leaving step 2 deterministically extracts both selected units)
-  3. Plan details           -> unit summary + trainer/class/schedule form
-  4. Generate               -> one grounded Mistral call -> download .docx
+  3. Plan details & generate    -> unit summary + form + one grounded Mistral
+                                   call -> download .docx
 
 Navigation is a `streamlit-antd-components` stepper plus Back/Next buttons,
 driven by `ss.step`. Future steps stay locked until the current one validates;
@@ -64,8 +64,7 @@ DOCX_MIME = ("application/vnd.openxmlformats-officedocument."
 STEP_DEFS = [
     ("Occupational Standard", "Upload & pick the OS unit"),
     ("Curriculum", "Upload & pick the curriculum unit"),
-    ("Plan details", "Trainer, class & schedule"),
-    ("Generate", "Create & download the plan"),
+    ("Plan details & generate", "Configure, then create & download"),
 ]
 N_STEPS = len(STEP_DEFS)
 
@@ -175,13 +174,15 @@ def _goto(step: int) -> None:
 
 
 def _validate_step(step: int) -> Optional[str]:
-    """Return an error message if `step` is not yet complete, else None."""
+    """Return an error message if `step` is not yet complete, else None.
+
+    Step 3 is terminal; the Course requirement is enforced at the Generate
+    button instead of a Next transition.
+    """
     if step == 1 and ss.os_ref is None:
         return "Select an Occupational Standard unit to continue."
     if step == 2 and ss.cu_ref is None:
         return "Select a Curriculum unit to continue."
-    if step == 3 and not str(ss.get("f_course", "")).strip():
-        return "Enter the Course before continuing."
     return None
 
 
@@ -220,10 +221,15 @@ def _ensure_extracted() -> bool:
 
 
 def _render_stepper() -> None:
-    """The Ant-Design stepper. Future steps are locked; click a past step to go back."""
+    """The Ant-Design stepper. Future steps are locked; click a past step to go back.
+
+    A stable `key` keeps the component mounted across reruns so it stays static
+    (no reload/flicker) when navigating with Next/Back.
+    """
     items = [sac.StepsItem(title=t, description=d, disabled=(i > ss.step - 1))
              for i, (t, d) in enumerate(STEP_DEFS)]
-    clicked = sac.steps(items, index=ss.step - 1, return_index=True)
+    clicked = sac.steps(items, index=ss.step - 1, return_index=True,
+                        key="wizard_stepper")
     if isinstance(clicked, int) and clicked < ss.step - 1:
         _goto(clicked + 1)     # backward jump to a completed step
 
@@ -402,6 +408,9 @@ def render_step3_plan_details() -> None:
                   value=", ".join(map(str, default_cats)), key="f_catweeks")
     st.caption("Fields marked * are required.")
 
+    st.divider()
+    _render_generate_section(os_unit, curr_unit)
+
 
 def _collect_inputs(os_unit: Unit) -> PlanInputs:
     """Read the step-3 widget values (persisted by key) into a PlanInputs."""
@@ -498,14 +507,11 @@ def _download_and_preview() -> None:
             st.divider()
 
 
-def render_step4_generate() -> None:
-    os_unit: Unit = ss.os_unit
-    curr_unit: CurriculumUnit = ss.curr_unit
+def _render_generate_section(os_unit: Unit, curr_unit: CurriculumUnit) -> None:
     inputs = _collect_inputs(os_unit)
 
     st.subheader("Generate Learning Plan")
     cats = ", ".join(map(str, sorted(set(inputs.cat_weeks)))) or "—"
-    st.markdown(f"**{os_unit.unit_title}**  ·  `{ss.display_code}`")
     st.caption(
         f"Trainer: {inputs.trainer_name or '—'} · Course: {inputs.course or '—'} · "
         f"Class: {inputs.class_code or '—'} · Level: {inputs.level or '—'}  |  "
@@ -515,11 +521,11 @@ def render_step4_generate() -> None:
     fresh = ss.gen_key == key and ss.docx_bytes is not None
 
     if not fresh:
-        st.info("Review the summary above, then generate the plan.")
         if st.button("Generate Learning Plan", type="primary"):
-            if not _do_generate(os_unit, curr_unit, inputs, key):
-                return
-            fresh = True
+            if not str(ss.get("f_course", "")).strip():
+                st.warning("Enter the Course (marked *) before generating.")
+            elif _do_generate(os_unit, curr_unit, inputs, key):
+                fresh = True
 
     if fresh:
         st.success("Learning Plan ready.")
@@ -534,16 +540,16 @@ def render_step4_generate() -> None:
 # =========================================================================== #
 # Main controller
 # =========================================================================== #
-st.title("Learning Plan Generator")
+st.markdown(
+    "<h1 style='text-align:center; margin-bottom:0.5rem;'>Learning Plan Generator</h1>",
+    unsafe_allow_html=True)
 _render_stepper()
 
 if ss.step == 1:
     render_step1_os()
 elif ss.step == 2:
     render_step2_curriculum()
-elif ss.step == 3:
-    render_step3_plan_details()
 else:
-    render_step4_generate()
+    render_step3_plan_details()
 
 _render_nav()
