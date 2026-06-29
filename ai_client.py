@@ -89,18 +89,20 @@ SESSIONS (fill each; key_points are AUTHORITATIVE, keep them):
 {skeleton_json}
 
 For EACH session output:
+- session_title: the supplied title, cleaned per SOURCE DATA QUALITY (fix casing, typos, and fragments into a complete, readable title; keep the same meaning and topic - do not rename).
 - learning_outcomes: an array of 3 strings labelled "a.", "b.", "c.", trainee-centred, the list should always be introduced as follows: "By the end of the session, the trainee should be able to; {{The labeled list starts below}}...", rewritten from the session's PCs. Use level-appropriate verbs ({verbs}).
 - key_points: present the supplied Curriculum content, repaired per SOURCE DATA QUALITY below. Format as 2-3 CAPITALISED headings, each followed by ~3 short bullet sub-points drawn from the supplied content. Do NOT invent new topics. If a session's supplied key_points only restate the performance criterion (i.e. no curriculum content was available for this unit), you MAY draw concrete, relevant sub-points from the OS REQUIRED KNOWLEDGE topics listed above.
-- trainee_activities: EXACTLY 3 bullets, each starting "- " and NAMING an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then a line "Follow up Activity:", then "1. <assignment>."
+- trainee_activities: EXACTLY 3 bullets. Each bullet starts "- ", NAMES an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then describes in 1-2 full sentences exactly what the trainee does - referencing this session's specific key points and learning outcomes (the actual topic, task, tool, sample, or scenario), never generic filler. Order the three so they progress from understanding to hands-on application. Then add a line "Follow up Activity:" and "1. <a specific assignment grounded in this session's content>."
 - resources: at least 2 bullets - real textbooks, presentations, tools, or online docs relevant to the topic.
 - assessments: derived from the Evidence-Guide methods, grouped under "Knowledge Checks:", "Skills:" and "Attitudes:" with numbered items.
 
 SOURCE DATA QUALITY
-The supplied Curriculum Learning Key Points are auto-extracted and may be messy: fragments, incomplete sentences, truncated phrases, duplicates, or shallow stubs.
+The supplied session titles and Curriculum Learning Key Points are auto-extracted and may be messy: fragments, incomplete sentences, truncated phrases, duplicates, or shallow stubs.
 - Repair form, preserve meaning. You MAY fix grammar, spelling, capitalisation, spacing, and complete an obviously truncated sentence into a coherent one - ONLY when the intended meaning is clear from the fragment itself, the session's other key points, the Performance Criteria, or the Required Knowledge. This is editing, not authoring: never add a topic, tool, or fact not already implied by those supplied sources.
 - Thin or missing points: where a point is too shallow to teach from, you MAY add concrete sub-points, but ONLY drawn from the supplied Performance Criteria and Required Knowledge for this unit. Never draw on outside knowledge.
 - Unrecoverable items: if a fragment is unintelligible and cannot be reconstructed from the supplied sources, OMIT it. Never output a fragment, a dangling phrase, an incomplete sentence, or a placeholder.
 - Every key point you output must be a complete, coherent sentence traceable to the supplied curriculum, Performance Criteria, or Required Knowledge.
+- Apply the same repairs to each session_title: return a clean, complete, correctly-capitalised title with the same meaning; never output a truncated or fragmentary title.
 
 CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = graded Knowledge plus Attitudes (self-reflection).
 
@@ -317,6 +319,13 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     """
     for i, s in enumerate(sessions):
         row = ai_rows[i] if i < len(ai_rows) else {}
+
+        # session_title: accept the AI's data-quality-repaired title if given,
+        # otherwise keep the deterministic skeleton title. Set before the
+        # fallbacks below so they build on the cleaned title.
+        ai_title = (row.get("session_title") or "").strip()
+        if ai_title:
+            s.session_title = ai_title
 
         lo = _as_list(row.get("learning_outcomes"))
         ai_kp = _as_list(row.get("key_points"))
