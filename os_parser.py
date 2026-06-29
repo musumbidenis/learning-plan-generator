@@ -218,11 +218,13 @@ def _skill_task_from_description(description: str) -> str:
         return ""
     m = _RE_DESC_PREAMBLE.search(description)
     if m and description[m.end():].strip():
-        return clean_text(description[m.end():])
-    m = _RE_ACTION_VERB.search(description)
-    if m:
-        return clean_text(description[m.start():])
-    return description
+        task = clean_text(description[m.end():])
+    else:
+        m = _RE_ACTION_VERB.search(description)
+        task = clean_text(description[m.start():]) if m else description
+    # Start the Skill or Job Task with a capital letter (verb may be lower-cased
+    # in the source description), leaving the rest of the phrase untouched.
+    return task[:1].upper() + task[1:] if task else task
 
 
 def _extract_assessment_methods(unit_pages: List[Page]) -> List[str]:
