@@ -396,3 +396,16 @@ if os_ref is not None and cu_ref is not None:
 
     if ss.extracted and ss.extracted_key == cur_key and ss.os_unit is not None:
         render_preview_and_generate()
+
+
+# =========================================================================== #
+# Footer (centered, current year)
+# =========================================================================== #
+st.markdown(
+    f"<hr style='margin-top:2.5rem; margin-bottom:0.4rem; border:none; "
+    f"border-top:1px solid rgba(128,128,128,0.25);'>"
+    f"<div style='text-align:center; color:gray; font-size:0.9rem; "
+    f"padding-bottom:0.6rem;'>Made with &#10084;&#65039; by Musumbi &#128081;"
+    f"<br><span style='font-size:0.8rem;'>&copy; {_dt.date.today().year}</span>"
+    f"</div>",
+    unsafe_allow_html=True)
