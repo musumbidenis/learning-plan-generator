@@ -4,8 +4,9 @@ Manual, sequential flow (the two source documents are chosen independently):
 
   1. Upload the Occupational Standard  -> units auto-extracted -> pick the OS unit
   2. Upload the Curriculum             -> units auto-extracted -> pick the CU unit
-  3. Extract unit details (deterministic, no AI) -> preview
-  4. Generate Learning Plan (one grounded Mistral call) -> .docx
+  3. Generate Learning Plan -> the selected units are extracted automatically
+     (deterministic, no AI) -> preview + plan details -> one grounded Mistral
+     call -> .docx
 
 The Mistral key + model are configured in ai_client.py (not entered in the UI).
 Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency).
@@ -192,7 +193,7 @@ def render_preview_and_generate() -> None:
         term_weeks=int(term_weeks), cat_weeks=cat_weeks, sessions_per_week=int(spw))
 
     # ----- generate --------------------------------------------------------- #
-    st.subheader("4. Generate Learning Plan")
+    st.divider()
 
     if st.button("Generate Learning Plan", type="primary"):
         runlog.log(f"Generate Learning Plan for {ss.display_code or os_unit.unit_title}")
@@ -359,10 +360,10 @@ if os_ref is not None:
 
 
 # =========================================================================== #
-# 3. Extract unit details (deterministic) -> preview + generate
+# 3. Generate Learning Plan - units extract automatically -> preview + generate
 # =========================================================================== #
 if os_ref is not None and cu_ref is not None:
-    st.header("3. Extract unit details")
+    st.header("3. Generate Learning Plan")
 
     if (os_ref.isced_code and cu_ref.isced_code
             and _norm(os_ref.isced_code) != _norm(cu_ref.isced_code)):
@@ -373,21 +374,25 @@ if os_ref is not None and cu_ref is not None:
     cur_key = (ss.os_sig, os_ref.isced_code, os_ref.title,
                ss.cu_sig, cu_ref.isced_code, cu_ref.title)
 
-    if st.button("Extract unit details", type="primary"):
+    # Extract the selected units automatically (only when the selection is new,
+    # so editing the plan-details form never re-parses).
+    if not (ss.extracted and ss.extracted_key == cur_key and ss.os_unit is not None):
         with st.spinner("Extracting the selected units..."):
-            runlog.log(f"Extracting OS unit '{os_ref.title}' + "
-                       f"Curriculum unit '{cu_ref.title}'")
-            with runlog.timed("Extract selected units"):
-                ou = os_parser.parse_os_unit(ss.os_pages, os_ref)
-                cu = cp.parse_curriculum_unit(ss.cu_pages, cu_ref)
-            ss.os_unit = ou
-            ss.curr_unit = cu
-            ss.display_code = (cu.curriculum_code or ou.os_code
-                               or ou.isced_code or cu.isced_code)
-            ss.extracted = True
-            ss.extracted_key = cur_key
+            try:
+                runlog.log(f"Extracting OS unit '{os_ref.title}' + "
+                           f"Curriculum unit '{cu_ref.title}'")
+                with runlog.timed("Extract selected units"):
+                    ou = os_parser.parse_os_unit(ss.os_pages, os_ref)
+                    cu = cp.parse_curriculum_unit(ss.cu_pages, cu_ref)
+                ss.os_unit = ou
+                ss.curr_unit = cu
+                ss.display_code = (cu.curriculum_code or ou.os_code
+                                   or ou.isced_code or cu.isced_code)
+                ss.extracted = True
+                ss.extracted_key = cur_key
+            except Exception as e:  # noqa: BLE001
+                runlog.error(f"Extraction failed: {e}")
+                st.error(f"Could not extract the selected units: {e}")
 
     if ss.extracted and ss.extracted_key == cur_key and ss.os_unit is not None:
         render_preview_and_generate()
-    elif ss.extracted and ss.extracted_key != cur_key:
-        st.info("Selection changed - click **Extract unit details** again.")
