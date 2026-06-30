@@ -29,6 +29,7 @@ import doc_builder
 import os_parser
 import planner
 import runlog
+import session_plan_builder
 from models import CurriculumUnit, PlanInputs, Unit
 from pdf_utils import load_document
 
@@ -43,6 +44,9 @@ _DEFAULTS = dict(
     # extraction output
     extracted=False, extracted_key=None,
     os_unit=None, curr_unit=None, display_code="",
+    # generated Learning Plan sessions (kept so Session Plans can be generated
+    # afterwards, and survive Streamlit reruns)
+    lp_sessions=None, lp_key=None,
 )
 for _k, _v in _DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -117,6 +121,9 @@ def _invalidate_extraction() -> None:
     ss.extracted_key = None
     ss.os_unit = None
     ss.curr_unit = None
+    # a new selection invalidates any previously-generated plan / session plans
+    ss.lp_sessions = None
+    ss.lp_key = None
 
 
 # =========================================================================== #
@@ -240,6 +247,11 @@ def render_preview_and_generate() -> None:
         st.download_button("Download Learning Plan (.docx)", data=docx_bytes,
                            file_name=fname, mime=DOCX_MIME)
 
+        # Keep the sessions so the user can generate Session Plans afterwards;
+        # this survives the Streamlit reruns triggered by the section-4 widgets.
+        ss.lp_sessions = sessions
+        ss.lp_key = ss.extracted_key
+
         with st.expander("Preview sessions", expanded=True):
             for s in sessions:
                 tag = "[CAT] " if s.is_cat else ""
@@ -255,6 +267,92 @@ def render_preview_and_generate() -> None:
                 b.markdown("*Resources / Learning checks & assessments*")
                 b.write("\n".join(s.resources + ["-"] + s.assessments))
                 st.divider()
+
+    # Section 4 - generate detailed Session Plans for any session in the plan.
+    # Rendered on every rerun (outside the generate button) so the user can keep
+    # generating them; gated on a Learning Plan having been generated for THIS
+    # unit selection.
+    if ss.lp_sessions and ss.lp_key == ss.extracted_key:
+        render_session_plans(os_unit, inputs)
+
+
+# =========================================================================== #
+# Section 4 - Session Plans (one detailed lesson plan per chosen session)
+# =========================================================================== #
+def render_session_plans(os_unit: Unit, inputs: PlanInputs) -> None:
+    sessions = ss.lp_sessions
+    st.divider()
+    st.header("4. Generate Session Plans (optional)")
+    st.caption("Expand any session from the plan above into a detailed KTTC "
+               "session plan. Generate as many as you like.")
+
+    idx = st.selectbox(
+        "Session to expand", range(len(sessions)),
+        format_func=lambda i: (f"Week {sessions[i].week} · Session "
+                               f"{sessions[i].session_no} · {sessions[i].session_title}"),
+        key="sp_pick")
+
+    c1, c2, c3 = st.columns(3)
+    sp_date = c1.text_input("Date", key="sp_date",
+                            placeholder="e.g. 23/8/2026")
+    sp_time = c2.text_input("Time", key="sp_time", placeholder="e.g. 8:00 - 10:00 am")
+    trainer_no = c3.text_input("Trainer number", key="sp_trainerno")
+    duration = st.number_input("Session duration (minutes)", 30, 300, 120,
+                               step=5, key="sp_dur")
+
+    if st.button("Generate Session Plan", key="sp_gen"):
+        sess = sessions[int(idx)]
+        runlog.log(f"Generate Session Plan for '{sess.session_title}'")
+        progress_messages: List[str] = []
+        status_placeholder = st.empty()
+
+        def _push(message: str) -> None:
+            progress_messages.append(message)
+            status_placeholder.code("\n".join(progress_messages[-15:]), language="text")
+
+        with st.spinner("Generating the session plan..."):
+            try:
+                with runlog.timed("AI generate session plan"):
+                    plan = ai_client.generate_session_plan(
+                        os_unit, sess, inputs, display_code=ss.display_code,
+                        trainer_number=trainer_no, session_date=sp_date,
+                        session_time=sp_time, duration_minutes=int(duration),
+                        api_key=None, progress_cb=_push)
+            except ai_client.AIError as e:
+                runlog.error(f"Session-plan AI call failed: {e}")
+                st.warning(f"AI generation failed ({e}); building the session plan "
+                           "from the plan data instead.")
+                plan = ai_client.build_session_plan_offline(
+                    os_unit, sess, inputs, display_code=ss.display_code,
+                    trainer_number=trainer_no, session_date=sp_date,
+                    session_time=sp_time, duration_minutes=int(duration))
+
+        with runlog.timed("Build session-plan .docx"):
+            sp_bytes = session_plan_builder.document_to_bytes(plan)
+        st.success(f"Session plan ready ({plan.total_minutes} minutes, "
+                   f"{len(plan.delivery_steps)} delivery steps).")
+        safe_title = re.sub(r"[^A-Za-z0-9]+", "_", sess.session_title)[:40].strip("_")
+        sp_fname = (f"Session_Plan_W{sess.week}_S{sess.session_no}_"
+                    f"{safe_title or 'session'}.docx")
+        st.download_button("Download Session Plan (.docx)", data=sp_bytes,
+                           file_name=sp_fname, mime=DOCX_MIME, key="sp_dl")
+
+        with st.expander("Preview session plan", expanded=True):
+            st.markdown(f"**{plan.session_title}**")
+            st.markdown("*Introduction*")
+            st.write("\n".join(plan.introduction))
+            for step in plan.delivery_steps:
+                st.markdown(f"**{step.step_label} — {step.minutes} minutes**")
+                col_a, col_b = st.columns(2)
+                col_a.markdown("*Trainer activity*")
+                col_a.write("\n".join(step.trainer_activity))
+                col_a.markdown("*Trainee activity*")
+                col_a.write("\n".join(step.trainee_activity))
+                col_b.markdown("*Learning check / assessment*")
+                col_b.write("\n".join(step.learning_check))
+            st.markdown("*Session review*")
+            st.write("\n".join(plan.review))
+            st.markdown(f"*Assignment:* {plan.assignment}")
 
 
 # --------------------------------------------------------------------------- #

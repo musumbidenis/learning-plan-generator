@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import List, Optional
 
 import requests
 
 import runlog
-from models import Session, Unit
+from models import DeliveryStep, PlanInputs, Session, SessionPlan, Unit
 
 MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
@@ -113,7 +114,9 @@ TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONL
 # --------------------------------------------------------------------------- #
 # HTTP call
 # --------------------------------------------------------------------------- #
-def _post(model: str, api_key: str, prompt: str, timeout: int = 120) -> dict:
+def _post(model: str, api_key: str, prompt: str, timeout: int = 120,
+          schema: Optional[dict] = None,
+          schema_name: str = "learning_plan_sessions") -> dict:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -122,8 +125,8 @@ def _post(model: str, api_key: str, prompt: str, timeout: int = 120) -> dict:
         "response_format": {
             "type": "json_schema",
             "json_schema": {
-                "name": "learning_plan_sessions",
-                "schema": _response_schema(),
+                "name": schema_name,
+                "schema": schema if schema is not None else _response_schema(),
                 "strict": True,
             },
         },
@@ -172,14 +175,18 @@ def _emit_progress(progress_cb, message: str) -> None:
             pass
 
 
-def call_mistral(prompt: str, api_key: str, model: str,
-                 progress_cb=None) -> List[dict]:
-    """One grounded request with short retry for transient network failures."""
+def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
+               schema_name: str, progress_cb=None):
+    """One grounded request (short retry on transient network errors).
+
+    Returns the parsed JSON exactly as the model produced it (a list or a dict);
+    callers coerce it to the shape they expect.
+    """
     _emit_progress(progress_cb, f"AI: trying model {model}")
     last_error: Optional[Exception] = None
     for attempt in range(1, 4):
         try:
-            resp = _post(model, api_key, prompt)
+            resp = _post(model, api_key, prompt, schema=schema, schema_name=schema_name)
         except (requests.Timeout, requests.ConnectionError) as e:
             last_error = e
             if attempt < 3:
@@ -197,15 +204,9 @@ def call_mistral(prompt: str, api_key: str, model: str,
             except AIError as e:
                 raise AIError(f"{model}: {e}") from e
             try:
-                data = json.loads(text)
+                return json.loads(text)
             except json.JSONDecodeError as e:
                 raise AIError(f"{model} returned invalid JSON: {e}") from e
-            if isinstance(data, dict):
-                data = data.get("sessions") or data.get("data") or [data]
-            if not isinstance(data, list):
-                raise AIError(f"{model} did not return a JSON array")
-            _emit_progress(progress_cb, f"AI: {model} succeeded ({len(data)} session rows)")
-            return data
 
         if resp.status_code in (401, 403):
             raise AIError(
@@ -220,6 +221,19 @@ def call_mistral(prompt: str, api_key: str, model: str,
     if last_error is not None:
         raise AIError(f"{model}: network error: {last_error}") from last_error
     raise AIError(f"{model}: request failed")
+
+
+def call_mistral(prompt: str, api_key: str, model: str,
+                 progress_cb=None) -> List[dict]:
+    """The Learning-Plan call: returns the JSON array of session rows."""
+    data = _chat_json(prompt, api_key, model, _response_schema(),
+                      "learning_plan_sessions", progress_cb=progress_cb)
+    if isinstance(data, dict):
+        data = data.get("sessions") or data.get("data") or [data]
+    if not isinstance(data, list):
+        raise AIError(f"{model} did not return a JSON array")
+    _emit_progress(progress_cb, f"AI: {model} succeeded ({len(data)} session rows)")
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -418,6 +432,341 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     _emit_progress(progress_cb, "AI: prompt prepared")
     ai_rows = call_mistral(prompt, api_key, model, progress_cb=progress_cb)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
+
+
+# =========================================================================== #
+# SESSION PLAN - one detailed lesson plan per chosen Learning-Plan session.
+#
+# The Learning Plan already gives each session its learning outcomes, key points,
+# trainee activities, resources and assessments. A Session Plan expands ONE of
+# those sessions into the minute-by-minute KTTC delivery breakdown (Introduction
+# -> Session Delivery steps -> Session Review). Only that breakdown is generated;
+# everything else is carried over verbatim, and a deterministic fallback fills
+# the breakdown when no API is available, so a session plan never hard-fails.
+# =========================================================================== #
+def _session_plan_schema() -> dict:
+    str_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "properties": {
+            "introduction": str_array,
+            "delivery_steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "step_label": {"type": "string"},
+                        "minutes": {"type": "integer"},
+                        "trainer_activity": str_array,
+                        "trainee_activity": str_array,
+                        "learning_check": str_array,
+                    },
+                    "required": ["step_label", "minutes", "trainer_activity",
+                                 "trainee_activity", "learning_check"],
+                },
+            },
+            "review": str_array,
+            "assignment": {"type": "string"},
+            "lln_requirements": {"type": "string"},
+            "safety_requirements": {"type": "string"},
+        },
+        "required": ["introduction", "delivery_steps", "review", "assignment",
+                     "lln_requirements", "safety_requirements"],
+    }
+
+
+def build_session_plan_prompt(unit: Unit, session: Session,
+                              duration_minutes: int) -> str:
+    delivery = max(10, int(duration_minutes) - 10)   # 5' intro + 5' review fixed
+    los = "\n".join(session.learning_outcomes) or "(derive from the title)"
+    kps = "\n".join(session.key_points) or "(none supplied)"
+    acts = "\n".join(session.trainee_activities) or "(none supplied)"
+    assess = "\n".join(session.assessments) or "(none supplied)"
+    level = unit.level or "6"
+    methods = "; ".join(unit.assessment_methods) or ("Observation; Oral "
+        "questioning; Written assessment; Practical assessment; Portfolio of evidence")
+
+    return f"""You are a senior TVET trainer and industry expert writing ONE detailed SESSION PLAN (a single lesson) for the session below, taken from an approved Learning Plan. Ground everything in the supplied content; do NOT invent new topics.
+
+UNIT: {unit.unit_title} | CODE: {unit.os_code} | LEVEL: {level}
+SESSION TITLE: {session.session_title}
+
+THIS SESSION'S LEARNING OUTCOMES:
+{los}
+
+THIS SESSION'S LEARNING KEY POINTS (authoritative content to teach):
+{kps}
+
+THIS SESSION'S PLANNED TRAINEE ACTIVITIES (active-learning methods to operationalise):
+{acts}
+
+THIS SESSION'S ASSESSMENTS:
+{assess}
+OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
+
+Produce a JSON object with these fields:
+- introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does (takes roll call; reviews the previous session; states this session's title and expected learning outcomes).
+- delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (their "minutes" must sum to {delivery}). Each step:
+    * step_label: "Step 1", "Step 2", "Step 3" (in order).
+    * minutes: integer; the longest step is the hands-on/practice step.
+    * trainer_activity: 1-3 short lines describing what the TRAINER does this step - name the active-learning method (e.g. Group Discussion, Think-Pair-Share, Demonstration, Case Study) and reference THIS session's specific key points/tools/tasks. Concrete, never generic.
+    * trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.
+    * learning_check: grouped assessment lines for this step - a CAPITALISED group word ("Knowledge", "Skills", or "Attitudes") followed by numbered items ("1. Oral questioning", "2. Observation of developed work"), drawn from the session's assessments / evidence-guide methods. Early steps lean on Knowledge; hands-on steps add Skills.
+  Order the steps so they progress from understanding -> guided practice -> independent application.
+- review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" (summarises key points; answers questions; previews the next session).
+- assignment: ONE concrete take-home task grounded in this session's content (a full sentence).
+- lln_requirements: one sentence noting how trainees with Language/Literacy/Numeracy or other special needs are catered for in THIS session (e.g. simplified handouts, sign-language interpreter, extra time).
+- safety_requirements: one sentence on the workplace SOPs / safety precautions relevant to THIS session's topic.
+
+TERMINOLOGY - Kenya CBET only: "trainee" (never student/learner/pupil), "trainer" (never teacher/lecturer), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object.
+"""
+
+
+def _group_assessments(assessments: List[str]) -> "dict":
+    """Split a session's assessment lines into Knowledge / Skills / Attitudes."""
+    groups: dict = {"Knowledge": [], "Skills": [], "Attitudes": []}
+    current = "Knowledge"
+    for raw in assessments:
+        line = str(raw).strip()
+        low = line.lower()
+        if low.startswith("knowledge"):
+            current = "Knowledge"
+            continue
+        if low.startswith("skill"):
+            current = "Skills"
+            continue
+        if low.startswith("attitude"):
+            current = "Attitudes"
+            continue
+        if line:
+            groups[current].append(line)
+    return groups
+
+
+def _check_lines(groups: "dict", keys: List[str]) -> List[str]:
+    """Render selected assessment groups as 'Heading' + numbered items."""
+    out: List[str] = []
+    for key in keys:
+        items = groups.get(key) or []
+        if not items:
+            continue
+        out.append(key)
+        for i, it in enumerate(items[:3], start=1):
+            txt = re.sub(r"^\s*\d+[\.\)]\s*", "", it)
+            out.append(f"{i}. {txt}")
+    return out
+
+
+def _split_minutes(total: int, n: int) -> List[int]:
+    """Split `total` minutes across `n` steps, giving the middle step the most."""
+    n = max(1, n)
+    base = max(5, total // n)
+    mins = [base] * n
+    mins[len(mins) // 2] += total - sum(mins)     # absorb the remainder centrally
+    if mins[len(mins) // 2] < 5:                   # keep every step >= 5'
+        mins[len(mins) // 2] = 5
+    return mins
+
+
+def _default_delivery(unit: Unit, session: Session, duration_minutes: int) -> dict:
+    """Deterministic Introduction / steps / Review built from the session itself.
+
+    Used as the no-API fallback AND as the per-field safety net for thin AI output,
+    so a session plan is always complete and grounded in the Learning-Plan session.
+    """
+    # method bullets vs. follow-up lines in the planned trainee activities
+    method_bullets, followup = [], ""
+    capture_followup = False
+    for raw in session.trainee_activities:
+        line = str(raw).strip()
+        if not line:
+            continue
+        if line.lower().startswith("follow up activity"):
+            capture_followup = True
+            continue
+        if line.lower().startswith("due date"):
+            capture_followup = False
+            continue
+        if capture_followup and not followup:
+            followup = re.sub(r"^\s*\d+[\.\)]\s*", "", line)
+            continue
+        if line.startswith("-"):
+            method_bullets.append(line.lstrip("-").strip())
+    if not method_bullets:
+        method_bullets = [f"Explore {session.session_title.lower()} through guided discussion.",
+                          f"Apply the key points of {session.session_title.lower()} in a short practical task."]
+
+    groups = _group_assessments(session.assessments)
+    delivery = max(10, int(duration_minutes) - 10)
+    n = min(4, max(2, len(method_bullets)))
+    method_bullets = method_bullets[:n]
+    mins = _split_minutes(delivery, n)
+
+    steps = []
+    for i, activity in enumerate(method_bullets):
+        is_practice = (i == n - 1)
+        steps.append({
+            "step_label": f"Step {i + 1}",
+            "minutes": mins[i],
+            "trainer_activity": [
+                "Trainer:",
+                f"Facilitates the activity and guides trainees through {session.session_title.lower()}.",
+            ],
+            "trainee_activity": ["Trainee(s):", activity],
+            "learning_check": _check_lines(
+                groups, ["Knowledge", "Skills"] if is_practice else ["Knowledge"])
+            or ["Knowledge", "1. Oral questioning"],
+        })
+
+    return {
+        "introduction": [
+            "Trainer:",
+            "Takes roll call.",
+            "Reviews the previous session.",
+            "States the session title and the expected learning outcomes.",
+        ],
+        "delivery_steps": steps,
+        "review": [
+            "Trainer:",
+            "Summarizes the key points covered in the session.",
+            "Responds to trainee questions and clarifies difficult areas.",
+            "Previews the next session.",
+        ],
+        "assignment": followup or f"Complete a short practical exercise on {session.session_title.lower()}.",
+        "lln_requirements": ("Identify any trainees with Language, Literacy or Numeracy "
+                             "or other special needs and put measures in place (e.g. simplified "
+                             "handouts, extra time, or a sign-language interpreter)."),
+        "safety_requirements": ("Comply with the workplace standard operating procedures (SOPs) "
+                                "applicable to this session."),
+    }
+
+
+def _coerce_steps(raw_steps, fallback_steps: List[dict]) -> List[DeliveryStep]:
+    steps: List[DeliveryStep] = []
+    for raw in (raw_steps if isinstance(raw_steps, list) else []):
+        if not isinstance(raw, dict):
+            continue
+        trainer = _as_list(raw.get("trainer_activity"))
+        trainee = _as_list(raw.get("trainee_activity"))
+        check = _as_list(raw.get("learning_check"))
+        if not (trainer or trainee):
+            continue
+        try:
+            minutes = int(raw.get("minutes") or 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        steps.append(DeliveryStep(
+            step_label=str(raw.get("step_label") or f"Step {len(steps) + 1}").strip(),
+            minutes=max(0, minutes),
+            trainer_activity=trainer,
+            trainee_activity=trainee,
+            learning_check=check or ["Knowledge", "1. Oral questioning"],
+        ))
+    if not steps:
+        steps = [DeliveryStep(step_label=s["step_label"], minutes=s["minutes"],
+                              trainer_activity=s["trainer_activity"],
+                              trainee_activity=s["trainee_activity"],
+                              learning_check=s["learning_check"])
+                 for s in fallback_steps]
+    return steps
+
+
+def _assemble_session_plan(unit: Unit, session: Session, inputs: PlanInputs,
+                           body: dict, *, display_code: str, trainer_number: str,
+                           session_date: str, session_time: str) -> SessionPlan:
+    return SessionPlan(
+        unit_title=unit.unit_title,
+        unit_code=display_code or unit.os_code or unit.isced_code,
+        session_title=session.session_title,
+        trainer_name=inputs.trainer_name,
+        trainer_number=trainer_number,
+        institution=inputs.institution,
+        level=inputs.level or unit.level,
+        class_code=inputs.class_code,
+        num_trainees=str(inputs.num_trainees),
+        session_date=session_date,
+        session_time=session_time,
+        learning_outcomes=list(session.learning_outcomes),
+        resources=list(session.resources),
+        lln_requirements=body.get("lln_requirements", ""),
+        safety_requirements=body.get("safety_requirements", ""),
+        introduction=_as_list(body.get("introduction")),
+        delivery_steps=body["delivery_steps"],
+        review=_as_list(body.get("review")),
+        assignment=str(body.get("assignment") or "").strip(),
+    )
+
+
+def _merge_session_plan_body(ai: dict, unit: Unit, session: Session,
+                             duration_minutes: int) -> dict:
+    """AI body with deterministic safety nets for every thin/missing field."""
+    defaults = _default_delivery(unit, session, duration_minutes)
+    ai = ai if isinstance(ai, dict) else {}
+
+    intro = _as_list(ai.get("introduction")) or defaults["introduction"]
+    review = _as_list(ai.get("review")) or defaults["review"]
+    steps = _coerce_steps(ai.get("delivery_steps"), defaults["delivery_steps"])
+    assignment = str(ai.get("assignment") or "").strip() or defaults["assignment"]
+    lln = str(ai.get("lln_requirements") or "").strip() or defaults["lln_requirements"]
+    safety = str(ai.get("safety_requirements") or "").strip() or defaults["safety_requirements"]
+
+    return {
+        "introduction": intro,
+        "delivery_steps": steps,
+        "review": review,
+        "assignment": assignment,
+        "lln_requirements": lln,
+        "safety_requirements": safety,
+    }
+
+
+def build_session_plan_offline(unit: Unit, session: Session, inputs: PlanInputs, *,
+                               display_code: str = "", trainer_number: str = "",
+                               session_date: str = "", session_time: str = "",
+                               duration_minutes: int = 120) -> SessionPlan:
+    """A complete SessionPlan built deterministically from the session (no AI)."""
+    body = _default_delivery(unit, session, duration_minutes)
+    body["delivery_steps"] = _coerce_steps(body["delivery_steps"], body["delivery_steps"])
+    return _assemble_session_plan(
+        unit, session, inputs, body, display_code=display_code,
+        trainer_number=trainer_number, session_date=session_date,
+        session_time=session_time)
+
+
+def generate_session_plan(unit: Unit, session: Session, inputs: PlanInputs, *,
+                          display_code: str = "", trainer_number: str = "",
+                          session_date: str = "", session_time: str = "",
+                          duration_minutes: int = 120, api_key: str = "",
+                          model: Optional[str] = None, progress_cb=None) -> SessionPlan:
+    """One grounded AI call for the chosen session's delivery breakdown.
+
+    Falls back to the deterministic build if no key is configured or the call
+    fails, so the user always gets a usable session plan.
+    """
+    if api_key is None:
+        api_key = load_api_key()
+    if model is None:
+        model = load_model_name()
+
+    if not api_key:
+        _emit_progress(progress_cb, "Session plan: no API key - building offline.")
+        return build_session_plan_offline(
+            unit, session, inputs, display_code=display_code,
+            trainer_number=trainer_number, session_date=session_date,
+            session_time=session_time, duration_minutes=duration_minutes)
+
+    prompt = build_session_plan_prompt(unit, session, duration_minutes)
+    _emit_progress(progress_cb, "Session plan: prompt prepared")
+    ai = _chat_json(prompt, api_key, model, _session_plan_schema(),
+                    "session_plan", progress_cb=progress_cb)
+    body = _merge_session_plan_body(ai if isinstance(ai, dict) else {},
+                                    unit, session, duration_minutes)
+    _emit_progress(progress_cb,
+                   f"Session plan: {len(body['delivery_steps'])} delivery steps")
+    return _assemble_session_plan(
+        unit, session, inputs, body, display_code=display_code,
+        trainer_number=trainer_number, session_date=session_date,
+        session_time=session_time)
 
 
 _ENV_LOADED = False

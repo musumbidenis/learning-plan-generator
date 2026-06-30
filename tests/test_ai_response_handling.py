@@ -59,7 +59,7 @@ def test_extract_text_surfaces_finish_reason():
 def test_call_mistral_raises_aierror_on_empty_choice(monkeypatch):
     monkeypatch.setattr(
         ai_client, "_post",
-        lambda model, api_key, prompt, timeout=180:
+        lambda model, api_key, prompt, timeout=180, **kwargs:
             FakeResp(200, {"choices": [{"finish_reason": "content_filter"}]}))
     with pytest.raises(AIError):
         call_mistral("prompt", "key", "m1")
@@ -68,7 +68,7 @@ def test_call_mistral_raises_aierror_on_empty_choice(monkeypatch):
 def test_call_mistral_raises_aierror_on_invalid_json(monkeypatch):
     monkeypatch.setattr(
         ai_client, "_post",
-        lambda model, api_key, prompt, timeout=180:
+        lambda model, api_key, prompt, timeout=180, **kwargs:
             FakeResp(200, _ok_payload("not json at all")))
     with pytest.raises(AIError):
         call_mistral("p", "k", "m1")
@@ -76,7 +76,7 @@ def test_call_mistral_raises_aierror_on_invalid_json(monkeypatch):
 
 def test_call_mistral_aborts_immediately_on_403(monkeypatch):
     """A 403 is a key problem, not a model problem."""
-    def fake_post(model, api_key, prompt, timeout=180):
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         return FakeResp(403, text="PERMISSION_DENIED")
 
     monkeypatch.setattr(ai_client, "_post", fake_post)
@@ -87,7 +87,7 @@ def test_call_mistral_aborts_immediately_on_403(monkeypatch):
 def test_call_mistral_retries_transient_timeouts(monkeypatch):
     attempts = []
 
-    def fake_post(model, api_key, prompt, timeout=180):
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         attempts.append(timeout)
         if len(attempts) < 3:
             raise requests.Timeout("timed out")
@@ -103,7 +103,7 @@ def test_call_mistral_retries_transient_timeouts(monkeypatch):
 def test_call_mistral_retries_connection_reset(monkeypatch):
     attempts = []
 
-    def fake_post(model, api_key, prompt, timeout=180):
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         attempts.append(timeout)
         if len(attempts) < 3:
             raise requests.ConnectionError(

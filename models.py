@@ -155,3 +155,60 @@ class PlanInputs:
     term_weeks: int = 12
     cat_weeks: List[int] = field(default_factory=lambda: [4, 8, 12])
     sessions_per_week: int = 2
+
+
+# --------------------------------------------------------------------------- #
+# Session Plan (Module D2 - one detailed KTTC lesson plan per Learning-Plan
+# session). The Learning Plan lists every session for the term; a Session Plan
+# zooms into ONE of those sessions and breaks its delivery down minute-by-minute
+# (Introduction -> Session Delivery steps -> Session Review), matching the
+# RVNP/KTTC "SESSION PLAN" template.
+# --------------------------------------------------------------------------- #
+@dataclass
+class DeliveryStep:
+    """One row of the 'Session Delivery' sub-grid (a teaching step)."""
+    step_label: str = "Step 1"                              # 'Step 1', '2(a)'...
+    minutes: int = 10
+    trainer_activity: List[str] = field(default_factory=list)
+    trainee_activity: List[str] = field(default_factory=list)
+    # 'Learning Check/Assessment' grouped lines (e.g. 'Knowledge', '1. ...').
+    learning_check: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SessionPlan:
+    """A single detailed session (lesson) plan ready to render to .docx.
+
+    Header identity is copied from the Learning Plan + UI; the delivery body
+    (introduction / delivery_steps / review) is the one piece that is newly
+    generated for the chosen session.
+    """
+    # --- header identity --------------------------------------------------- #
+    unit_title: str = ""
+    unit_code: str = ""
+    session_title: str = ""
+    trainer_name: str = ""
+    trainer_number: str = ""
+    institution: str = ""
+    level: str = ""
+    class_code: str = ""
+    num_trainees: str = ""
+    session_date: str = ""
+    session_time: str = ""
+
+    # --- carried over from the Learning-Plan session ----------------------- #
+    learning_outcomes: List[str] = field(default_factory=list)
+    resources: List[str] = field(default_factory=list)
+    lln_requirements: str = ""
+    safety_requirements: str = ""
+
+    # --- generated delivery body ------------------------------------------- #
+    introduction: List[str] = field(default_factory=list)
+    delivery_steps: List[DeliveryStep] = field(default_factory=list)
+    review: List[str] = field(default_factory=list)
+    assignment: str = ""
+
+    @property
+    def total_minutes(self) -> int:
+        """5' intro + sum(step minutes) + 5' review (matches the template)."""
+        return 5 + sum(max(0, s.minutes) for s in self.delivery_steps) + 5
