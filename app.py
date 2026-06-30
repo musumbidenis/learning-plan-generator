@@ -399,13 +399,19 @@ if os_ref is not None and cu_ref is not None:
 
 
 # =========================================================================== #
-# Footer (centered, current year)
+# Footer (centered, fixed to the bottom of the screen)
 # =========================================================================== #
 st.markdown(
-    f"<hr style='margin-top:2.5rem; margin-bottom:0.4rem; border:none; "
-    f"border-top:1px solid rgba(128,128,128,0.25);'>"
-    f"<div style='text-align:center; color:gray; font-size:0.9rem; "
-    f"padding-bottom:0.6rem;'>Made with &#10084;&#65039; by Musumbi &#128081;"
-    f"<br><span style='font-size:0.8rem;'>&copy; {_dt.date.today().year}</span>"
-    f"</div>",
+    "<style>"
+    "  .block-container { padding-bottom: 4.5rem; }"   # keep content clear of footer
+    "  .app-footer {"
+    "    position: fixed; left: 0; bottom: 0; width: 100%;"
+    "    text-align: center; color: gray; font-size: 0.85rem; padding: 8px 0;"
+    "    border-top: 1px solid rgba(128,128,128,0.25);"
+    "    background-color: rgba(127,127,127,0.06);"
+    "    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);"
+    "    z-index: 1000;"
+    "  }"
+    "</style>"
+    "<div class='app-footer'>Made with &#10084;&#65039; by Musumbi &#128081;</div>",
     unsafe_allow_html=True)
