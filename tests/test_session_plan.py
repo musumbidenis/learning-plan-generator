@@ -207,20 +207,40 @@ def test_docx_intro_and_review_are_bulleted():
     assert "•  Summarize the key points covered in the session." in text
 
 
-def test_docx_reflection_has_no_red_hint():
+def test_docx_reflection_has_no_red_hint_and_bold_signature_line():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
     doc = session_plan_builder.build_session_plan_document(plan)
-    reflection = next(c for c in _cell_texts(doc)
-                      if c.strip().startswith("Session Reflection"))
-    assert reflection.strip() == "Session Reflection:"        # no "(remarks...)" hint
+    # locate the reflection cell
+    cell = None
+    for t in doc.tables:
+        for row in t.rows:
+            for c in row.cells:
+                if c.paragraphs[0].text.strip().startswith("Session Reflection"):
+                    cell = c
+    assert cell is not None
+    text = "\n".join(p.text for p in cell.paragraphs)
+    assert "(remarks" not in text                            # old red hint is gone
+    assert "Signature:" in text                              # bottom fill-in line
+    assert "_" * 20 in text                                  # with a blank to sign on
+    # the 'Signature:' label is bold
+    sig_runs = [r for p in cell.paragraphs for r in p.runs
+                if r.text.strip() == "Signature:"]
+    assert sig_runs and all(r.bold for r in sig_runs)
 
 
 def test_activity_lines_strips_repeated_role_prefix():
     lines = ["Trainer:", "Trainer: Take roll call.",
-             "Trainer - Review the previous session.", "State the outcomes."]
+             "Trainer - Review the previous session.",
+             "Trainer takes roll call.",             # NO colon - was the bug
+             "Trainee(s) build a questionnaire.",
+             "State the outcomes."]
     assert session_plan_builder._activity_lines(lines) == [
-        "Take roll call.", "Review the previous session.", "State the outcomes."]
+        "Take roll call.", "Review the previous session.",
+        "takes roll call.", "build a questionnaire.", "State the outcomes."]
+    # a word that merely starts with 'trainee' must NOT be stripped
+    assert session_plan_builder._activity_lines(["Traineeship overview."]) == [
+        "Traineeship overview."]
 
 
 def test_docx_intro_bullets_do_not_repeat_trainer():
@@ -302,19 +322,33 @@ def test_docx_multiword_resource_not_charsplit():
     assert "Kotler" in text and "Marketing Management" in text
 
 
-def test_docx_signature_block_has_date_and_sign_10pt():
+def test_docx_approved_by_row_is_inside_the_table_labels_bold():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
     doc = session_plan_builder.build_session_plan_document(plan)
-    rows = {role: next((p for p in doc.paragraphs
-                        if p.text.strip().startswith(role)), None)
-            for role in ("PREPARED BY", "VERIFIED BY", "APPROVED BY")}
-    for role, par in rows.items():
-        assert par is not None, f"missing {role} row"
-        # DATE + SIGN labels preserved on the same row
-        assert "DATE:" in par.text and "SIGN:" in par.text
-        # 10 pt throughout; only the labels are bold (leaders are not)
-        for run in par.runs:
-            assert run.font.size == Pt(10)
-        bold_labels = {r.text.strip() for r in par.runs if r.bold}
-        assert bold_labels == {f"{role}:", "DATE:", "SIGN:"}
+
+    # the sign-off row lives INSIDE the table now
+    cell = None
+    for t in doc.tables:
+        for row in t.rows:
+            for c in row.cells:
+                if c.paragraphs[0].text.strip().startswith("Approved By:"):
+                    cell = c
+    assert cell is not None
+    par = cell.paragraphs[0]
+    assert "Approved By:" in par.text
+    assert "Date:" in par.text
+    assert "Signature:" in par.text
+    assert "_" * 15 in par.text
+    # exactly the three labels are bold; the underscores are not
+    bold = {r.text.strip() for r in par.runs if r.bold}
+    assert bold == {"Approved By:", "Date:", "Signature:"}
+
+
+def test_docx_has_no_signature_block_outside_the_table():
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    doc = session_plan_builder.build_session_plan_document(plan)
+    body = "\n".join(p.text for p in doc.paragraphs)      # paragraphs OUTSIDE tables
+    for token in ("PREPARED BY", "VERIFIED BY", "APPROVED BY", "SIGN:"):
+        assert token not in body

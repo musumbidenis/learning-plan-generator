@@ -13,9 +13,9 @@ Replicates the RVNP/KTTC "SESSION PLAN" template exactly:
         1. Introduction / 2. Session Delivery / 3. Session Review,
       - the delivery sub-grid (Time | Trainer Activity | Trainee Activity |
         Learning Check/Assessment) with one row per teaching step,
-      - Assignment, TOTAL TIME and a tall Session Reflection box.
-  * Signature block (PREPARED BY / VERIFIED BY / APPROVED BY) double-spaced,
-    each with dotted leaders + DATE + SIGN.
+      - Assignment, TOTAL TIME and a tall Session Reflection box that ends with a
+        bold 'Signature:____' fill-in line,
+      - a final 'Approved By: ___ Date: ___ Signature: ___' sign-off row.
 
 Every list renders LINE-BY-LINE (one paragraph per string) - never iterate a raw
 string, which is what causes the 'G / r / o / u / p' char-splitting bug.
@@ -42,14 +42,9 @@ FONT_SIZE = 12.0           # body / table font size (pt)
 BANNER_SIZE = 14.0         # grey section banners + the title's section labels
 TITLE_SIZE = 14.0
 BANNER_FILL = "D9D9D9"     # grey shading on the section banners
-GUIDE_RED = "C00000"       # red used only for the blank-box reflection hint
-SIGN_SIZE = 10.0           # bottom sign-off row font size
 
 # 6-column grid (cm) - lifted verbatim from the sample template.
 GRID_WIDTHS = [2.52, 2.67, 4.28, 0.73, 4.95, 4.28]
-# Dotted leaders for the ROLE / DATE / SIGN fill-in blanks (one sign-off per row).
-SIGN_LEADER = "…" * 12
-SIGN_LEADER_SHORT = "…" * 8
 
 
 # --------------------------------------------------------------------------- #
@@ -176,19 +171,27 @@ def _role_or_group_bold(line: str) -> bool:
     return s.lower() in _GROUP_WORDS
 
 
-_ROLE_PREFIX = re.compile(r"^\s*(trainer|trainee)(\(s\)|s)?\s*[:\-]\s*", re.I)
+# A line that is ONLY a role label ('Trainer:', 'Trainee(s)') - dropped entirely.
+_ROLE_ONLY = re.compile(r"^(trainer|trainee)(\(s\)|s)?\s*[:\-]?\s*$", re.I)
+# A leading role prefix on a real activity line - with OR without a colon/dash,
+# e.g. 'Trainer: takes roll call' AND 'Trainer takes roll call'.
+_ROLE_PREFIX = re.compile(r"^(trainer|trainee)(\(s\)|s)?\s*[:\-]?\s+", re.I)
 
 
 def _activity_lines(lines: List[str]) -> List[str]:
-    """Strip a leading 'Trainer:'/'Trainee(s):' prefix off each activity line.
+    """Strip a leading 'Trainer'/'Trainee(s)' off each activity line.
 
-    The section already carries ONE bold 'Trainer:' label, so a per-line prefix
-    (which the model sometimes repeats on every bullet) is redundant and dropped.
-    A bare 'Trainer:' line collapses to nothing and is skipped entirely.
+    The section already carries ONE bold 'Trainer:' label, so any per-line role
+    prefix (which the model sometimes repeats on every bullet, with or without a
+    colon) is redundant and dropped. A line that is only the role label collapses
+    to nothing and is skipped entirely.
     """
     out: List[str] = []
     for raw in (lines or []):
-        s = _ROLE_PREFIX.sub("", str(raw).strip()).strip()
+        s = str(raw).strip()
+        if not s or _ROLE_ONLY.match(s):
+            continue
+        s = _ROLE_PREFIX.sub("", s).strip()
         if s:
             out.append(s)
     return out
@@ -323,19 +326,6 @@ def _delivery_step_row(table, step) -> None:
                  valign=WD_CELL_VERTICAL_ALIGNMENT.TOP)
 
 
-def _signature_paragraph(doc, role: str) -> None:
-    """One sign-off row: 'ROLE: … DATE: … SIGN: …' - all 10 pt, only labels bold."""
-    par = doc.add_paragraph()
-    par.paragraph_format.line_spacing = 2.0
-    par.paragraph_format.space_after = Pt(0)
-    _style_run(par.add_run(f"{role}: "), size=SIGN_SIZE, bold=True)
-    _style_run(par.add_run(f"{SIGN_LEADER} "), size=SIGN_SIZE, bold=False)
-    _style_run(par.add_run("DATE: "), size=SIGN_SIZE, bold=True)
-    _style_run(par.add_run(f"{SIGN_LEADER_SHORT} "), size=SIGN_SIZE, bold=False)
-    _style_run(par.add_run("SIGN: "), size=SIGN_SIZE, bold=True)
-    _style_run(par.add_run(SIGN_LEADER_SHORT), size=SIGN_SIZE, bold=False)
-
-
 # --------------------------------------------------------------------------- #
 # Page setup + assembly
 # --------------------------------------------------------------------------- #
@@ -425,13 +415,27 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
     par = merged.paragraphs[0]
     par.paragraph_format.space_after = Pt(0)
     _style_run(par.add_run("Session Reflection:"), bold=True)
+    # a signature fill-in line pinned to the bottom of the reflection box
+    sig_par = merged.add_paragraph()
+    sig_par.paragraph_format.space_before = Pt(60)
+    sig_par.paragraph_format.space_after = Pt(0)
+    _style_run(sig_par.add_run("Signature:"), bold=True)
+    _style_run(sig_par.add_run("_" * 27), bold=False)
     merged.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
 
-    # ----- signatures ------------------------------------------------------ #
-    doc.add_paragraph()
-    _signature_paragraph(doc, "PREPARED BY")
-    _signature_paragraph(doc, "VERIFIED BY")
-    _signature_paragraph(doc, "APPROVED BY")
+    # ----- Approved-by sign-off row (inside the table) --------------------- #
+    cells = _new_row(table)
+    merged = _merge(cells, 0, 5)
+    _clear_paragraphs(merged)
+    row_par = merged.paragraphs[0]
+    row_par.paragraph_format.space_before = Pt(0)
+    row_par.paragraph_format.space_after = Pt(0)
+    for label, blanks, tail in (("Approved By: ", 23, " "),
+                                ("Date: ", 18, " "),
+                                ("Signature: ", 18, "")):
+        _style_run(row_par.add_run(label), bold=True)
+        _style_run(row_par.add_run("_" * blanks + tail), bold=False)
+    merged.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
     return doc
 
 
