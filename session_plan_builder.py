@@ -446,3 +446,27 @@ def document_to_bytes(plan: SessionPlan) -> bytes:
 def save_document(plan: SessionPlan, path: str) -> str:
     build_session_plan_document(plan).save(path)
     return path
+
+
+def plans_to_zip(named_plans) -> bytes:
+    """Render several session plans and pack them into ONE .zip (in memory).
+
+    `named_plans` is an iterable of (filename, SessionPlan); duplicate filenames
+    are disambiguated with a numeric suffix so nothing is silently overwritten.
+    """
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    used: dict = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, plan in named_plans:
+            name = fname or "Session_Plan.docx"
+            if name in used:
+                used[name] += 1
+                stem, dot, ext = name.rpartition(".")
+                name = f"{stem}_{used[name]}.{ext}" if dot else f"{name}_{used[name]}"
+            else:
+                used[name] = 0
+            zf.writestr(name, document_to_bytes(plan))
+    return buf.getvalue()

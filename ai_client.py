@@ -107,7 +107,7 @@ The supplied session titles and Curriculum Learning Key Points are auto-extracte
 
 CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = "-Graded Knowledge.".
 
-TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY the JSON array.
+TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY the JSON array.
 """
 
 
@@ -511,7 +511,7 @@ Produce a JSON object with these fields:
 - delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (every step/sub-step "minutes" must sum to {delivery}). Each step:
     * step_label: "Step 1", "Step 2", "Step 3" (in order). If a single step is involving enough to need its own breakdown, split it into consecutive sub-steps labelled "Step 1(a)", "Step 1(b)", "Step 1(c)"... - each a full step object with its own minutes, trainer_activity, trainee_activity and learning_check. Only break a step down when it genuinely warrants it; otherwise keep one row per step.
     * minutes: integer; the longest step is the hands-on/practice step.
-    * trainer_activity: 1-3 short lines describing what the TRAINER does this step - name the active-learning method (e.g. Group Discussion, Think-Pair-Share, Demonstration, Case Study) and reference THIS session's specific key points/tools/tasks. Concrete, never generic.
+    * trainer_activity: 1-3 short lines describing what the TRAINER does this step - name the CBET active-learning method (e.g. Group Discussion, Think-Pair-Share, Demonstration, Guided Practice, Case Study) and reference THIS session's specific key points/tools/tasks. Concrete, never generic. Facilitate the session - never "lecture" or "give a lecture".
     * trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.
     * learning_check: grouped assessment lines for this step - a CAPITALISED group word ("Knowledge", "Skills", or "Attitudes") followed by numbered items ("1. Oral questioning", "2. Observation of developed work"), drawn from the session's assessments / evidence-guide methods. Early steps lean on Knowledge; hands-on steps add Skills.
   Order the steps so they progress from understanding -> guided practice -> independent application.
@@ -520,7 +520,7 @@ Produce a JSON object with these fields:
 - lln_requirements: one sentence noting how trainees with Language/Literacy/Numeracy or other special needs are catered for in THIS session (e.g. simplified handouts, sign-language interpreter, extra time).
 - safety_requirements: one sentence on the workplace SOPs / safety precautions relevant to THIS session's topic.
 
-TERMINOLOGY - Kenya CBET only: "trainee" (never student/learner/pupil), "trainer" (never teacher/lecturer), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object.
+TERMINOLOGY - Kenya CBET only: "trainee" (never student/learner/pupil), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object.
 """
 
 
