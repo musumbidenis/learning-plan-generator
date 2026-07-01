@@ -30,7 +30,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import (WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE,
                              WD_TABLE_ALIGNMENT)
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
@@ -297,7 +297,15 @@ def _banner(table, text: str, *, align=None) -> None:
     _write_lines(merged, [text], size=BANNER_SIZE, all_bold=True, align=align)
 
 
-def _delivery_header(table) -> None:
+def _set_repeat_header(row) -> None:
+    """Mark a table row to repeat at the top of every page the table spans."""
+    trPr = row._tr.get_or_add_trPr()
+    header = OxmlElement("w:tblHeader")
+    header.set(qn("w:val"), "true")
+    trPr.append(header)
+
+
+def _delivery_header(table, *, repeat: bool = False) -> None:
     cells = _new_row(table)
     time_c = _merge(cells, 0, 1)
     trainer_c = _merge(cells, 2, 3)
@@ -307,6 +315,10 @@ def _delivery_header(table) -> None:
     _write_lines(trainer_c, ["Trainer Activity"], all_bold=True)
     _write_lines(trainee_c, ["Trainee Activity"], all_bold=True)
     _write_lines(check_c, ["Learning Check/Assessment"], all_bold=True)
+    if repeat:
+        # Word only repeats a header row that sits at the TOP of its table, so the
+        # delivery grid is built as its own table with this as the first row.
+        _set_repeat_header(table.rows[-1])
 
 
 def _delivery_step_row(table, step) -> None:
@@ -348,6 +360,33 @@ def _setup_page(doc: Document) -> None:
     rfonts.set(qn("w:hAnsi"), FONT_NAME)
 
 
+def _new_grid_table(doc: Document):
+    """A fresh 6-column, full-width 'Table Grid' matching the shared layout."""
+    table = doc.add_table(rows=0, cols=6)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _set_grid_cols(table, GRID_WIDTHS)
+    _set_table_width_pct(table, 100)
+    _set_cell_margins(table, top=0.1, bottom=0.1, left=0.15, right=0.15)
+    return table
+
+
+def _thin_gap(doc: Document) -> None:
+    """A hairline paragraph so consecutive tables stay separate (not merged).
+
+    The delivery grid is a separate table purely so its column-header row can
+    repeat across pages; a 1 pt exact-height paragraph keeps the three tables
+    from fusing back into one while leaving no visible gap in the grid.
+    """
+    p = doc.add_paragraph()
+    pf = p.paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after = Pt(0)
+    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    pf.line_spacing = Pt(1)
+    _style_run(p.add_run(""), size=1)
+
+
 def build_session_plan_document(plan: SessionPlan) -> Document:
     doc = Document()
     _setup_page(doc)
@@ -356,60 +395,57 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _style_run(title.add_run("SESSION PLAN"), size=TITLE_SIZE, bold=True)
 
-    table = doc.add_table(rows=0, cols=6)
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    _set_grid_cols(table, GRID_WIDTHS)
-    _set_table_width_pct(table, 100)
-    _set_cell_margins(table, top=0.1, bottom=0.1, left=0.15, right=0.15)
-
-    # ----- header identity ------------------------------------------------- #
-    _two_half_rows(table, "Date", plan.session_date, "Time", plan.session_time)
-    _two_half_rows(table, "Trainer name", plan.trainer_name,
+    # ===== Table 1: header identity + presentation + intro + delivery banner ==
+    top = _new_grid_table(doc)
+    _two_half_rows(top, "Date", plan.session_date, "Time", plan.session_time)
+    _two_half_rows(top, "Trainer name", plan.trainer_name,
                    "Trainer number", plan.trainer_number)
-    _two_half_rows(table, "Institution", plan.institution, "Level", plan.level)
-    _two_half_rows(table, "Class", plan.class_code,
+    _two_half_rows(top, "Institution", plan.institution, "Level", plan.level)
+    _two_half_rows(top, "Class", plan.class_code,
                    "Number of Trainees", plan.num_trainees)
-    _fullwidth_label_value(table, "Unit Code", plan.unit_code)
-    _fullwidth_label_value(table, "Unit of Competence", plan.unit_title)
-    _fullwidth_label_value(table, "Session title", plan.session_title)
+    _fullwidth_label_value(top, "Unit Code", plan.unit_code)
+    _fullwidth_label_value(top, "Unit of Competence", plan.unit_title)
+    _fullwidth_label_value(top, "Session title", plan.session_title)
     _fullwidth_block(
-        table,
+        top,
         "Language, Literacy or Numeracy needs (LLN) or Other Requirements of "
         "learner (group)",
         [plan.lln_requirements] if plan.lln_requirements else [])
-    _fullwidth_block(table, "Learning outcome(s)", plan.learning_outcomes)
-    _fullwidth_block(table, "Resources (references, and learning aids)",
+    _fullwidth_block(top, "Learning outcome(s)", plan.learning_outcomes)
+    _fullwidth_block(top, "Resources (references, and learning aids)",
                      plan.resources)
-    _fullwidth_label_value(table, "Safety requirements",
-                           plan.safety_requirements)
+    _fullwidth_label_value(top, "Safety requirements", plan.safety_requirements)
 
-    # ----- session presentation ------------------------------------------- #
-    _banner(table, "Session Presentation", align=WD_ALIGN_PARAGRAPH.CENTER)
-    _banner(table, "1.  Introduction (5 minutes)")
-    _fullwidth_block(table, "Trainer:", _activity_lines(plan.introduction),
+    _banner(top, "Session Presentation", align=WD_ALIGN_PARAGRAPH.CENTER)
+    _banner(top, "1.  Introduction (5 minutes)")
+    _fullwidth_block(top, "Trainer:", _activity_lines(plan.introduction),
                      bullet=True)
+    _banner(top, "2. Session Delivery")
 
-    _banner(table, "2. Session Delivery")
-    _delivery_header(table)
+    # ===== Table 2: the delivery grid - its column header repeats per page ====
+    _thin_gap(doc)
+    delivery = _new_grid_table(doc)
+    _delivery_header(delivery, repeat=True)
     for step in plan.delivery_steps:
-        _delivery_step_row(table, step)
+        _delivery_step_row(delivery, step)
 
-    _banner(table, "3.  Session Review: (5 minutes)")
-    _fullwidth_block(table, "Trainer:", _activity_lines(plan.review),
+    # ===== Table 3: review + assignment + total + reflection + sign-off =======
+    _thin_gap(doc)
+    bottom = _new_grid_table(doc)
+    _banner(bottom, "3.  Session Review: (5 minutes)")
+    _fullwidth_block(bottom, "Trainer:", _activity_lines(plan.review),
                      bullet=True)
 
-    # ----- assignment / total / reflection -------------------------------- #
-    cells = _new_row(table)
+    cells = _new_row(bottom)
     merged = _merge(cells, 0, 5)
     _write_label_value(merged, "Assignment", plan.assignment,
                        valign=WD_CELL_VERTICAL_ALIGNMENT.TOP)
 
-    _fullwidth_label_value(table, "TOTAL TIME",
+    _fullwidth_label_value(bottom, "TOTAL TIME",
                            f"{plan.total_minutes} minutes",
                            align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    cells = _new_row(table, height_cm=3.5)
+    cells = _new_row(bottom, height_cm=3.5)
     merged = _merge(cells, 0, 5)
     _clear_paragraphs(merged)
     par = merged.paragraphs[0]
@@ -424,7 +460,7 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
     merged.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
 
     # ----- Approved-by sign-off row (inside the table) --------------------- #
-    cells = _new_row(table)
+    cells = _new_row(bottom)
     merged = _merge(cells, 0, 5)
     _clear_paragraphs(merged)
     row_par = merged.paragraphs[0]

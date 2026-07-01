@@ -160,14 +160,16 @@ def test_docx_has_title_grid_and_banners():
     assert round(sec.page_width.cm, 1) == 21.6
     assert round(sec.page_height.cm, 1) == 27.9
 
-    table = doc.tables[0]
-    assert table.style.name == "Table Grid"
-    grid = [round(int(g.get(qn("w:w"))) / 20 / 28.3465, 2)
-            for g in table._element.find(qn("w:tblGrid")).findall(qn("w:gridCol"))]
-    assert grid == session_plan_builder.GRID_WIDTHS
+    # every table shares the same 6-column grid layout
+    for table in doc.tables:
+        assert table.style.name == "Table Grid"
+        grid = [round(int(g.get(qn("w:w"))) / 20 / 28.3465, 2)
+                for g in table._element.find(qn("w:tblGrid")).findall(qn("w:gridCol"))]
+        assert grid == session_plan_builder.GRID_WIDTHS
 
-    # the four grey section banners are present and shaded
-    banner_texts = {row.cells[0].paragraphs[0].text for row in table.rows
+    # the grey section banners are present and shaded (across all tables)
+    banner_texts = {row.cells[0].paragraphs[0].text
+                    for t in doc.tables for row in t.rows
                     if _shaded_fill(row.cells[0]) == "D9D9D9"}
     assert "Session Presentation" in banner_texts
     assert "2. Session Delivery" in banner_texts
@@ -294,8 +296,8 @@ def test_docx_renders_substep_rows():
                      ["Trainee(s):", "Present."], ["Attitudes", "1. Teamwork"]),
     ]
     doc = session_plan_builder.build_session_plan_document(plan)
-    table = doc.tables[0]
-    labels = [r.cells[0].paragraphs[0].text for r in table.rows
+    labels = [r.cells[0].paragraphs[0].text
+              for t in doc.tables for r in t.rows
               if len(r._tr.findall(qn("w:tc"))) == 5
               and r.cells[0].paragraphs[0].text.startswith("Step")]
     assert labels == ["Step 1(a)", "Step 1(b)", "Step 2"]
@@ -305,12 +307,31 @@ def test_docx_delivery_rows_match_steps():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
     doc = session_plan_builder.build_session_plan_document(plan)
-    table = doc.tables[0]
     # step rows carry 5 <w:tc> cells (label | minutes | trainer[span2] | trainee | check)
-    step_rows = [r for r in table.rows
+    step_rows = [r for t in doc.tables for r in t.rows
                  if len(r._tr.findall(qn("w:tc"))) == 5
                  and r.cells[0].paragraphs[0].text.startswith("Step")]
     assert len(step_rows) == len(plan.delivery_steps)
+
+
+def test_delivery_header_is_a_repeating_table_header():
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    doc = session_plan_builder.build_session_plan_document(plan)
+
+    # the delivery grid is its own table whose FIRST row is the column header
+    delivery = next(
+        (t for t in doc.tables
+         if t.rows and t.rows[0].cells[0].paragraphs[0].text.strip()
+         .startswith("Time (in minutes)")), None)
+    assert delivery is not None
+    header = delivery.rows[0]
+    # header row carries <w:tblHeader/> so Word repeats it on each new page
+    trPr = header._tr.find(qn("w:trPr"))
+    assert trPr is not None and trPr.find(qn("w:tblHeader")) is not None
+    # the step rows live in the SAME table, right after the header
+    assert any(r.cells[0].paragraphs[0].text.strip().startswith("Step")
+               for r in delivery.rows)
 
 
 def test_docx_multiword_resource_not_charsplit():
