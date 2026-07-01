@@ -504,8 +504,10 @@ THIS SESSION'S ASSESSMENTS:
 {assess}
 OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
 
+Write every activity line in the imperative present tense (base verb form): "Take roll call", "Lead a group discussion", "Demonstrate the tool" - NOT "Takes roll call", "Leads", "Demonstrates".
+
 Produce a JSON object with these fields:
-- introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does (takes roll call; reviews the previous session; states this session's title and expected learning outcomes).
+- introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does (take roll call; review the previous session; state this session's title and expected learning outcomes).
 - delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (their "minutes" must sum to {delivery}). Each step:
     * step_label: "Step 1", "Step 2", "Step 3" (in order).
     * minutes: integer; the longest step is the hands-on/practice step.
@@ -513,7 +515,7 @@ Produce a JSON object with these fields:
     * trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.
     * learning_check: grouped assessment lines for this step - a CAPITALISED group word ("Knowledge", "Skills", or "Attitudes") followed by numbered items ("1. Oral questioning", "2. Observation of developed work"), drawn from the session's assessments / evidence-guide methods. Early steps lean on Knowledge; hands-on steps add Skills.
   Order the steps so they progress from understanding -> guided practice -> independent application.
-- review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" (summarises key points; answers questions; previews the next session).
+- review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" (summarise key points; answer questions; preview the next session).
 - assignment: ONE concrete take-home task grounded in this session's content (a full sentence).
 - lln_requirements: one sentence noting how trainees with Language/Literacy/Numeracy or other special needs are catered for in THIS session (e.g. simplified handouts, sign-language interpreter, extra time).
 - safety_requirements: one sentence on the workplace SOPs / safety precautions relevant to THIS session's topic.
@@ -610,7 +612,7 @@ def _default_delivery(unit: Unit, session: Session, duration_minutes: int) -> di
             "minutes": mins[i],
             "trainer_activity": [
                 "Trainer:",
-                f"Facilitates the activity and guides trainees through {session.session_title.lower()}.",
+                f"Facilitate the activity and guide trainees through {session.session_title.lower()}.",
             ],
             "trainee_activity": ["Trainee(s):", activity],
             "learning_check": _check_lines(
@@ -621,16 +623,16 @@ def _default_delivery(unit: Unit, session: Session, duration_minutes: int) -> di
     return {
         "introduction": [
             "Trainer:",
-            "Takes roll call.",
-            "Reviews the previous session.",
-            "States the session title and the expected learning outcomes.",
+            "Take roll call.",
+            "Review the previous session.",
+            "State the session title and the expected learning outcomes.",
         ],
         "delivery_steps": steps,
         "review": [
             "Trainer:",
-            "Summarizes the key points covered in the session.",
-            "Responds to trainee questions and clarifies difficult areas.",
-            "Previews the next session.",
+            "Summarize the key points covered in the session.",
+            "Respond to trainee questions and clarify difficult areas.",
+            "Preview the next session.",
         ],
         "assignment": followup or f"Complete a short practical exercise on {session.session_title.lower()}.",
         "lln_requirements": ("Identify any trainees with Language, Literacy or Numeracy "

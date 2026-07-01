@@ -43,11 +43,12 @@ BANNER_SIZE = 14.0         # grey section banners + the title's section labels
 TITLE_SIZE = 14.0
 BANNER_FILL = "D9D9D9"     # grey shading on the section banners
 GUIDE_RED = "C00000"       # red used only for the blank-box reflection hint
+SIGN_SIZE = 10.0           # bottom sign-off row font size
 
 # 6-column grid (cm) - lifted verbatim from the sample template.
 GRID_WIDTHS = [2.52, 2.67, 4.28, 0.73, 4.95, 4.28]
-# A dotted leader for the signature fill-in lines.
-LEADER = "…" * 14
+# A short dotted leader so all three sign-offs fit on one line.
+SIGN_LEADER = "…" * 6
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +91,7 @@ def _clear_paragraphs(cell) -> None:
 def _write_lines(cell, lines: List[str], *, size: float = FONT_SIZE,
                  bold_predicate: Optional[Callable[[str], bool]] = None,
                  all_bold: bool = False, color: Optional[str] = None,
+                 align=None,
                  valign=WD_CELL_VERTICAL_ALIGNMENT.CENTER) -> None:
     """Write `lines` into a cell, one paragraph per line (never char-split)."""
     if isinstance(lines, str):
@@ -101,6 +103,8 @@ def _write_lines(cell, lines: List[str], *, size: float = FONT_SIZE,
         par = first if idx == 0 else cell.add_paragraph()
         par.paragraph_format.space_after = Pt(0)
         par.paragraph_format.space_before = Pt(0)
+        if align is not None:
+            par.alignment = align
         bold = all_bold or bool(bold_predicate and bold_predicate(line))
         _style_run(par.add_run(line), size=size, bold=bold, color=color)
     if valign is not None:
@@ -109,13 +113,14 @@ def _write_lines(cell, lines: List[str], *, size: float = FONT_SIZE,
 
 def _write_label_value(cell, label: str, value: str, *,
                        size: float = FONT_SIZE,
+                       align=WD_ALIGN_PARAGRAPH.LEFT,
                        valign=WD_CELL_VERTICAL_ALIGNMENT.CENTER) -> None:
     """One line: '<bold label>: <normal value>' (value optional)."""
     _clear_paragraphs(cell)
     par = cell.paragraphs[0]
     par.paragraph_format.space_after = Pt(0)
     par.paragraph_format.space_before = Pt(0)
-    par.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    par.alignment = align
     _style_run(par.add_run(label if label.endswith(":") else f"{label}:"),
                size=size, bold=True)
     if str(value).strip():
@@ -127,8 +132,13 @@ def _write_label_value(cell, label: str, value: str, *,
 def _write_label_block(cell, label: str, lines: List[str], *,
                        size: float = FONT_SIZE,
                        bold_predicate: Optional[Callable[[str], bool]] = None,
+                       bullet: bool = False,
                        valign=WD_CELL_VERTICAL_ALIGNMENT.TOP) -> None:
-    """Bold label on the first line, then each value line as its own paragraph."""
+    """Bold label on the first line, then each value line as its own paragraph.
+
+    With `bullet=True`, each value line renders as a '•' bullet (any leading
+    '-'/'•' the source already carried is normalised away first).
+    """
     if isinstance(lines, str):
         lines = [lines]
     lines = [str(l) for l in (lines or []) if str(l).strip() != ""]
@@ -143,6 +153,8 @@ def _write_label_block(cell, label: str, lines: List[str], *,
         par.paragraph_format.space_after = Pt(0)
         par.paragraph_format.space_before = Pt(0)
         bold = bool(bold_predicate and bold_predicate(line))
+        if bullet:
+            line = "•  " + re.sub(r"^\s*[-•]\s*", "", line)
         _style_run(par.add_run(line), size=size, bold=bold)
     if valign is not None:
         cell.vertical_alignment = valign
@@ -241,24 +253,26 @@ def _two_half_rows(table, label_l, value_l, label_r, value_r) -> None:
     _write_label_value(right, label_r, value_r)
 
 
-def _fullwidth_label_value(table, label, value) -> None:
+def _fullwidth_label_value(table, label, value, *,
+                           align=WD_ALIGN_PARAGRAPH.LEFT) -> None:
     cells = _new_row(table)
     merged = _merge(cells, 0, 5)
-    _write_label_value(merged, label, value)
+    _write_label_value(merged, label, value, align=align)
 
 
 def _fullwidth_block(table, label, lines, *, bold_predicate=None,
-                     height_cm=None) -> None:
+                     bullet=False, height_cm=None) -> None:
     cells = _new_row(table, height_cm=height_cm)
     merged = _merge(cells, 0, 5)
-    _write_label_block(merged, label, lines, bold_predicate=bold_predicate)
+    _write_label_block(merged, label, lines, bold_predicate=bold_predicate,
+                       bullet=bullet)
 
 
-def _banner(table, text: str) -> None:
+def _banner(table, text: str, *, align=None) -> None:
     cells = _new_row(table, height_cm=1.0)
     merged = _merge(cells, 0, 5)
     _set_cell_shade(merged, BANNER_FILL)
-    _write_lines(merged, [text], size=BANNER_SIZE, all_bold=True)
+    _write_lines(merged, [text], size=BANNER_SIZE, all_bold=True, align=align)
 
 
 def _delivery_header(table) -> None:
@@ -290,16 +304,16 @@ def _delivery_step_row(table, step) -> None:
                  valign=WD_CELL_VERTICAL_ALIGNMENT.TOP)
 
 
-def _signature_paragraph(doc, role: str) -> None:
+def _signature_line(doc) -> None:
+    """All three sign-off roles + dotted leaders on ONE 10 pt line, labels bold."""
     par = doc.add_paragraph()
-    par.paragraph_format.line_spacing = 2.0
+    par.paragraph_format.space_before = Pt(12)
     par.paragraph_format.space_after = Pt(0)
-    _style_run(par.add_run(f"{role}: "), bold=True)
-    _style_run(par.add_run(f"{LEADER} "), bold=False)
-    _style_run(par.add_run("DATE: "), bold=True)
-    _style_run(par.add_run(f"{LEADER} "), bold=False)
-    _style_run(par.add_run("SIGN: "), bold=True)
-    _style_run(par.add_run(LEADER), bold=False)
+    for idx, role in enumerate(("PREPARED BY", "VERIFIED BY", "APPROVED BY")):
+        if idx:
+            _style_run(par.add_run("   "), size=SIGN_SIZE, bold=False)
+        _style_run(par.add_run(f"{role}: "), size=SIGN_SIZE, bold=True)
+        _style_run(par.add_run(SIGN_LEADER), size=SIGN_SIZE, bold=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -361,11 +375,12 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
                            plan.safety_requirements)
 
     # ----- session presentation ------------------------------------------- #
-    _banner(table, "Session Presentation")
+    _banner(table, "Session Presentation", align=WD_ALIGN_PARAGRAPH.CENTER)
     _banner(table, "1.  Introduction (5 minutes)")
     _fullwidth_block(table, "Trainer:",
                      [l for l in plan.introduction
-                      if l.strip().lower() not in ("trainer:", "trainer")])
+                      if l.strip().lower() not in ("trainer:", "trainer")],
+                     bullet=True)
 
     _banner(table, "2. Session Delivery")
     _delivery_header(table)
@@ -375,7 +390,8 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
     _banner(table, "3.  Session Review: (5 minutes)")
     _fullwidth_block(table, "Trainer:",
                      [l for l in plan.review
-                      if l.strip().lower() not in ("trainer:", "trainer")])
+                      if l.strip().lower() not in ("trainer:", "trainer")],
+                     bullet=True)
 
     # ----- assignment / total / reflection -------------------------------- #
     cells = _new_row(table)
@@ -384,23 +400,20 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
                        valign=WD_CELL_VERTICAL_ALIGNMENT.TOP)
 
     _fullwidth_label_value(table, "TOTAL TIME",
-                           f"{plan.total_minutes} minutes")
+                           f"{plan.total_minutes} minutes",
+                           align=WD_ALIGN_PARAGRAPH.CENTER)
 
     cells = _new_row(table, height_cm=3.5)
     merged = _merge(cells, 0, 5)
     _clear_paragraphs(merged)
     par = merged.paragraphs[0]
     par.paragraph_format.space_after = Pt(0)
-    _style_run(par.add_run("Session Reflection: "), bold=True)
-    _style_run(par.add_run("(remarks to be given after delivery)"),
-               italic=True, color=GUIDE_RED)
+    _style_run(par.add_run("Session Reflection:"), bold=True)
     merged.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
 
     # ----- signatures ------------------------------------------------------ #
     doc.add_paragraph()
-    _signature_paragraph(doc, "PREPARED BY")
-    _signature_paragraph(doc, "VERIFIED BY")
-    _signature_paragraph(doc, "APPROVED BY")
+    _signature_line(doc)
     return doc
 
 

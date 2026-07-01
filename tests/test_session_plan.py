@@ -5,6 +5,7 @@ coercion/merge helpers, and the offline builder is fully deterministic.
 """
 
 from docx.oxml.ns import qn
+from docx.shared import Pt
 
 import ai_client
 import session_plan_builder
@@ -173,6 +174,48 @@ def test_docx_has_title_grid_and_banners():
     assert any(t.startswith("3.") for t in banner_texts)
 
 
+def _cell_texts(doc):
+    return ["\n".join(p.text for p in cell.paragraphs)
+            for t in doc.tables for row in t.rows for cell in row.cells]
+
+
+def test_docx_session_presentation_and_total_are_centered():
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    doc = session_plan_builder.build_session_plan_document(plan)
+
+    def para_for(prefix):
+        for t in doc.tables:
+            for row in t.rows:
+                for cell in row.cells:
+                    p = cell.paragraphs[0]
+                    if p.text.strip().startswith(prefix):
+                        return p
+        return None
+
+    assert para_for("Session Presentation").alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert para_for("TOTAL TIME").alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+
+def test_docx_intro_and_review_are_bulleted():
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    doc = session_plan_builder.build_session_plan_document(plan)
+    text = "\n".join(_cell_texts(doc))
+    assert "•  Take roll call." in text                       # imperative + bullet
+    assert "•  Summarize the key points covered in the session." in text
+
+
+def test_docx_reflection_has_no_red_hint():
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    doc = session_plan_builder.build_session_plan_document(plan)
+    reflection = next(c for c in _cell_texts(doc)
+                      if c.strip().startswith("Session Reflection"))
+    assert reflection.strip() == "Session Reflection:"        # no "(remarks...)" hint
+
+
 def test_docx_delivery_rows_match_steps():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
@@ -194,11 +237,17 @@ def test_docx_multiword_resource_not_charsplit():
     assert "Kotler" in text and "Marketing Management" in text
 
 
-def test_docx_has_signature_block():
+def test_docx_signature_block_is_one_line_10pt():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
     doc = session_plan_builder.build_session_plan_document(plan)
-    roles = [p.text for p in doc.paragraphs if p.text.strip()]
-    assert any(t.startswith("PREPARED BY") for t in roles)
-    assert any(t.startswith("VERIFIED BY") for t in roles)
-    assert any(t.startswith("APPROVED BY") for t in roles)
+    # all three sign-offs share ONE paragraph
+    line = next((p for p in doc.paragraphs
+                 if p.text.strip().startswith("PREPARED BY")), None)
+    assert line is not None
+    assert "VERIFIED BY" in line.text and "APPROVED BY" in line.text
+    # 10 pt throughout; only the role labels are bold
+    for run in line.runs:
+        assert run.font.size == Pt(10)
+    labels = {r.text.strip().rstrip(":") for r in line.runs if r.bold}
+    assert labels == {"PREPARED BY", "VERIFIED BY", "APPROVED BY"}
