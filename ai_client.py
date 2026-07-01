@@ -30,6 +30,11 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
 DEFAULT_MODEL = "mistral-small-latest"
 
+# Sessions per grounded Learning-Plan call. A full term (e.g. 24 sessions) does
+# not fit in one JSON response - it gets truncated to invalid JSON - so we
+# generate in batches and concatenate the rows in order.
+LP_SESSION_CHUNK = 8
+
 
 class AIError(RuntimeError):
     pass
@@ -166,6 +171,51 @@ def _extract_text(payload: dict) -> str:
     return text
 
 
+def _salvage_json_array(text: str):
+    """Recover the complete leading objects of a truncated JSON array.
+
+    A response cut off by the token limit looks like
+    '[{...},{...},{"x":"unterminated...'. We keep every top-level object that
+    closed cleanly and drop the trailing partial one, so a truncated
+    learning-plan response still yields usable rows (the deterministic merge
+    backfills any sessions the model never reached). Returns a list, or None if
+    nothing salvageable is present.
+    """
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    last_complete = None            # index of the last '}' that closed a top-level object
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last_complete = i
+    if last_complete is None:
+        return None
+    candidate = text[start:last_complete + 1].rstrip().rstrip(",") + "]"
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, list) else None
+
+
 def _emit_progress(progress_cb, message: str) -> None:
     runlog.log(message)
     if progress_cb is not None:
@@ -199,14 +249,27 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
             raise AIError(f"{model}: network error: {e}") from e
 
         if resp.status_code == 200:
+            payload = resp.json()
             try:
-                text = _extract_text(resp.json())
+                text = _extract_text(payload)
             except AIError as e:
                 raise AIError(f"{model}: {e}") from e
             try:
                 return json.loads(text)
             except json.JSONDecodeError as e:
-                raise AIError(f"{model} returned invalid JSON: {e}") from e
+                # The response was cut off mid-JSON (usually the token limit).
+                # Salvage the complete rows if it is an array; the caller's merge
+                # backfills anything missing.
+                salvaged = _salvage_json_array(text)
+                if salvaged is not None:
+                    _emit_progress(progress_cb,
+                                   f"AI: {model} response was truncated; "
+                                   f"salvaged {len(salvaged)} complete rows")
+                    return salvaged
+                reason = (payload.get("choices") or [{}])[0].get("finish_reason")
+                hint = (" (the response hit the length limit)"
+                        if reason == "length" else "")
+                raise AIError(f"{model} returned invalid JSON: {e}{hint}") from e
 
         if resp.status_code in (401, 403):
             raise AIError(
@@ -428,9 +491,19 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
         model = load_model_name()
     runlog.log(f"AI: model = {model}")
 
-    prompt = build_prompt(unit, sessions)
-    _emit_progress(progress_cb, "AI: prompt prepared")
-    ai_rows = call_mistral(prompt, api_key, model, progress_cb=progress_cb)
+    # Generate in batches so a long term's JSON never overflows the token limit
+    # (a single 24-session response gets truncated -> invalid JSON). Rows are
+    # concatenated in order, preserving alignment with the deterministic skeleton.
+    chunks = [sessions[i:i + LP_SESSION_CHUNK]
+              for i in range(0, len(sessions), LP_SESSION_CHUNK)]
+    ai_rows: List[dict] = []
+    for ci, chunk in enumerate(chunks, start=1):
+        first, last = len(ai_rows) + 1, len(ai_rows) + len(chunk)
+        _emit_progress(progress_cb,
+                       f"AI: generating sessions {first}-{last} of {len(sessions)} "
+                       f"(batch {ci}/{len(chunks)})")
+        prompt = build_prompt(unit, chunk)
+        ai_rows.extend(call_mistral(prompt, api_key, model, progress_cb=progress_cb))
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 

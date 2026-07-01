@@ -119,6 +119,53 @@ def test_call_mistral_retries_connection_reset(monkeypatch):
     assert len(attempts) == 3
 
 
+# --------------------------------------------------------------------------- #
+# Truncated-response salvage (the token-limit / unterminated-JSON case)
+# --------------------------------------------------------------------------- #
+def test_salvage_recovers_complete_objects_from_truncated_array():
+    text = '[{"a": 1}, {"b": 2}, {"c": "unterminated string...'
+    assert ai_client._salvage_json_array(text) == [{"a": 1}, {"b": 2}]
+
+
+def test_salvage_ignores_braces_and_brackets_inside_strings():
+    text = '[{"x": "a } b", "y": [1, 2]}, {"z": "trunc'
+    assert ai_client._salvage_json_array(text) == [{"x": "a } b", "y": [1, 2]}]
+
+
+def test_salvage_returns_none_when_no_complete_object():
+    assert ai_client._salvage_json_array('[{"a": "unterminated') is None
+    assert ai_client._salvage_json_array("no array here") is None
+
+
+def test_chat_json_salvages_truncated_learning_plan(monkeypatch):
+    # a 3rd session object is cut off mid-string -> keep the first two
+    truncated = ('[{"week": 1, "session_title": "Intro"}, '
+                 '{"week": 2, "session_title": "Tools"}, '
+                 '{"week": 3, "session_title": "Trunca')
+    monkeypatch.setattr(
+        ai_client, "_post",
+        lambda model, api_key, prompt, timeout=180, **kwargs:
+            FakeResp(200, _ok_payload(truncated)))
+    rows = call_mistral("p", "k", "m1")
+    assert [r["week"] for r in rows] == [1, 2]
+
+
+def test_generate_sessions_batches_long_terms(monkeypatch):
+    """A 20-session term must be split into ceil(20/8)=3 grounded calls."""
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do the thing"],
+                        key_points=["KEY POINT"]) for i in range(20)]
+    calls = []
+    monkeypatch.setattr(
+        ai_client, "call_mistral",
+        lambda prompt, api_key, model, progress_cb=None: (calls.append(1) or []))
+    out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
+    assert len(calls) == 3                 # 3 batches for 20 sessions at chunk 8
+    assert len(out) == 20                  # every session still present (backfilled)
+
+
 def test_default_model_prefers_smaller_variant():
     assert ai_client.DEFAULT_MODEL == "mistral-small-latest"
 
