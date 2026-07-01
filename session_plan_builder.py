@@ -47,8 +47,9 @@ SIGN_SIZE = 10.0           # bottom sign-off row font size
 
 # 6-column grid (cm) - lifted verbatim from the sample template.
 GRID_WIDTHS = [2.52, 2.67, 4.28, 0.73, 4.95, 4.28]
-# A short dotted leader so all three sign-offs fit on one line.
-SIGN_LEADER = "…" * 6
+# Dotted leaders for the ROLE / DATE / SIGN fill-in blanks (one sign-off per row).
+SIGN_LEADER = "…" * 12
+SIGN_LEADER_SHORT = "…" * 8
 
 
 # --------------------------------------------------------------------------- #
@@ -173,6 +174,24 @@ def _role_or_group_bold(line: str) -> bool:
     if s.endswith(":") and len(s.split()) <= 2:
         return True
     return s.lower() in _GROUP_WORDS
+
+
+_ROLE_PREFIX = re.compile(r"^\s*(trainer|trainee)(\(s\)|s)?\s*[:\-]\s*", re.I)
+
+
+def _activity_lines(lines: List[str]) -> List[str]:
+    """Strip a leading 'Trainer:'/'Trainee(s):' prefix off each activity line.
+
+    The section already carries ONE bold 'Trainer:' label, so a per-line prefix
+    (which the model sometimes repeats on every bullet) is redundant and dropped.
+    A bare 'Trainer:' line collapses to nothing and is skipped entirely.
+    """
+    out: List[str] = []
+    for raw in (lines or []):
+        s = _ROLE_PREFIX.sub("", str(raw).strip()).strip()
+        if s:
+            out.append(s)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -304,16 +323,17 @@ def _delivery_step_row(table, step) -> None:
                  valign=WD_CELL_VERTICAL_ALIGNMENT.TOP)
 
 
-def _signature_line(doc) -> None:
-    """All three sign-off roles + dotted leaders on ONE 10 pt line, labels bold."""
+def _signature_paragraph(doc, role: str) -> None:
+    """One sign-off row: 'ROLE: … DATE: … SIGN: …' - all 10 pt, only labels bold."""
     par = doc.add_paragraph()
-    par.paragraph_format.space_before = Pt(12)
+    par.paragraph_format.line_spacing = 2.0
     par.paragraph_format.space_after = Pt(0)
-    for idx, role in enumerate(("PREPARED BY", "VERIFIED BY", "APPROVED BY")):
-        if idx:
-            _style_run(par.add_run("   "), size=SIGN_SIZE, bold=False)
-        _style_run(par.add_run(f"{role}: "), size=SIGN_SIZE, bold=True)
-        _style_run(par.add_run(SIGN_LEADER), size=SIGN_SIZE, bold=False)
+    _style_run(par.add_run(f"{role}: "), size=SIGN_SIZE, bold=True)
+    _style_run(par.add_run(f"{SIGN_LEADER} "), size=SIGN_SIZE, bold=False)
+    _style_run(par.add_run("DATE: "), size=SIGN_SIZE, bold=True)
+    _style_run(par.add_run(f"{SIGN_LEADER_SHORT} "), size=SIGN_SIZE, bold=False)
+    _style_run(par.add_run("SIGN: "), size=SIGN_SIZE, bold=True)
+    _style_run(par.add_run(SIGN_LEADER_SHORT), size=SIGN_SIZE, bold=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -377,9 +397,7 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
     # ----- session presentation ------------------------------------------- #
     _banner(table, "Session Presentation", align=WD_ALIGN_PARAGRAPH.CENTER)
     _banner(table, "1.  Introduction (5 minutes)")
-    _fullwidth_block(table, "Trainer:",
-                     [l for l in plan.introduction
-                      if l.strip().lower() not in ("trainer:", "trainer")],
+    _fullwidth_block(table, "Trainer:", _activity_lines(plan.introduction),
                      bullet=True)
 
     _banner(table, "2. Session Delivery")
@@ -388,9 +406,7 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
         _delivery_step_row(table, step)
 
     _banner(table, "3.  Session Review: (5 minutes)")
-    _fullwidth_block(table, "Trainer:",
-                     [l for l in plan.review
-                      if l.strip().lower() not in ("trainer:", "trainer")],
+    _fullwidth_block(table, "Trainer:", _activity_lines(plan.review),
                      bullet=True)
 
     # ----- assignment / total / reflection -------------------------------- #
@@ -413,7 +429,9 @@ def build_session_plan_document(plan: SessionPlan) -> Document:
 
     # ----- signatures ------------------------------------------------------ #
     doc.add_paragraph()
-    _signature_line(doc)
+    _signature_paragraph(doc, "PREPARED BY")
+    _signature_paragraph(doc, "VERIFIED BY")
+    _signature_paragraph(doc, "APPROVED BY")
     return doc
 
 

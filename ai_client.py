@@ -508,8 +508,8 @@ Write every activity line in the imperative present tense (base verb form): "Tak
 
 Produce a JSON object with these fields:
 - introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does (take roll call; review the previous session; state this session's title and expected learning outcomes).
-- delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (their "minutes" must sum to {delivery}). Each step:
-    * step_label: "Step 1", "Step 2", "Step 3" (in order).
+- delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (every step/sub-step "minutes" must sum to {delivery}). Each step:
+    * step_label: "Step 1", "Step 2", "Step 3" (in order). If a single step is involving enough to need its own breakdown, split it into consecutive sub-steps labelled "Step 1(a)", "Step 1(b)", "Step 1(c)"... - each a full step object with its own minutes, trainer_activity, trainee_activity and learning_check. Only break a step down when it genuinely warrants it; otherwise keep one row per step.
     * minutes: integer; the longest step is the hands-on/practice step.
     * trainer_activity: 1-3 short lines describing what the TRAINER does this step - name the active-learning method (e.g. Group Discussion, Think-Pair-Share, Demonstration, Case Study) and reference THIS session's specific key points/tools/tasks. Concrete, never generic.
     * trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.

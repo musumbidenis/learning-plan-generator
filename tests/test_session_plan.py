@@ -216,6 +216,71 @@ def test_docx_reflection_has_no_red_hint():
     assert reflection.strip() == "Session Reflection:"        # no "(remarks...)" hint
 
 
+def test_activity_lines_strips_repeated_role_prefix():
+    lines = ["Trainer:", "Trainer: Take roll call.",
+             "Trainer - Review the previous session.", "State the outcomes."]
+    assert session_plan_builder._activity_lines(lines) == [
+        "Take roll call.", "Review the previous session.", "State the outcomes."]
+
+
+def test_docx_intro_bullets_do_not_repeat_trainer():
+    # AI sometimes prefixes EVERY intro line with 'Trainer:' - it must appear once.
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    plan.introduction = ["Trainer: Take roll call.",
+                         "Trainer: Review the previous session.",
+                         "Trainer: State the session outcomes."]
+    doc = session_plan_builder.build_session_plan_document(plan)
+    intro = next(c for c in _cell_texts(doc)
+                 if c.strip().startswith("Trainer:") and "roll call" in c)
+    # exactly one 'Trainer:' - the bold section label, none on the bullets
+    assert intro.count("Trainer:") == 1
+    assert "•  Take roll call." in intro
+
+
+def test_merge_preserves_substep_labels_and_minutes():
+    ai_rows = {
+        "delivery_steps": [
+            {"step_label": "Step 1(a)", "minutes": 30,
+             "trainer_activity": ["Trainer:", "Introduce the tool."],
+             "trainee_activity": ["Trainee(s):", "Watch and take notes."],
+             "learning_check": ["Knowledge", "1. Oral questioning"]},
+            {"step_label": "Step 1(b)", "minutes": 40,
+             "trainer_activity": ["Trainer:", "Guide the hands-on build."],
+             "trainee_activity": ["Trainee(s):", "Build a questionnaire."],
+             "learning_check": ["Skills", "1. Observation"]},
+            {"step_label": "Step 2", "minutes": 40,
+             "trainer_activity": ["Trainer:", "Facilitate presentations."],
+             "trainee_activity": ["Trainee(s):", "Present findings."],
+             "learning_check": ["Attitudes", "1. Teamwork"]},
+        ],
+    }
+    body = ai_client._merge_session_plan_body(ai_rows, _unit(), _session(), 120)
+    assert [s.step_label for s in body["delivery_steps"]] == [
+        "Step 1(a)", "Step 1(b)", "Step 2"]
+    assert sum(s.minutes for s in body["delivery_steps"]) == 110   # 120 - 10
+
+
+def test_docx_renders_substep_rows():
+    from models import DeliveryStep
+    plan = ai_client.build_session_plan_offline(
+        _unit(), _session(), _inputs(), duration_minutes=120)
+    plan.delivery_steps = [
+        DeliveryStep("Step 1(a)", 30, ["Trainer:", "Introduce."],
+                     ["Trainee(s):", "Observe."], ["Knowledge", "1. Oral questioning"]),
+        DeliveryStep("Step 1(b)", 40, ["Trainer:", "Guide the build."],
+                     ["Trainee(s):", "Build."], ["Skills", "1. Observation"]),
+        DeliveryStep("Step 2", 40, ["Trainer:", "Facilitate."],
+                     ["Trainee(s):", "Present."], ["Attitudes", "1. Teamwork"]),
+    ]
+    doc = session_plan_builder.build_session_plan_document(plan)
+    table = doc.tables[0]
+    labels = [r.cells[0].paragraphs[0].text for r in table.rows
+              if len(r._tr.findall(qn("w:tc"))) == 5
+              and r.cells[0].paragraphs[0].text.startswith("Step")]
+    assert labels == ["Step 1(a)", "Step 1(b)", "Step 2"]
+
+
 def test_docx_delivery_rows_match_steps():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
@@ -237,17 +302,19 @@ def test_docx_multiword_resource_not_charsplit():
     assert "Kotler" in text and "Marketing Management" in text
 
 
-def test_docx_signature_block_is_one_line_10pt():
+def test_docx_signature_block_has_date_and_sign_10pt():
     plan = ai_client.build_session_plan_offline(
         _unit(), _session(), _inputs(), duration_minutes=120)
     doc = session_plan_builder.build_session_plan_document(plan)
-    # all three sign-offs share ONE paragraph
-    line = next((p for p in doc.paragraphs
-                 if p.text.strip().startswith("PREPARED BY")), None)
-    assert line is not None
-    assert "VERIFIED BY" in line.text and "APPROVED BY" in line.text
-    # 10 pt throughout; only the role labels are bold
-    for run in line.runs:
-        assert run.font.size == Pt(10)
-    labels = {r.text.strip().rstrip(":") for r in line.runs if r.bold}
-    assert labels == {"PREPARED BY", "VERIFIED BY", "APPROVED BY"}
+    rows = {role: next((p for p in doc.paragraphs
+                        if p.text.strip().startswith(role)), None)
+            for role in ("PREPARED BY", "VERIFIED BY", "APPROVED BY")}
+    for role, par in rows.items():
+        assert par is not None, f"missing {role} row"
+        # DATE + SIGN labels preserved on the same row
+        assert "DATE:" in par.text and "SIGN:" in par.text
+        # 10 pt throughout; only the labels are bold (leaders are not)
+        for run in par.runs:
+            assert run.font.size == Pt(10)
+        bold_labels = {r.text.strip() for r in par.runs if r.bold}
+        assert bold_labels == {f"{role}:", "DATE:", "SIGN:"}
