@@ -329,6 +329,105 @@ def _make_session_plan(os_unit: Unit, sess: Session, inputs: PlanInputs,
         f"'{sess.session_title}' failed after {SP_MAX_ATTEMPTS} attempts: {last_err}")
 
 
+def _regenerate_block(os_unit: Unit, sess: Session, plan, block: str):
+    """AI-regenerate ONE block, retrying (no fallback). Returns the new value."""
+    last_err: ai_client.AIError | None = None
+    for attempt in range(1, SP_MAX_ATTEMPTS + 1):
+        try:
+            return ai_client.regenerate_session_plan_block(
+                os_unit, sess, plan, block,
+                duration_minutes=DEFAULT_SP_DURATION, api_key=None)
+        except ai_client.AIError as e:
+            last_err = e
+            runlog.error(f"Regenerate '{block}' attempt {attempt}/{SP_MAX_ATTEMPTS} "
+                         f"failed: {e}")
+            if attempt < SP_MAX_ATTEMPTS:
+                time.sleep(min(3 * attempt, 15))
+    raise ai_client.AIError(f"{block} failed after {SP_MAX_ATTEMPTS} attempts: {last_err}")
+
+
+def _lines_md(lines: List[str]) -> str:
+    """Render an activity list as a 'Trainer:' heading + bullets (matches doc)."""
+    body = session_plan_builder._activity_lines(lines)
+    if not body:
+        return "_—_"
+    return "**Trainer:**\n" + "\n".join(f"- {l}" for l in body)
+
+
+def _render_editable_plan(os_unit: Unit, inputs: PlanInputs, sess: Session,
+                          plan, key_prefix: str) -> None:
+    """Preview the plan as the document's blocks, each with a 🔄 Regenerate button.
+
+    Clicking a block's button asks the AI to rewrite ONLY that block, updates the
+    stored plan, and reruns so the preview and the download reflect the change.
+    """
+    st.divider()
+    st.subheader(f"Session Plan — Week {sess.week} · Session {sess.session_no} · "
+                 f"{sess.session_title}")
+    st.caption("This mirrors the .docx. Each AI-written block has a 🔄 Regenerate "
+               "button that rewrites only that block.")
+
+    # download always reflects the current (possibly-regenerated) plan
+    st.download_button("⬇ Download Session Plan (.docx)",
+                       data=session_plan_builder.document_to_bytes(plan),
+                       file_name=_sp_filename(sess), mime=DOCX_MIME,
+                       key=f"{key_prefix}_dl")
+
+    def block(title: str, name: str, body_md=None, body_fn=None) -> None:
+        c1, c2 = st.columns([0.8, 0.2])
+        c1.markdown(f"#### {title}")
+        regen = c2.button("🔄 Regenerate", key=f"{key_prefix}_regen_{name}",
+                          help=f"Regenerate {title} with AI", use_container_width=True)
+        with st.container(border=True):
+            if body_fn is not None:
+                body_fn()
+            else:
+                st.markdown(body_md if body_md else "_—_")
+        if regen:
+            try:
+                with st.spinner(f"Regenerating {title} with AI…"):
+                    new_val = _regenerate_block(os_unit, sess, plan, name)
+            except ai_client.AIError as e:
+                st.error(f"Couldn't regenerate {title}: {e}")
+            else:
+                setattr(plan, name, new_val)
+                ss[f"{key_prefix}_plan"] = plan
+                st.rerun()
+
+    # ----- read-only context (carried over from the Learning Plan) --------- #
+    with st.container(border=True):
+        st.markdown(f"**Unit:** {plan.unit_title or '—'}  ·  **Code:** "
+                    f"{plan.unit_code or '—'}  ·  **Level:** {plan.level or '—'}")
+        st.markdown("**Learning outcome(s):**")
+        st.markdown("\n".join(f"- {l}" for l in plan.learning_outcomes) or "_—_")
+        st.markdown("**Resources:**")
+        st.markdown("\n".join(f"- {l}" for l in plan.resources) or "_—_")
+
+    # ----- AI blocks, each individually regeneratable ---------------------- #
+    block("LLN / special-needs requirements", "lln_requirements",
+          body_md=plan.lln_requirements or "_—_")
+    block("Safety requirements", "safety_requirements",
+          body_md=plan.safety_requirements or "_—_")
+    block("1. Introduction (5 minutes)", "introduction",
+          body_md=_lines_md(plan.introduction))
+
+    def _steps_body() -> None:
+        for stp in plan.delivery_steps:
+            st.markdown(f"**{stp.step_label} — {stp.minutes} minutes**")
+            a, b = st.columns(2)
+            a.markdown("*Trainer activity*")
+            a.markdown("\n".join(f"- {l}" for l in stp.trainer_activity) or "_—_")
+            a.markdown("*Trainee activity*")
+            a.markdown("\n".join(f"- {l}" for l in stp.trainee_activity) or "_—_")
+            b.markdown("*Learning check / assessment*")
+            b.markdown("\n".join(f"- {l}" for l in stp.learning_check) or "_—_")
+    block("2. Session Delivery", "delivery_steps", body_fn=_steps_body)
+
+    block("3. Session Review (5 minutes)", "review", body_md=_lines_md(plan.review))
+    block("Assignment", "assignment", body_md=plan.assignment or "_—_")
+    st.markdown(f"**TOTAL TIME:** {plan.total_minutes} minutes")
+
+
 def render_session_plans(os_unit: Unit, inputs: PlanInputs,
                          sessions: List[Session], *, key_prefix: str = "sp") -> None:
     st.divider()
@@ -352,46 +451,25 @@ def render_session_plans(os_unit: Unit, inputs: PlanInputs,
     if st.button("Generate Session Plan", key=f"{key_prefix}_gen"):
         sess = sessions[int(idx)]
         runlog.log(f"Generate Session Plan for '{sess.session_title}'")
-        progress_messages: List[str] = []
-        status_placeholder = st.empty()
-
-        def _push(message: str) -> None:
-            progress_messages.append(message)
-            status_placeholder.code("\n".join(progress_messages[-15:]), language="text")
-
         try:
             with st.spinner("Generating the session plan with AI..."):
                 with runlog.timed("AI generate session plan"):
-                    plan = _make_session_plan(os_unit, sess, inputs, progress_cb=_push)
+                    plan = _make_session_plan(os_unit, sess, inputs)
         except ai_client.AIError as e:
             st.error(f"AI generation failed after {SP_MAX_ATTEMPTS} attempts: {e}. "
                      "Please try again.")
-            return
+        else:
+            ss[f"{key_prefix}_plan"] = plan
+            ss[f"{key_prefix}_plan_idx"] = int(idx)
+            st.success(f"Session plan ready ({plan.total_minutes} minutes, "
+                       f"{len(plan.delivery_steps)} delivery steps).")
 
-        with runlog.timed("Build session-plan .docx"):
-            sp_bytes = session_plan_builder.document_to_bytes(plan)
-        st.success(f"Session plan ready ({plan.total_minutes} minutes, "
-                   f"{len(plan.delivery_steps)} delivery steps).")
-        st.download_button("Download Session Plan (.docx)", data=sp_bytes,
-                           file_name=_sp_filename(sess), mime=DOCX_MIME,
-                           key=f"{key_prefix}_dl")
-
-        with st.expander("Preview session plan", expanded=True):
-            st.markdown(f"**{plan.session_title}**")
-            st.markdown("*Introduction*")
-            st.write("\n".join(plan.introduction))
-            for step in plan.delivery_steps:
-                st.markdown(f"**{step.step_label} — {step.minutes} minutes**")
-                col_a, col_b = st.columns(2)
-                col_a.markdown("*Trainer activity*")
-                col_a.write("\n".join(step.trainer_activity))
-                col_a.markdown("*Trainee activity*")
-                col_a.write("\n".join(step.trainee_activity))
-                col_b.markdown("*Learning check / assessment*")
-                col_b.write("\n".join(step.learning_check))
-            st.markdown("*Session review*")
-            st.write("\n".join(plan.review))
-            st.markdown(f"*Assignment:* {plan.assignment}")
+    # persistent, block-by-block editable preview of the last-generated plan
+    stored = ss.get(f"{key_prefix}_plan")
+    if stored is not None:
+        stored_idx = min(int(ss.get(f"{key_prefix}_plan_idx", 0)), len(sessions) - 1)
+        _render_editable_plan(os_unit, inputs, sessions[stored_idx], stored,
+                              key_prefix)
 
     # ----- batch: all sessions -> one .zip --------------------------------- #
     st.divider()

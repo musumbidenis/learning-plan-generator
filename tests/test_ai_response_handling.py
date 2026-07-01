@@ -9,9 +9,11 @@ That must raise a clean AIError and stop, not fall back to another model.
 import pytest
 import requests
 
+import json
+
 import ai_client
 from ai_client import AIError, _extract_text, call_mistral
-from models import Session, Unit
+from models import Session, SessionPlan, Unit
 
 
 class FakeResp:
@@ -148,6 +150,72 @@ def test_chat_json_salvages_truncated_learning_plan(monkeypatch):
             FakeResp(200, _ok_payload(truncated)))
     rows = call_mistral("p", "k", "m1")
     assert [r["week"] for r in rows] == [1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# Per-block session-plan regeneration
+# --------------------------------------------------------------------------- #
+def _sp_unit_session():
+    unit = Unit(unit_title="Apply Market Research", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    session = Session(session_title="Market Research Tools",
+                      key_points=["TOOLS"], learning_outcomes=["a. Define."],
+                      assessments=["Knowledge Checks:", "1. Oral questioning"])
+    return unit, session
+
+
+def _fake_block_response(monkeypatch, payload):
+    monkeypatch.setattr(
+        ai_client, "_post",
+        lambda *a, **k: FakeResp(200, _ok_payload(json.dumps(payload))))
+
+
+def test_regenerate_introduction_returns_list(monkeypatch):
+    unit, session = _sp_unit_session()
+    plan = SessionPlan(introduction=["Trainer:", "Take roll call."])
+    _fake_block_response(monkeypatch, {"introduction": ["Trainer:", "Greet the trainees."]})
+    out = ai_client.regenerate_session_plan_block(
+        unit, session, plan, "introduction", api_key="k", model="m")
+    assert out == ["Trainer:", "Greet the trainees."]
+
+
+def test_regenerate_assignment_returns_str(monkeypatch):
+    unit, session = _sp_unit_session()
+    plan = SessionPlan(assignment="old task")
+    _fake_block_response(monkeypatch, {"assignment": "Build a questionnaire."})
+    out = ai_client.regenerate_session_plan_block(
+        unit, session, plan, "assignment", api_key="k", model="m")
+    assert out == "Build a questionnaire."
+
+
+def test_regenerate_delivery_steps_returns_deliverysteps(monkeypatch):
+    unit, session = _sp_unit_session()
+    plan = SessionPlan()
+    _fake_block_response(monkeypatch, {"delivery_steps": [
+        {"step_label": "Step 1", "minutes": 50,
+         "trainer_activity": ["Trainer:", "Demonstrate the tool."],
+         "trainee_activity": ["Trainee(s):", "Practise."],
+         "learning_check": ["Skills", "1. Observation"]}]})
+    steps = ai_client.regenerate_session_plan_block(
+        unit, session, plan, "delivery_steps", api_key="k", model="m")
+    assert len(steps) == 1
+    assert steps[0].step_label == "Step 1" and steps[0].minutes == 50
+
+
+def test_regenerate_block_empty_raises(monkeypatch):
+    unit, session = _sp_unit_session()
+    plan = SessionPlan(introduction=["Trainer:", "x"])
+    _fake_block_response(monkeypatch, {"introduction": []})
+    with pytest.raises(AIError):
+        ai_client.regenerate_session_plan_block(
+            unit, session, plan, "introduction", api_key="k", model="m")
+
+
+def test_regenerate_unknown_block_raises():
+    unit, session = _sp_unit_session()
+    with pytest.raises(ValueError):
+        ai_client.regenerate_session_plan_block(
+            unit, session, SessionPlan(), "nonsense", api_key="k", model="m")
 
 
 def test_generate_sessions_batches_long_terms(monkeypatch):
