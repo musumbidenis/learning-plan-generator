@@ -19,6 +19,7 @@ import inspect
 import os
 import re
 import tempfile
+import time
 from typing import List
 
 import streamlit as st
@@ -38,6 +39,11 @@ from pdf_utils import load_document
 # breakdown is sized to this standard TVET double session unless the source says
 # otherwise (the Learning Plan doesn't carry a per-session duration).
 DEFAULT_SP_DURATION = 120
+
+# Session plans are AI-only (NO deterministic fallback): each session is one API
+# call, retried until it succeeds. This bounds how long we keep retrying a single
+# session before giving up so the app never hangs indefinitely.
+SP_MAX_ATTEMPTS = 8
 
 st.set_page_config(page_title="Learning Plan Generator", layout="wide")
 
@@ -295,24 +301,32 @@ def _sp_filename(sess: Session) -> str:
 
 def _make_session_plan(os_unit: Unit, sess: Session, inputs: PlanInputs,
                        progress_cb=None):
-    """One session plan, everything pulled from the plan; blanks where unknown.
+    """One AI-generated session plan - NO offline fallback; retry until it works.
 
-    Date, time and trainer number are not carried by a Learning Plan, so they are
-    left blank for the trainer to fill in on the printed plan. Falls back to the
-    deterministic offline build if the AI call fails.
+    Everything is pulled from the Learning Plan; date, time and trainer number
+    are left blank for the trainer to fill in. The single API call is retried
+    (with backoff) up to SP_MAX_ATTEMPTS times; if every attempt fails the final
+    AIError propagates so the caller can report it (we never substitute a
+    deterministic plan).
     """
-    try:
-        return ai_client.generate_session_plan(
-            os_unit, sess, inputs, display_code=ss.display_code,
-            trainer_number="", session_date="", session_time="",
-            duration_minutes=DEFAULT_SP_DURATION, api_key=None,
-            progress_cb=progress_cb)
-    except ai_client.AIError as e:
-        runlog.error(f"Session-plan AI call failed for '{sess.session_title}': {e}")
-        return ai_client.build_session_plan_offline(
-            os_unit, sess, inputs, display_code=ss.display_code,
-            trainer_number="", session_date="", session_time="",
-            duration_minutes=DEFAULT_SP_DURATION)
+    last_err: ai_client.AIError | None = None
+    for attempt in range(1, SP_MAX_ATTEMPTS + 1):
+        try:
+            return ai_client.generate_session_plan(
+                os_unit, sess, inputs, display_code=ss.display_code,
+                trainer_number="", session_date="", session_time="",
+                duration_minutes=DEFAULT_SP_DURATION, api_key=None,
+                progress_cb=progress_cb)
+        except ai_client.AIError as e:
+            last_err = e
+            runlog.error(f"Session-plan AI attempt {attempt}/{SP_MAX_ATTEMPTS} "
+                         f"failed for '{sess.session_title}': {e}")
+            if progress_cb is not None:
+                progress_cb(f"Attempt {attempt}/{SP_MAX_ATTEMPTS} failed; retrying...")
+            if attempt < SP_MAX_ATTEMPTS:
+                time.sleep(min(3 * attempt, 15))          # backoff, capped
+    raise ai_client.AIError(
+        f"'{sess.session_title}' failed after {SP_MAX_ATTEMPTS} attempts: {last_err}")
 
 
 def render_session_plans(os_unit: Unit, inputs: PlanInputs,
@@ -322,6 +336,11 @@ def render_session_plans(os_unit: Unit, inputs: PlanInputs,
     st.caption("Everything is pulled from the Learning Plan. Details a Learning "
                "Plan doesn't carry (date, time, trainer number) are left blank on "
                "the document for you to fill in.")
+
+    if not ai_client.load_api_key():
+        st.error("Session plans are generated with AI, but no Mistral API key is "
+                 "configured. Set MISTRAL_API_KEY and reload.")
+        return
 
     # ----- one session at a time ------------------------------------------- #
     idx = st.selectbox(
@@ -340,9 +359,14 @@ def render_session_plans(os_unit: Unit, inputs: PlanInputs,
             progress_messages.append(message)
             status_placeholder.code("\n".join(progress_messages[-15:]), language="text")
 
-        with st.spinner("Generating the session plan..."):
-            with runlog.timed("AI generate session plan"):
-                plan = _make_session_plan(os_unit, sess, inputs, progress_cb=_push)
+        try:
+            with st.spinner("Generating the session plan with AI..."):
+                with runlog.timed("AI generate session plan"):
+                    plan = _make_session_plan(os_unit, sess, inputs, progress_cb=_push)
+        except ai_client.AIError as e:
+            st.error(f"AI generation failed after {SP_MAX_ATTEMPTS} attempts: {e}. "
+                     "Please try again.")
+            return
 
         with runlog.timed("Build session-plan .docx"):
             sp_bytes = session_plan_builder.document_to_bytes(plan)
@@ -372,28 +396,41 @@ def render_session_plans(os_unit: Unit, inputs: PlanInputs,
     # ----- batch: all sessions -> one .zip --------------------------------- #
     st.divider()
     st.markdown("**Batch**")
-    st.caption(f"Generate a session plan for every one of the {len(sessions)} "
-               "sessions and download them together as a .zip.")
+    st.caption(f"Generate an AI session plan for every one of the {len(sessions)} "
+               "sessions - one API call each, retried until it succeeds - then "
+               "download them together as a .zip.")
     if st.button(f"Generate ALL {len(sessions)} Session Plans (.zip)",
                  key=f"{key_prefix}_batch"):
-        runlog.log(f"Batch-generating {len(sessions)} session plans")
+        runlog.log(f"Batch-generating {len(sessions)} session plans (AI-only)")
         progress = st.progress(0.0, text="Starting...")
-        named_plans = []
-        with st.spinner("Generating every session plan..."):
+        named_plans, failures = [], []
+        with st.spinner("Generating every session plan with AI..."):
             for k, sess in enumerate(sessions, start=1):
                 progress.progress(
                     k / len(sessions),
                     text=f"({k}/{len(sessions)}) {sess.session_title[:60]}")
-                with runlog.timed(f"Session plan {k}/{len(sessions)}"):
-                    plan = _make_session_plan(os_unit, sess, inputs)
-                named_plans.append((_sp_filename(sess), plan))
-        with runlog.timed("Zip session plans"):
-            zip_bytes = session_plan_builder.plans_to_zip(named_plans)
-        st.success(f"Generated **{len(named_plans)}** session plans.")
-        zip_name = f"Session_Plans_{(ss.display_code or 'unit').replace('/', '_')}.zip"
-        st.download_button("Download all Session Plans (.zip)", data=zip_bytes,
-                           file_name=zip_name, mime="application/zip",
-                           key=f"{key_prefix}_zip_dl")
+                try:
+                    with runlog.timed(f"Session plan {k}/{len(sessions)}"):
+                        plan = _make_session_plan(os_unit, sess, inputs)
+                    named_plans.append((_sp_filename(sess), plan))
+                except ai_client.AIError as e:
+                    runlog.error(f"Batch: giving up on '{sess.session_title}': {e}")
+                    failures.append(sess.session_title)
+
+        if named_plans:
+            with runlog.timed("Zip session plans"):
+                zip_bytes = session_plan_builder.plans_to_zip(named_plans)
+            st.success(f"Generated **{len(named_plans)}/{len(sessions)}** session "
+                       "plans with AI.")
+            zip_name = f"Session_Plans_{(ss.display_code or 'unit').replace('/', '_')}.zip"
+            st.download_button("Download all Session Plans (.zip)", data=zip_bytes,
+                               file_name=zip_name, mime="application/zip",
+                               key=f"{key_prefix}_zip_dl")
+        if failures:
+            st.error("These sessions failed after "
+                     f"{SP_MAX_ATTEMPTS} attempts each and are NOT in the zip - "
+                     "click again to retry them:\n"
+                     + "\n".join(f"- {t}" for t in failures))
 
 
 # =========================================================================== #
