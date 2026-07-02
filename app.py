@@ -361,13 +361,22 @@ def _render_plan_preview(sess: Session, plan, key_prefix: str) -> None:
 
 
 def _regenerate_lp_session(os_unit: Unit, idx: int) -> None:
-    """AI-regenerate ONE Learning-Plan session in place, retrying (no fallback)."""
+    """Regenerate ONE Learning-Plan session in place.
+
+    CAT rows recompute deterministically from the sessions they assess; content
+    sessions are AI-regenerated with retry (no fallback).
+    """
     sessions = ss.lp_sessions
+    if sessions[idx].is_cat:
+        ai_client.rebuild_cat_session(sessions, idx)
+        ss.lp_sessions = sessions
+        return
+
     last_err: ai_client.AIError | None = None
     for attempt in range(1, SP_MAX_ATTEMPTS + 1):
         try:
             ai_client.regenerate_learning_plan_session(
-                os_unit, sessions[idx], api_key=None)
+                os_unit, sessions, idx, api_key=None)
             ss.lp_sessions = sessions
             return
         except ai_client.AIError as e:
@@ -403,10 +412,12 @@ def render_learning_plan_preview(os_unit: Unit, inputs: PlanInputs) -> None:
         c1, c2 = st.columns([0.8, 0.2])
         tag = "[CAT] " if s.is_cat else ""
         c1.markdown(f"**Week {s.week} · Session {s.session_no} · {tag}{s.session_title}**")
+        # content sessions need the API; CAT rows recompute deterministically
         regen = c2.button("🔄 Regenerate", key=f"lp_regen_{i}",
-                          help="Regenerate this session with AI",
+                          help=("Recompute this CAT from the sessions it assesses"
+                                if s.is_cat else "Regenerate this session with AI"),
                           use_container_width=True,
-                          disabled=not ai_client.load_api_key())
+                          disabled=(not s.is_cat) and not ai_client.load_api_key())
         with st.container(border=True):
             a, b = st.columns(2)
             a.markdown("*Specific learning outcomes*")

@@ -179,7 +179,7 @@ def test_regenerate_learning_plan_session_updates_in_place(monkeypatch):
         ai_client, "_post",
         lambda *a, **k: FakeResp(200, _ok_payload(json.dumps([row]))))
     out = ai_client.regenerate_learning_plan_session(
-        unit, session, api_key="k", model="m")
+        unit, [session], 0, api_key="k", model="m")
     assert out is session                                   # mutated in place
     assert any("Identify tools" in x for x in session.learning_outcomes)
     assert any("Kotler" in x for x in session.resources)
@@ -187,16 +187,24 @@ def test_regenerate_learning_plan_session_updates_in_place(monkeypatch):
     assert session.week == 2 and session.pcs == ["1.1 tools are identified"]
 
 
-def test_regenerate_cat_session_is_deterministic(monkeypatch):
-    unit, session = _lp_unit_session()
-    session.is_cat = True
+def test_regenerate_cat_session_is_deterministic_and_contextual(monkeypatch):
+    unit, content = _lp_unit_session()
+    content.session_title = "Programming Languages"
+    cat = Session(week=4, session_no="1", is_cat=True,
+                  session_title="CAT 1 (Continuous Assessment Test)")
+    sessions = [content, cat]
     # even if the API is called it must NOT be used for a CAT row
     monkeypatch.setattr(ai_client, "_post",
                         lambda *a, **k: FakeResp(200, _ok_payload("[]")))
     out = ai_client.regenerate_learning_plan_session(
-        unit, session, api_key="k", model="m")
-    assert out.key_points == ["ASSESSMENT COVERAGE"]
-    assert out.trainee_activities == ["- Complete the Continous Assessment Test(CAT)."]
+        unit, sessions, 1, api_key="k", model="m")
+    assert out.key_points[0] == "ASSESSMENT COVERAGE"
+    assert "- Programming Languages" in out.key_points            # contextual coverage
+    assert out.learning_outcomes[0].startswith("By the end")
+    assert any("programming languages" in x.lower() for x in out.learning_outcomes)
+    assert out.trainee_activities[0].startswith(
+        "- Complete the Continuous Assessment Test (CAT 1)")
+    assert out.assessments[0] == "Knowledge Checks:"
 
 
 def test_regenerate_learning_plan_session_empty_raises(monkeypatch):
@@ -205,7 +213,37 @@ def test_regenerate_learning_plan_session_empty_raises(monkeypatch):
                         lambda *a, **k: FakeResp(200, _ok_payload("[]")))
     with pytest.raises(AIError):
         ai_client.regenerate_learning_plan_session(
-            unit, session, api_key="k", model="m")
+            unit, [session], 0, api_key="k", model="m")
+
+
+def test_cat_content_is_scoped_to_sessions_since_previous_cat():
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="6")
+
+    def content(title):
+        return Session(is_cat=False, session_title=title, pcs=["1.1 x"],
+                       key_points=[title.upper()])
+
+    def cat(n):
+        return Session(is_cat=True,
+                       session_title=f"CAT {n} (Continuous Assessment Test)")
+
+    sessions = [content("Alpha"), content("Beta"), cat(1),
+                content("Gamma"), cat(2)]
+    ai_client.merge_ai_into_sessions(sessions, [], unit)   # no AI -> deterministic
+    cat1, cat2 = sessions[2], sessions[4]
+
+    assert cat1.key_points == ["ASSESSMENT COVERAGE", "- Alpha", "- Beta"]
+    assert cat2.key_points == ["ASSESSMENT COVERAGE", "- Gamma"]   # only since CAT 1
+    assert cat1.trainee_activities[0].startswith(
+        "- Complete the Continuous Assessment Test (CAT 1)")
+    assert cat2.trainee_activities[0].startswith(
+        "- Complete the Continuous Assessment Test (CAT 2)")
+    # every CAT carries the fixed Knowledge-checks / Attitudes template
+    assert cat1.assessments[0] == "Knowledge Checks:"
+    assert "Attitudes:" in cat1.assessments
+    # learning outcomes list what was covered, one competency per covered session
+    assert cat1.learning_outcomes[0].startswith("By the end")
+    assert len([x for x in cat1.learning_outcomes if x[:2] in ("a.", "b.")]) == 2
 
 
 def test_generate_sessions_batches_long_terms(monkeypatch):

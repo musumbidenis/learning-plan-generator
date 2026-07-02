@@ -391,14 +391,11 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     for i, s in enumerate(sessions):
         row = ai_rows[i] if i < len(ai_rows) else {}
 
-        # CAT rows are fully deterministic - fixed wording every time, never the
-        # AI's output. The planner already gives them a clean title.
+        # CAT rows are deterministic - never the AI's output - but CONTEXTUAL:
+        # they summarise the content sessions this CAT assesses (those since the
+        # previous CAT), which are already filled earlier in this in-order pass.
         if s.is_cat:
-            s.learning_outcomes = _cat_learning_outcomes()
-            s.key_points = _cat_keypoints()
-            s.trainee_activities = _cat_activities()
-            s.resources = _cat_resources()
-            s.assessments = _cat_assessments()
+            _apply_cat_content(sessions, i)
             continue
 
         # session_title: accept the AI's data-quality-repaired title if given,
@@ -429,27 +426,105 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     return sessions
 
 
-def _cat_learning_outcomes() -> List[str]:
-    return [
-        "By the end of the session, the trainee should be able to:",
-        "a. Demonstrate competence in the learning outcomes covered.",
-    ]
+def _cat_number(sessions: List[Session], idx: int) -> int:
+    """1-based ordinal of the CAT at `idx` among all CAT rows."""
+    return sum(1 for s in sessions[:idx + 1] if s.is_cat)
 
 
-def _cat_keypoints() -> List[str]:
-    return ["ASSESSMENT COVERAGE"]
+def _covered_sessions(sessions: List[Session], idx: int) -> List[Session]:
+    """Content sessions this CAT assesses: those since the previous CAT."""
+    covered: List[Session] = []
+    for j in range(idx - 1, -1, -1):
+        if sessions[j].is_cat:
+            break
+        covered.append(sessions[j])
+    return list(reversed(covered))
 
 
-def _cat_activities() -> List[str]:
-    return ["- Complete the Continous Assessment Test(CAT)."]
+def _cat_topic(session: Session) -> str:
+    """A session title as a sentence-cased topic phrase (acronyms preserved).
+
+    'Programming Language Types' -> 'programming language types';
+    'Apply ICT Skills' -> 'apply ICT skills'. Used mid-sentence in the CAT's
+    learning outcomes and activity line.
+    """
+    words = (session.session_title or "").strip().rstrip(".").split()
+    out = []
+    for w in words:
+        if (len(w) > 1 and w.isupper()) or any(c.isdigit() for c in w):
+            out.append(w)                 # keep acronyms / tokens with digits
+        else:
+            out.append(w.lower())
+    return " ".join(out) or "the topic"
+
+
+def _cat_topics_phrase(covered: List[Session]) -> str:
+    topics = [_cat_topic(s) for s in covered if (s.session_title or "").strip()]
+    if not topics:
+        return "the learning outcomes covered so far"
+    if len(topics) == 1:
+        return topics[0]
+    return ", ".join(topics[:-1]) + " and " + topics[-1]
+
+
+def _cat_learning_outcomes(covered: List[Session]) -> List[str]:
+    """One competency per covered session (what the trainee has learnt)."""
+    labels = "abcdefghijklmnop"
+    outs = ["By the end of the session, the trainee should be able to:"]
+    for k, s in enumerate(covered[:len(labels)]):
+        outs.append(f"{labels[k]}. Demonstrate competence in {_cat_topic(s)}.")
+    if len(outs) == 1:
+        outs.append("a. Demonstrate competence in the learning outcomes covered.")
+    return outs
+
+
+def _cat_keypoints(covered: List[Session]) -> List[str]:
+    """'ASSESSMENT COVERAGE' heading + a bullet per covered topic."""
+    out = ["ASSESSMENT COVERAGE"]
+    for s in covered:
+        title = (s.session_title or "").strip()
+        if title:
+            out.append(f"- {title}")
+    if len(out) == 1:
+        out.append("- The learning outcomes covered so far.")
+    return out
+
+
+def _cat_activities(cat_no: int, covered: List[Session]) -> List[str]:
+    return [f"- Complete the Continuous Assessment Test (CAT {cat_no}) to evaluate "
+            f"the trainee's competence in {_cat_topics_phrase(covered)}."]
 
 
 def _cat_resources() -> List[str]:
-    return ["Assessment Tool(s) and/or Observation Checklist", "Assessor Guide"]
+    return ["- Assessment tool(s) and marking scheme/rubric",
+            "- Observation checklist and assessor guide",
+            "- Answer booklets and writing materials"]
 
 
 def _cat_assessments() -> List[str]:
-    return ["-Graded Knowledge."]
+    return ["Knowledge Checks:",
+            "1. Graded assessment of knowledge. and/or",
+            "2. Evaluation of practical application in problem-solving.",
+            "Attitudes:",
+            "1. Honesty and integrity during assessment.",
+            "2. Self-reflection on learning progress."]
+
+
+def _apply_cat_content(sessions: List[Session], idx: int) -> None:
+    """Fill a CAT row in place from the content sessions it assesses."""
+    s = sessions[idx]
+    covered = _covered_sessions(sessions, idx)
+    s.learning_outcomes = _cat_learning_outcomes(covered)
+    s.key_points = _cat_keypoints(covered)
+    s.trainee_activities = _cat_activities(_cat_number(sessions, idx), covered)
+    s.resources = _cat_resources()
+    s.assessments = _cat_assessments()
+
+
+def rebuild_cat_session(sessions: List[Session], idx: int) -> Session:
+    """Public deterministic recompute of one CAT from its current siblings."""
+    _apply_cat_content(sessions, idx)
+    return sessions[idx]
 
 
 def _format_curriculum_keypoints(points: List[str]) -> List[str]:
@@ -509,27 +584,30 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
-def regenerate_learning_plan_session(unit: Unit, session: Session, *,
-                                     api_key: str = "", model: Optional[str] = None,
+def regenerate_learning_plan_session(unit: Unit, sessions: List[Session], idx: int,
+                                     *, api_key: str = "",
+                                     model: Optional[str] = None,
                                      progress_cb=None) -> Session:
-    """Regenerate ONE session's generative columns in place (AI, no fallback).
+    """Regenerate ONE session in `sessions` in place (mutates sessions[idx]).
 
-    Reruns the single grounded call for just this session (higher temperature so
-    the result differs) and merges it back onto the deterministic skeleton, so
-    week / session_no / is_cat / pcs and the authoritative key_points survive.
-    CAT sessions are deterministic - they are simply re-stamped. Raises AIError
-    if the model returns nothing usable so the caller can retry.
+    Content sessions rerun the grounded call for just that session (higher
+    temperature so the result differs) and merge back onto the deterministic
+    skeleton, so week / session_no / is_cat / pcs and the authoritative
+    key_points survive. CAT rows are deterministic and simply recomputed from the
+    content sessions they assess. Raises AIError if the model returns nothing
+    usable so the caller can retry.
     """
+    session = sessions[idx]
+
+    if session.is_cat:                       # deterministic - no API call needed
+        return rebuild_cat_session(sessions, idx)
+
     if api_key is None:
         api_key = load_api_key()
     if model is None:
         model = load_model_name()
     if not api_key:
         raise AIError("No Mistral API key available.")
-
-    if session.is_cat:                       # deterministic - no API call needed
-        merge_ai_into_sessions([session], [{}], unit)
-        return session
 
     prompt = build_prompt(unit, [session])
     _emit_progress(progress_cb, f"Regenerating session {session.session_no}")
