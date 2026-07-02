@@ -509,6 +509,41 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
+def regenerate_learning_plan_session(unit: Unit, session: Session, *,
+                                     api_key: str = "", model: Optional[str] = None,
+                                     progress_cb=None) -> Session:
+    """Regenerate ONE session's generative columns in place (AI, no fallback).
+
+    Reruns the single grounded call for just this session (higher temperature so
+    the result differs) and merges it back onto the deterministic skeleton, so
+    week / session_no / is_cat / pcs and the authoritative key_points survive.
+    CAT sessions are deterministic - they are simply re-stamped. Raises AIError
+    if the model returns nothing usable so the caller can retry.
+    """
+    if api_key is None:
+        api_key = load_api_key()
+    if model is None:
+        model = load_model_name()
+    if not api_key:
+        raise AIError("No Mistral API key available.")
+
+    if session.is_cat:                       # deterministic - no API call needed
+        merge_ai_into_sessions([session], [{}], unit)
+        return session
+
+    prompt = build_prompt(unit, [session])
+    _emit_progress(progress_cb, f"Regenerating session {session.session_no}")
+    data = _chat_json(prompt, api_key, model, _response_schema(),
+                      "learning_plan_sessions", progress_cb=progress_cb,
+                      temperature=0.6)
+    if isinstance(data, dict):
+        data = data.get("sessions") or data.get("data") or [data]
+    if not isinstance(data, list) or not data:
+        raise AIError("AI returned no session content")
+    merge_ai_into_sessions([session], data, unit)   # mutates `session` in place
+    return session
+
+
 # =========================================================================== #
 # SESSION PLAN - one detailed lesson plan per chosen Learning-Plan session.
 #
@@ -553,28 +588,6 @@ def _session_plan_schema() -> dict:
         "required": ["introduction", "delivery_steps", "review", "assignment",
                      "lln_requirements", "safety_requirements"],
     }
-
-
-# Blocks the user can regenerate one at a time from the preview.
-_BLOCK_LABELS = {
-    "introduction": "the 5-minute Introduction",
-    "delivery_steps": "the Session Delivery steps",
-    "review": "the 5-minute Session Review",
-    "assignment": "the take-home Assignment",
-    "lln_requirements": "the LLN / special-needs note",
-    "safety_requirements": "the safety-requirements note",
-}
-
-
-def _block_schema(block: str) -> dict:
-    str_array = {"type": "array", "items": {"type": "string"}}
-    if block == "delivery_steps":
-        prop = _delivery_steps_schema()
-    elif block in ("introduction", "review"):
-        prop = str_array
-    else:                                             # assignment / lln / safety
-        prop = {"type": "string"}
-    return {"type": "object", "properties": {block: prop}, "required": [block]}
 
 
 def build_session_plan_prompt(unit: Unit, session: Session,
@@ -624,133 +637,6 @@ Produce a JSON object with these fields:
 
 TERMINOLOGY - Kenya CBET only: "trainee" (never student/learner/pupil), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object.
 """
-
-
-def _current_block_text(plan: SessionPlan, block: str) -> str:
-    """A readable rendering of a plan block, shown to the model to differ from."""
-    if block in ("introduction", "review"):
-        return "\n".join(getattr(plan, block)) or "(empty)"
-    if block == "delivery_steps":
-        out: List[str] = []
-        for s in plan.delivery_steps:
-            out.append(f"{s.step_label} ({s.minutes} min)")
-            out.append("  Trainer: " + " / ".join(s.trainer_activity))
-            out.append("  Trainee: " + " / ".join(s.trainee_activity))
-            out.append("  Check: " + " / ".join(s.learning_check))
-        return "\n".join(out) or "(empty)"
-    return str(getattr(plan, block, "") or "(empty)")
-
-
-def build_session_plan_block_prompt(unit: Unit, session: Session,
-                                    duration_minutes: int, block: str,
-                                    current_plan: SessionPlan) -> str:
-    """A focused prompt to regenerate ONE block of a session plan."""
-    delivery = max(10, int(duration_minutes) - 10)
-    los = "\n".join(session.learning_outcomes) or "(derive from the title)"
-    kps = "\n".join(session.key_points) or "(none supplied)"
-    acts = "\n".join(session.trainee_activities) or "(none supplied)"
-    assess = "\n".join(session.assessments) or "(none supplied)"
-    level = unit.level or "6"
-    methods = "; ".join(unit.assessment_methods) or ("Observation; Oral questioning; "
-        "Written assessment; Practical assessment; Portfolio of evidence")
-
-    instructions = {
-        "introduction": ('introduction: 3-4 short bullets for the 5-minute opening. Start with '
-            '"Trainer:" then what the trainer does (take roll call; review the previous session; '
-            "state this session's title and expected learning outcomes)."),
-        "review": ('review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" '
-            "(summarise key points; answer questions; preview the next session)."),
-        "assignment": ("assignment: ONE concrete take-home task grounded in this session's "
-            "content (a full sentence)."),
-        "lln_requirements": ("lln_requirements: one sentence noting how trainees with "
-            "Language/Literacy/Numeracy or other special needs are catered for in THIS session "
-            "(e.g. simplified handouts, sign-language interpreter, extra time)."),
-        "safety_requirements": ("safety_requirements: one sentence on the workplace SOPs / "
-            "safety precautions relevant to THIS session's topic."),
-        "delivery_steps": (f'delivery_steps: 3-4 steps whose "minutes" sum to EXACTLY {delivery}. '
-            'Each step has step_label ("Step 1", "Step 2"...; split an involving step into '
-            '"Step 1(a)", "Step 1(b)"...), an integer minutes, trainer_activity (name a CBET '
-            "active-learning method - Group Discussion, Demonstration, Guided Practice, Case Study "
-            '- referencing this session\'s key points; facilitate, never "lecture"), '
-            "trainee_activity, and learning_check (a CAPITALISED group word Knowledge/Skills/"
-            "Attitudes then numbered items). Progress from understanding -> guided practice -> "
-            "independent application."),
-    }[block]
-
-    tense = ("\nWrite every activity line in the imperative present tense (base verb form): "
-             '"Take roll call", "Lead a group discussion" - NOT "Takes", "Leads".') \
-        if block in ("introduction", "review", "delivery_steps") else ""
-
-    return f"""You are a senior TVET trainer refining ONE detailed SESSION PLAN. Regenerate ONLY {_BLOCK_LABELS[block]} for the session below, grounded in the supplied content; do NOT invent new topics.
-
-UNIT: {unit.unit_title} | CODE: {unit.os_code} | LEVEL: {level}
-SESSION TITLE: {session.session_title}
-
-THIS SESSION'S LEARNING OUTCOMES:
-{los}
-
-THIS SESSION'S LEARNING KEY POINTS (authoritative content to teach):
-{kps}
-
-THIS SESSION'S PLANNED TRAINEE ACTIVITIES:
-{acts}
-
-THIS SESSION'S ASSESSMENTS:
-{assess}
-OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
-{tense}
-
-Produce a JSON object with ONLY the "{block}" field:
-- {instructions}
-
-This is a REGENERATION: produce a fresh, high-quality alternative that MEANINGFULLY DIFFERS from the current version below (vary the methods, wording and emphasis) while staying grounded and correct.
-CURRENT VERSION:
-{_current_block_text(current_plan, block)}
-
-TERMINOLOGY - Kenya CBET only: "trainee", "trainer", "session" (never "lecture"/"lesson"), "facilitate" (never "teach"/"lecture"), "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object with the single field "{block}"."""
-
-
-def regenerate_session_plan_block(unit: Unit, session: Session,
-                                  current_plan: SessionPlan, block: str, *,
-                                  duration_minutes: int = 120, api_key: str = "",
-                                  model: Optional[str] = None, progress_cb=None):
-    """Regenerate ONE block of a session plan with AI (no offline fallback).
-
-    Returns the block's native shape: a list for introduction/review, a
-    list[DeliveryStep] for delivery_steps, otherwise a str. Raises AIError when
-    the model returns nothing usable so the caller can retry.
-    """
-    if block not in _BLOCK_LABELS:
-        raise ValueError(f"unknown session-plan block: {block}")
-    if api_key is None:
-        api_key = load_api_key()
-    if model is None:
-        model = load_model_name()
-    if not api_key:
-        raise AIError("No Mistral API key available.")
-
-    prompt = build_session_plan_block_prompt(unit, session, duration_minutes,
-                                             block, current_plan)
-    _emit_progress(progress_cb, f"Regenerating {_BLOCK_LABELS[block]}")
-    ai = _chat_json(prompt, api_key, model, _block_schema(block),
-                    f"session_plan_{block}", progress_cb=progress_cb,
-                    temperature=0.6)
-    ai = ai if isinstance(ai, dict) else {}
-
-    if block == "delivery_steps":
-        steps = _coerce_steps(ai.get("delivery_steps"), [])
-        if not steps:
-            raise AIError("AI returned no delivery steps")
-        return steps
-    if block in ("introduction", "review"):
-        val = _as_list(ai.get(block))
-        if not val:
-            raise AIError(f"AI returned an empty {block}")
-        return val
-    val = str(ai.get(block) or "").strip()
-    if not val:
-        raise AIError(f"AI returned an empty {block}")
-    return val
 
 
 def _group_assessments(assessments: List[str]) -> "dict":
