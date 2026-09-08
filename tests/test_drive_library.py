@@ -137,3 +137,49 @@ def test_cache_path_never_escapes_the_cache_directory():
     hostile = DriveFile(id="../../etc/passwd", name="x.pdf", modified_time="x")
     assert os.path.dirname(os.path.abspath(dl.cache_path(hostile))) == \
         os.path.abspath(dl.CACHE_DIR)
+
+
+# --------------------------------------------------------------------------- #
+# The API key must never reach a user-facing message or the run log
+# --------------------------------------------------------------------------- #
+import drive_client  # noqa: E402
+
+
+def test_the_api_key_is_scrubbed_from_error_text(monkeypatch):
+    key = "AIzaSyBExampleKeyValue1234567890abcdef"
+    monkeypatch.setattr(drive_client, "load_api_key", lambda: key)
+    leaked = f"Max retries exceeded with url: /drive/v3/files?key={key}&q=x"
+    scrubbed = drive_client._scrub(leaked)
+    assert key not in scrubbed
+    assert "<GOOGLE_API_KEY>" in scrubbed
+
+
+def test_any_key_shaped_token_is_scrubbed_even_when_none_is_configured(monkeypatch):
+    monkeypatch.setattr(drive_client, "load_api_key", lambda: "")
+    other = "AIzaSyDifferentKey0987654321zyxwvu"
+    assert other not in drive_client._scrub(f"failed with key={other}")
+
+
+def test_requests_are_authenticated_by_header_not_by_query_string(monkeypatch):
+    """The key in a URL would land in exception text, proxy logs and referrers."""
+    key = "AIzaSyBExampleKeyValue1234567890abcdef"
+    monkeypatch.setattr(drive_client, "load_api_key", lambda: key)
+    seen = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"files": []}
+
+    def fake_get(url, params=None, headers=None, **kw):
+        seen["params"] = params or {}
+        seen["headers"] = headers or {}
+        return FakeResponse()
+
+    monkeypatch.setattr(drive_client.requests, "get", fake_get)
+    drive_client.list_children("some-folder-id")
+
+    assert seen["headers"].get("X-goog-api-key") == key
+    assert not any(key in str(v) for v in seen["params"].values())
+    assert "key" not in seen["params"]

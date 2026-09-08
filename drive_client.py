@@ -14,6 +14,7 @@ caching of these calls.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -92,6 +93,19 @@ def _explain(status: int, detail: str) -> str:
     if status == 400 and "api key not valid" in detail.lower():
         return ("Google rejected the API key as invalid. Check the GOOGLE_API_KEY "
                 "value in .env against the one in the Cloud console.")
+    # Two different 403s, with two different fixes - saying "check your
+    # restrictions" for the first one sends the reader to the wrong screen.
+    low = detail.lower()
+    if status == 403 and "has not been used in project" in low:
+        return ("The Google Drive API isn't enabled on the project this key "
+                "belongs to. Open the link in the message below, press Enable, "
+                "and give it a minute to propagate. " + detail)
+    if status == 403 and "are blocked" in low:
+        return ("This API key is restricted to a subset of Drive methods, and "
+                "the one the app needs isn't in it. In the Cloud console open "
+                "Credentials -> your key -> API restrictions, and either pick "
+                "'Don't restrict key' or select the Google Drive API without "
+                "narrowing it to individual methods. " + detail)
     if status in (401, 403):
         return ("Google rejected the API key (HTTP %d). Check that the Drive API "
                 "is enabled on the project and that the key's API restrictions "
@@ -105,31 +119,53 @@ def _explain(status: int, detail: str) -> str:
     return f"Drive request failed (HTTP {status}). {detail}"
 
 
+def _scrub(text: str) -> str:
+    """Remove the API key from anything on its way to a user or a log.
+
+    requests puts the full request URL into its exception messages, so a plain
+    DNS failure would otherwise print the key into the Streamlit error box and
+    the run log. The key travels in a header rather than the query string, but
+    this stays as a second line of defence for redirects and echoed input.
+    """
+    key = load_api_key()
+    text = str(text)
+    if key:
+        text = text.replace(key, "<GOOGLE_API_KEY>")
+    # any key-shaped token, ours or not, never belongs in output
+    return re.sub(r"AIza[0-9A-Za-z_\-]{10,}", "<GOOGLE_API_KEY>", text)
+
+
 def _get(url: str, params: dict, *, stream: bool = False,
          timeout: int = LIST_TIMEOUT) -> requests.Response:
+    """GET a Drive endpoint, authenticating with the key as a header.
+
+    The key goes in X-goog-api-key, NOT in the query string, so it can't leak
+    through an exception message, a proxy log or a browser referrer.
+    """
+    headers = {"X-goog-api-key": _require_key()}
     try:
-        resp = requests.get(url, params=params, stream=stream, timeout=timeout)
+        resp = requests.get(url, params=params, headers=headers, stream=stream,
+                            timeout=timeout)
     except requests.RequestException as e:
-        raise DriveError(f"Couldn't reach Google Drive: {e}") from e
+        raise DriveError(f"Couldn't reach Google Drive: {_scrub(e)}") from None
     if resp.status_code != 200:
         detail = ""
         try:
             detail = str(resp.json().get("error", {}).get("message", ""))[:300]
         except Exception:                  # noqa: BLE001 - body may not be JSON
             detail = resp.text[:200]
-        raise DriveError(_explain(resp.status_code, detail))
+        raise DriveError(_scrub(_explain(resp.status_code, detail)))
     return resp
 
 
 def list_children(folder_id: str) -> List[DriveFile]:
     """Every non-trashed direct child of `folder_id`, folders first then by name."""
-    key = _require_key()
+    _require_key()
     out: List[DriveFile] = []
     page_token: Optional[str] = None
     while True:
         params = {
             "q": f"'{folder_id}' in parents and trashed = false",
-            "key": key,
             "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,size)",
             "orderBy": "folder,name",
             "pageSize": _PAGE_SIZE,
@@ -162,13 +198,13 @@ def download(file: DriveFile, dest_path: str) -> str:
     Writes to a temporary sibling first so an interrupted download can never
     leave a truncated file behind for the cache to trust.
     """
-    key = _require_key()
+    _require_key()
     if file.is_google_doc:
         url = f"{DRIVE_FILES_ENDPOINT}/{file.id}/export"
-        params = {"mimeType": DOCX_MIME, "key": key}
+        params = {"mimeType": DOCX_MIME}
     else:
         url = f"{DRIVE_FILES_ENDPOINT}/{file.id}"
-        params = {"alt": "media", "key": key, "supportsAllDrives": "true"}
+        params = {"alt": "media", "supportsAllDrives": "true"}
 
     resp = _get(url, params, stream=True, timeout=DOWNLOAD_TIMEOUT)
     partial = dest_path + ".part"
