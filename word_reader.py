@@ -37,6 +37,10 @@ import runlog
 # --------------------------------------------------------------------------- #
 # Neutral document model
 # --------------------------------------------------------------------------- #
+# Separates a cell's own paragraphs; the layout step turns each into its
+# own line so they stay individually addressable.
+_CELL_NEWLINE = chr(10)
+
 PARA = "para"
 ROW = "row"
 BREAK = "break"
@@ -187,7 +191,7 @@ def _blocks_ooxml(path: str) -> List[Block]:
                 for cell in row.findall(_W + "tc"):
                     texts = [_ooxml_paragraph_text(p)
                              for p in cell.iter(_W + "p")]
-                    cells.append(" ".join(t for t in texts if t).strip())
+                    cells.append(_CELL_NEWLINE.join(t for t in texts if t))
                 if any(cells):
                     blocks.append(Block(kind=ROW, cells=cells))
     return blocks
@@ -248,8 +252,12 @@ def _blocks_odt(path: str) -> List[Block]:
                     blocks.append(Block(kind=PARA, cells=[text]))
             elif tag == _TABLE_NS + "table":
                 for row in child.iter(_TABLE_NS + "table-row"):
-                    cells = [_odt_text(c)
-                             for c in row.findall(_TABLE_NS + "table-cell")]
+                    cells = []
+                    for c in row.findall(_TABLE_NS + "table-cell"):
+                        paras = [_odt_text(q) for q in c
+                                 if q.tag in (_TEXT_NS + "p", _TEXT_NS + "h")]
+                        cells.append(_CELL_NEWLINE.join(t for t in paras if t)
+                                     or _odt_text(c))
                     if any(cells):
                         blocks.append(Block(kind=ROW, cells=cells))
             elif tag in (_TEXT_NS + "section", _TEXT_NS + "list"):
@@ -385,6 +393,10 @@ _DOC_CELL_END = "\x07"
 _DOC_PARA_END = "\r"
 _DOC_PAGE_BREAK = "\x0c"
 
+# Paragraphs are held back until a cell mark says whether they were cell
+# content. Past this many, they are body text and are emitted as paragraphs.
+_DOC_MAX_CELL_PARAGRAPHS = 12
+
 
 def _read_ole_streams(path: str):
     """The WordDocument and table streams of an OLE2 compound file."""
@@ -489,7 +501,9 @@ def _blocks_doc(path: str) -> List[Block]:
             f".docx, then try again. ({type(e).__name__})") from e
 
     blocks: List[Block] = []
-    row: List[str] = []
+    row: List[str] = []          # cells completed in the row being read
+    in_row = False               # True once a row has opened but not yet closed
+    pending: List[str] = []      # paragraphs that may yet turn out to be a cell
     buf: List[str] = []
 
     def clean(s: str) -> str:
@@ -497,30 +511,57 @@ def _blocks_doc(path: str) -> List[Block]:
         s = re.sub(r"[\x00-\x06\x08\x0b\x0e-\x1f]", "", s)
         return re.sub(r"\s+", " ", s).strip()
 
-    for ch in text:
-        if ch == _DOC_CELL_END:
-            row.append(clean("".join(buf)))
-            buf.clear()
-        elif ch in (_DOC_PARA_END, "\n"):
-            if row:
-                # a paragraph mark closes the row the cell marks opened
-                if any(c for c in row):
-                    blocks.append(Block(kind=ROW, cells=list(row)))
-                row.clear()
-                buf.clear()
-                continue
-            piece = clean("".join(buf))
-            buf.clear()
+    def flush_pending() -> None:
+        """Emit paragraphs that turned out not to belong to a table cell."""
+        for piece in pending:
             if piece:
                 blocks.append(Block(kind=PARA, cells=[piece]))
+        pending.clear()
+
+    for ch in text:
+        if ch == _DOC_CELL_END:
+            # A cell's paragraphs are separate items - in an OS these are
+            # separate performance criteria - so keep them apart rather
+            # than running them into one line.
+            cell = _CELL_NEWLINE.join(
+                p for p in pending + [clean("".join(buf))] if p)
+            pending.clear()
+            buf.clear()
+            if not cell.strip() and row:
+                # An EMPTY cell terminates the row - that is how the binary
+                # format marks a row end, and the only thing separating it from
+                # an ordinary cell mark.
+                blocks.append(Block(kind=ROW, cells=list(row)))
+                row.clear()
+                in_row = False
+            else:
+                row.append(cell)
+                in_row = True
+        elif ch in (_DOC_PARA_END, "\n"):
+            # A paragraph mark inside a cell only separates that cell's
+            # paragraphs, so hold it: whether this is body text or cell content
+            # is only known once a cell or row mark arrives. Reading it as a row
+            # terminator - as this did - collapsed every two-column table into
+            # one column, and with it every element/PC and outcome/content pair.
+            pending.append(clean("".join(buf)))
+            buf.clear()
+            # The cap only guards the run BEFORE a row opens, where body text
+            # and a first cell look alike. Once inside a row a cell may be as
+            # long as it likes - a curriculum's content cell runs to dozens of
+            # paragraphs, and capping it there broke every row of the table into
+            # loose paragraphs, losing the whole learning-outcome structure.
+            if not in_row and len(pending) > _DOC_MAX_CELL_PARAGRAPHS:
+                flush_pending()
         elif ch == _DOC_PAGE_BREAK:
+            flush_pending()
             blocks.append(Block(kind=BREAK))
         else:
             buf.append(ch)
 
-    trailing = clean("".join(buf))
-    if trailing:
-        blocks.append(Block(kind=PARA, cells=[trailing]))
+    pending.append(clean("".join(buf)))
+    flush_pending()
+    if row:
+        blocks.append(Block(kind=ROW, cells=row))
     return blocks
 
 

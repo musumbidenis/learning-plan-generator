@@ -125,6 +125,9 @@ def _extract_elements(unit_pages: List[Page]) -> List[Element]:
     cur_el: Optional[Element] = None
     cur_pc: Optional[PerformanceCriterion] = None
     started = False
+    # kept so an unnumbered table can be rebuilt from its layout below
+    unnumbered_left: List[tuple] = []
+    unnumbered_right: List[tuple] = []
 
     for page in unit_pages:
         # Full-width line reconstruction is used only to locate the region's
@@ -161,6 +164,7 @@ def _extract_elements(unit_pages: List[Page]) -> List[Element]:
         for ln in left:
             if _is_header_line(ln.text):
                 continue
+            unnumbered_left.append((page.index, ln))
             m = _RE_ELEMENT.match(ln.text)
             if m:
                 cur_el = Element(number=m.group(1), title=clean_text(m.group(2)))
@@ -173,6 +177,7 @@ def _extract_elements(unit_pages: List[Page]) -> List[Element]:
         for ln in right:
             if _is_header_line(ln.text):
                 continue
+            unnumbered_right.append((page.index, ln))
             m = _RE_PC.match(ln.text)
             if m:
                 cur_pc = PerformanceCriterion(number=m.group(1),
@@ -187,6 +192,62 @@ def _extract_elements(unit_pages: List[Page]) -> List[Element]:
         if end_y is not None:
             break                             # region finished on this page
 
+    # Word applies element and PC numbering as automatic list formatting, which
+    # lives in the paragraph properties and never appears in the text. Nothing
+    # then matches '1.' or '1.1' and the whole table was dropped - every element
+    # and every performance criterion of a .doc/.docx source. The table's own
+    # shape still carries the structure, so fall back to it.
+    if not elements:
+        return _elements_from_layout(unnumbered_left, unnumbered_right)
+
+    # A document can carry numbering on only some of its elements, leaving the
+    # numbered pass with a stray one or two. Only that narrow case defers to the
+    # layout, so a properly numbered document is never second-guessed.
+    if len(elements) < 2:
+        by_layout = _elements_from_layout(unnumbered_left, unnumbered_right)
+        if (len(by_layout) >= 3
+                and _count_pcs(by_layout) > _count_pcs(elements)):
+            return by_layout
+    return elements
+
+
+def _count_pcs(elements: List[Element]) -> int:
+    return sum(len(e.performance_criteria) for e in elements)
+
+
+def _elements_from_layout(left, right) -> List[Element]:
+    """Build elements and PCs from the table's shape when nothing is numbered.
+
+    Each left-column line is an element; each right-column line is one of its
+    performance criteria, assigned to the nearest element at or above it - which
+    is the row they share. Numbers are then generated so everything downstream
+    (PC mapping, the planner, the prompts) works exactly as it does for a
+    numbered document.
+    """
+    elements: List[Element] = []
+    anchors: List[tuple] = []          # (page_index, top, Element)
+    for page_index, ln in left:
+        title = clean_text(ln.text)
+        if not title or is_noise_line(title):
+            continue
+        el = Element(number=str(len(elements) + 1), title=title)
+        elements.append(el)
+        anchors.append((page_index, ln.top, el))
+
+    if not elements:
+        return []
+
+    for page_index, ln in right:
+        text = clean_text(ln.text)
+        if not text or is_noise_line(text):
+            continue
+        target = anchors[0][2]
+        for a_page, a_top, el in anchors:
+            if (a_page, a_top) <= (page_index, ln.top + 2.0):
+                target = el
+        target.performance_criteria.append(PerformanceCriterion(
+            number=f"{target.number}.{len(target.performance_criteria) + 1}",
+            text=text))
     return elements
 
 

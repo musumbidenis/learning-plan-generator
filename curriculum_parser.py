@@ -38,11 +38,27 @@ LO_MAX_X = 150.0
 CONTENT_MAX_X = 436.0
 
 _RE_TABLE_START = re.compile(r"Learning\s+[Oo]utcomes?,\s+Content", re.I)
+# Column headings, which are rows in their own right and must not become
+# a learning outcome.
+_RE_HEADER_CELL = re.compile(
+    r"^\s*(learning\s+outcomes?|content|suggested\s+assessment"
+    r"|assessment\s+methods?|s/?no|duration)", re.I)
+
+
 _RE_TABLE_END = re.compile(r"(Suggested\s+Delivery\s+Methods|Recommended\s+Resources)", re.I)
 
-_RE_LO = re.compile(r"^(\d+)\.(?!\d)\s+(.*\S)")                 # '1. Apply ...'
-_RE_SUBTOPIC = re.compile(r"^(\d+\.\d+)(?!\.\d)\s+(.*\S)")      # '1.1 Title' (exactly x.y)
-_RE_KEYPOINT = re.compile(r"^(\d+\.\d+(?:\.\d+)+)\s+(.*\S)")    # '1.1.1 ...' (x.y.z+)
+# Numbering varies between documents: '1.1 Title', '1.1. Title' and '1.1.Title'
+# all occur, and a number sometimes sits alone with its text on the next line.
+# Requiring whitespace straight after the number - as these did - silently
+# dropped EVERY sub-topic and key point in any curriculum using trailing dots,
+# losing the whole unit's content. The OS parser has tolerated this for its
+# performance criteria all along; these now match it.
+#
+# The lookahead is what keeps the two apart: '1.1' must not be the start of
+# '1.1.1', so a following '.digit' rejects the match.
+_RE_LO = re.compile(r"^(\d+)\.(?!\d)\s*(.*)$")                  # '1. Apply ...'
+_RE_SUBTOPIC = re.compile(r"^(\d+\.\d+)(?!\.?\d)\.?\s*(.*)$")   # '1.1 Title' / '1.1. Title'
+_RE_KEYPOINT = re.compile(r"^(\d+\.\d+(?:\.\d+)+)\.?\s*(.*)$")  # '1.1.1 ...' (x.y.z+)
 
 
 def _table_window(unit_pages: List[Page]):
@@ -134,11 +150,22 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
     cur_sub: Optional[SubTopic] = None
     cur_lo_major: Optional[str] = None
     cur_lo_title_parts: List[str] = []
+    # kept so an unnumbered table can be rebuilt from its layout below
+    raw_lo: List[tuple] = []
+    raw_content: List[tuple] = []
 
     def flush_lo_title():
+        """Keep the fullest version of a learning outcome's title.
+
+        The same outcome is named twice - once in the unit's summary table and
+        again in the content table - and the summary copy is often clipped by
+        the column, so first-wins left titles truncated to a single word
+        ("Manage" for "Manage computer devices").
+        """
         if cur_lo_major and cur_lo_title_parts:
-            lo_titles.setdefault(cur_lo_major,
-                                 clean_text(" ".join(cur_lo_title_parts)))
+            candidate = clean_text(" ".join(cur_lo_title_parts))
+            if len(candidate) > len(lo_titles.get(cur_lo_major, "")):
+                lo_titles[cur_lo_major] = candidate
 
     for page, y_lo, y_hi in _table_window(unit_pages):
         words = _window_words(page, y_lo, y_hi, 0, 10_000)
@@ -151,6 +178,8 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
         lo_lines = column_lines([w for w in words if w["x0"] < LO_MAX_X], 0, 10_000)
         content_lines = column_lines(
             [w for w in words if LO_MAX_X <= w["x0"] < content_max], 0, 10_000)
+        raw_lo += [(page.index, ln) for ln in lo_lines]
+        raw_content += [(page.index, ln) for ln in content_lines]
         method_lines = column_lines(
             [w for w in words if w["x0"] >= content_max], 0, 10_000)
 
@@ -220,8 +249,54 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
             order.append(major)
         los[major].sub_topics.append(st)
 
+    if not sub_topics:
+        # Word carries the '1.1' / '1.1.1' numbering as automatic list
+        # formatting, which never reaches the text, so nothing matches and the
+        # whole content table is lost. Its shape still holds the structure.
+        unit.learning_outcomes = _outcomes_from_layout(
+            raw_lo, raw_content, unique_methods)
+        return unit
+
     unit.learning_outcomes = [los[k] for k in order]
     return unit
+
+
+def _outcomes_from_layout(lo_lines, content_lines,
+                          methods: List[str]) -> List[LearningOutcome]:
+    """Rebuild learning outcomes from the table's shape when nothing is numbered.
+
+    Each row is one learning outcome: the left cell names it, and the content
+    cell beside it holds its syllabus lines. Without the numbering there is no
+    way to tell a sub-topic from its key points, so the outcome becomes a single
+    sub-topic - one session - carrying all of its content as key points. That
+    keeps every line of the syllabus rather than discarding the lot.
+    """
+    outcomes: List[LearningOutcome] = []
+    anchors: List[tuple] = []          # (page_index, top, SubTopic)
+    for page_index, ln in lo_lines:
+        title = clean_text(ln.text)
+        if not title or is_noise_line(title) or _RE_HEADER_CELL.match(title):
+            continue
+        number = str(len(outcomes) + 1)
+        sub = SubTopic(number=f"{number}.1", title=title)
+        outcomes.append(LearningOutcome(number=number, title=title,
+                                        sub_topics=[sub],
+                                        suggested_methods=methods))
+        anchors.append((page_index, ln.top, sub))
+
+    if not anchors:
+        return []
+
+    for page_index, ln in content_lines:
+        text = clean_text(ln.text)
+        if not text or is_noise_line(text) or _RE_HEADER_CELL.match(text):
+            continue
+        target = anchors[0][2]
+        for a_page, a_top, sub in anchors:
+            if (a_page, a_top) <= (page_index, ln.top + 2.0):
+                target = sub
+        target.key_points.append(text)
+    return outcomes
 
 
 def norm(s: str) -> str:

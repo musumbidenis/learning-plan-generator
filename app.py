@@ -203,22 +203,15 @@ def _clear_side(side: str) -> None:
 
 
 def _documents_status() -> None:
-    """One compact line covering both documents.
+    """Only what the trainer has to act on.
 
-    Each side used to announce itself with its own success banner plus its own
-    warning, so simply loading two files filled the screen with notices before
-    the trainer had done anything. Errors still speak up; everything else is a
-    single caption with the detail folded away.
+    A document that read fine needs no announcement - the unit tables below are
+    the confirmation. What still speaks up: a document that yielded no units at
+    all, and units its own contents table names but that could not be found.
     """
-    parts = []
     for side in ("os", "cu"):
-        label = _SIDE_LABEL[side]
-        if ss[f"{side}_refs"]:
-            parts.append(f"**{label}:** {len(ss[f'{side}_refs'])} units")
-        elif ss[f"{side}_pages"] is not None:
-            st.error(_no_units_message(ss[f"{side}_pages"], label))
-    if parts:
-        st.caption("  ·  ".join(parts))
+        if not ss[f"{side}_refs"] and ss[f"{side}_pages"] is not None:
+            st.error(_no_units_message(ss[f"{side}_pages"], _SIDE_LABEL[side]))
 
     unfound = [(side, m) for side in ("os", "cu")
                for m in (ss.get(f"{side}_missing") or [])]
@@ -789,12 +782,6 @@ def render_library_source() -> None:
         elif ss[f"{side}_sig"] and ss[f"{side}_sig"][0] == "drive":
             _clear_side(side)
 
-    fetched = [f"**{_SIDE_LABEL[side]}:** {choice.name}"
-               for side, choice in (("os", os_choice), ("cu", cu_choice))
-               if choice is not None]
-    if fetched:
-        st.caption("  ·  ".join(fetched))
-
     for side, choice in (("os", os_choice), ("cu", cu_choice)):
         if choice is None and not ss[f"{side}_refs"]:
             _upload_side(side, key=f"lib_up_{side}::{programme.id}")
@@ -876,16 +863,12 @@ def render_unit_selection():
         event = st.dataframe(
             [{"Occupational Standard": _unit_label(os_refs[i]),
               "Curriculum": _unit_label(cu_refs[j]),
-              "Code": _ref_code(os_refs[i]),
-              "Matched on": "code" if kind in (unit_match.MATCH_ISCED,
-                                               unit_match.MATCH_CODE) else "title"}
-             for i, (j, kind) in matched],
+              "Code": _ref_code(os_refs[i])}
+             for i, (j, _kind) in matched],
             width="stretch", hide_index=True,
             selection_mode="single-row", on_select="rerun",
             key=f"pair_table::{ss.os_sig}::{ss.cu_sig}",
-            column_config={
-                "Code": st.column_config.TextColumn(width="small"),
-                "Matched on": st.column_config.TextColumn(width="small")})
+            column_config={"Code": st.column_config.TextColumn(width="small")})
         pick = _selected_row(event)
 
     if pick is not None:

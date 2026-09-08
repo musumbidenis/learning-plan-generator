@@ -28,6 +28,9 @@ _NOISE_PATTERNS = [
     re.compile(r"^\s*\d{1,4}\s*$"),                       # bare page number / stray year
     re.compile(r"TVET\s+CDACC\s*,?\s*20\d{2}", re.I),     # ©TVET CDACC 2025
     re.compile(r"^\s*[�©]\s*TVET", re.I),       # mangled-copyright footer
+    # any '(c)<BODY> <year>' footer - '©QAI 2025' was being read as part of the
+    # learning-outcome title above it
+    re.compile(r"^\s*[�©]\s*[A-Za-z]{2,12}\s*,?\s*20\d{2}\s*$"),
     re.compile(r"^\s*[ivxlcdm]+\s*$", re.I),              # roman-numeral page nums
 ]
 
@@ -300,9 +303,13 @@ def load_word_pages(path: str) -> List[Page]:
             continue
         lines = []
         for ci, cell in enumerate(block.cells[:3]):
-            text = clean_text(cell)
-            if text:
-                lines.append((text, PSEUDO_X[min(ci, 2)]))
+            # A cell's own paragraphs each become a line in that cell's column.
+            # Collapsing them into one line merged a whole row of performance
+            # criteria - or of curriculum key points - into a single item.
+            for part in cell.split("\n"):
+                text = clean_text(part)
+                if text:
+                    lines.append((text, PSEUDO_X[min(ci, 2)]))
         blocks.append((False, lines))
 
     pages: List[Page] = []
@@ -317,13 +324,16 @@ def load_word_pages(path: str) -> List[Page]:
                 if last_x is not None and x0 <= last_x:
                     top += 14
                 last_x = x0
-                x = x0
+                # Every token of a cell shares the cell's x0. Advancing x per
+                # token instead lets a long first cell run past the second
+                # column's start, and the column filters then read both cells as
+                # one - which is how element/PC and outcome/content pairs were
+                # being merged into a single column.
                 for tok in text.split(" "):
                     if not tok:
                         continue
-                    words.append({"text": tok, "x0": x, "x1": x + 5 * len(tok),
+                    words.append({"text": tok, "x0": x0, "x1": x0 + 5 * len(tok),
                                   "top": top, "bottom": top + 10})
-                    x += 5 * len(tok) + 5
             if not words:
                 continue
             full_text = "\n".join(
