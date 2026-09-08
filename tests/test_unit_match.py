@@ -156,3 +156,46 @@ def test_pair_falls_back_to_the_tvet_code_and_to_the_curriculum_side():
     assert unit_match.pair_units(
         [], [cu_ref("UNIT", code="IT/CU/ICTA/CC/02/5/MA")])[0].code \
         == "IT/CU/ICTA/CC/02/5/MA"
+
+
+# --------------------------------------------------------------------------- #
+# Suggestions for the manual matching tables
+# --------------------------------------------------------------------------- #
+def test_suggestions_map_indices_in_both_directions():
+    o = [os_ref("FIRST", isced="1"), os_ref("SECOND", isced="2")]
+    c = [cu_ref("SECOND", isced="2"), cu_ref("FIRST", isced="1")]
+    os_to_cu, cu_to_os = unit_match.suggest_counterparts(o, c)
+    assert os_to_cu[0][0] == 1 and os_to_cu[1][0] == 0
+    assert cu_to_os[1][0] == 0 and cu_to_os[0][0] == 1
+
+
+def test_suggestions_carry_the_match_kind_so_the_ui_can_flag_weak_ones():
+    o = [os_ref("APPLY COMMUNICATION SKILLS", isced="1")]
+    c = [cu_ref("COMMUNICATION SKILLS", isced="1")]
+    os_to_cu, _ = unit_match.suggest_counterparts(o, c)
+    assert os_to_cu[0][1] == unit_match.MATCH_ISCED
+
+    o = [os_ref("APPLY COMMUNICATION SKILLS")]
+    c = [cu_ref("Apply Communication Skills")]
+    os_to_cu, _ = unit_match.suggest_counterparts(o, c)
+    assert os_to_cu[0][1] in (unit_match.MATCH_TITLE, unit_match.MATCH_FUZZY)
+
+
+def test_units_with_no_counterpart_get_no_suggestion():
+    o = [os_ref("ONLY IN THE OS", isced="1")]
+    c = [cu_ref("ONLY IN THE CURRICULUM", isced="2")]
+    os_to_cu, cu_to_os = unit_match.suggest_counterparts(o, c)
+    assert os_to_cu == {} and cu_to_os == {}
+
+
+def test_suggestions_are_one_to_one():
+    o = [os_ref("SHARED"), os_ref("SHARED")]
+    c = [cu_ref("SHARED")]
+    os_to_cu, cu_to_os = unit_match.suggest_counterparts(o, c)
+    assert len(os_to_cu) == 1 and len(cu_to_os) == 1
+    assert len(set(j for j, _ in os_to_cu.values())) == len(os_to_cu)
+
+
+def test_suggestions_handle_an_empty_side():
+    assert unit_match.suggest_counterparts([], [cu_ref("A")]) == ({}, {})
+    assert unit_match.suggest_counterparts([os_ref("A")], []) == ({}, {})

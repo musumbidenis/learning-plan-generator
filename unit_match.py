@@ -171,3 +171,26 @@ def pair_units(os_refs: List[UnitRef],
 def match_rank(pair: UnitPair) -> int:
     """Sort key exposing how trustworthy a pairing is (0 = best)."""
     return _MATCH_RANK.get(pair.match, len(_MATCH_RANK))
+
+
+def suggest_counterparts(os_refs: List[UnitRef], cu_refs: List[UnitRef]):
+    """Index-to-index suggestions in both directions, for manual matching.
+
+    The UI shows the two documents' units as separate tables and lets the
+    trainer pair them by hand; these suggestions are what it pre-fills and
+    marks, so the matching stays a helper rather than a decision made for them.
+
+    Returns (os_to_cu, cu_to_os), each mapping an index to (index, match_kind).
+    """
+    os_pos = {id(r): i for i, r in enumerate(os_refs)}
+    cu_pos = {id(r): i for i, r in enumerate(cu_refs)}
+    os_to_cu, cu_to_os = {}, {}
+    for pair in pair_units(os_refs, cu_refs):
+        if not pair.is_matched:
+            continue
+        i, j = os_pos.get(id(pair.os_ref)), cu_pos.get(id(pair.cu_ref))
+        if i is None or j is None:
+            continue
+        os_to_cu[i] = (j, pair.match)
+        cu_to_os[j] = (i, pair.match)
+    return os_to_cu, cu_to_os

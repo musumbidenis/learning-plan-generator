@@ -5,8 +5,10 @@ Flow:
   1. Source documents - either browse the shared Google Drive library
      (collection -> programme -> its Occupational Standard + Curriculum) or
      upload the two files by hand. Both routes index the same way.
-  2. Select the unit - ONE table pairing each Occupational-Standard unit with
-     its Curriculum counterpart, so a mismatch is visible before generating.
+  2. Select the unit - the two documents' units shown as separate tables and
+     paired BY HAND, with the automatic match offered as a suggestion. The
+     documents word their titles differently and some units carry no usable
+     heading, so the trainer confirms the pairing rather than inheriting it.
   3. Generate Learning Plan -> the selected units are extracted automatically
      (deterministic, no AI) -> preview + plan details -> grounded Mistral
      calls -> .docx
@@ -495,7 +497,7 @@ def render_learning_plan_preview(os_unit: Unit, inputs: PlanInputs) -> None:
         regen = c2.button("🔄 Regenerate", key=f"lp_regen_{i}",
                           help=("Recompute this CAT from the sessions it assesses"
                                 if s.is_cat else "Regenerate this session with AI"),
-                          use_container_width=True,
+                          width="stretch",
                           disabled=(not s.is_cat) and not ai_client.load_api_key())
         with st.container(border=True):
             a, b = st.columns(2)
@@ -699,7 +701,7 @@ def render_library_source() -> None:
                "and drop the files in - then hit Refresh here.")
 
     c1, c2 = st.columns([0.78, 0.22])
-    if c2.button("🔄 Refresh library", use_container_width=True,
+    if c2.button("🔄 Refresh library", width="stretch",
                  help="Re-read the folder structure from Drive"):
         _cached_collections.clear()
         _cached_programmes.clear()
@@ -831,48 +833,130 @@ _MATCH_BADGE = {
 }
 
 
-def render_unit_table():
-    """Show every unit with its counterpart; return the selected (os_ref, cu_ref)."""
-    if not ss.os_refs and not ss.cu_refs:
+def _unit_label(ref) -> str:
+    return _pretty_name(ref.title) if ref is not None else "-"
+
+
+def _ref_code(ref) -> str:
+    if ref is None:
+        return "-"
+    return ref.isced_code or ref.code or "-"
+
+
+def _selected_row(event) -> "int | None":
+    rows = getattr(getattr(event, "selection", None), "rows", None) or []
+    return rows[0] if rows else None
+
+
+def render_unit_tables():
+    """Both documents' units, side by side, paired by hand.
+
+    Automatic matching is only ever a suggestion here: the two documents word
+    their titles differently, some units carry no usable heading at all, and a
+    wrong pairing silently produces a Learning Plan for the wrong unit. So the
+    trainer picks, and the suggestion is pre-filled and marked rather than
+    imposed.
+    """
+    os_refs, cu_refs = ss.os_refs, ss.cu_refs
+    if not os_refs and not cu_refs:
         return None, None
 
-    pairs = unit_match.pair_units(ss.os_refs, ss.cu_refs)
-    matched = sum(1 for p in pairs if p.is_matched)
-    st.caption(f"**{matched}** of **{len(pairs)}** units appear in both documents. "
-               "Select the row you want to plan.")
+    os_to_cu, cu_to_os = unit_match.suggest_counterparts(os_refs, cu_refs)
+    st.caption("Pick the unit in each document. Selecting one side suggests its "
+               "counterpart automatically - select on the other side to override, "
+               "or click a selected row again to clear it.")
 
-    rows = [{
-        "Match": _MATCH_BADGE.get(p.match, ""),
-        "Occupational Standard unit": _pretty_name(p.os_ref.title) if p.os_ref else "—",
-        "Curriculum unit": _pretty_name(p.cu_ref.title) if p.cu_ref else "—",
-        "Code": p.code or "—",
-    } for p in pairs]
+    left, right = st.columns(2)
 
-    event = st.dataframe(
-        rows, use_container_width=True, hide_index=True,
-        selection_mode="single-row", on_select="rerun", key="unit_table",
-        column_config={
-            "Match": st.column_config.TextColumn(width="small"),
-            "Code": st.column_config.TextColumn(width="small"),
-        })
+    with left:
+        st.markdown(f"**Occupational Standard** - {len(os_refs)} units")
+        if os_refs:
+            os_event = st.dataframe(
+                [{"Unit": _unit_label(r),
+                  "Code": _ref_code(r),
+                  "Curriculum": _MATCH_BADGE.get(
+                      os_to_cu[i][1] if i in os_to_cu else unit_match.MATCH_NONE, "")}
+                 for i, r in enumerate(os_refs)],
+                width="stretch", hide_index=True,
+                selection_mode="single-row", on_select="rerun",
+                key=f"os_table::{ss.os_sig}",
+                column_config={
+                    "Code": st.column_config.TextColumn(width="small"),
+                    "Curriculum": st.column_config.TextColumn(
+                        width="small",
+                        help="Whether this unit has a counterpart in the "
+                             "Curriculum, and how confidently")})
+            os_pick = _selected_row(os_event)
+        else:
+            st.info("No Occupational Standard loaded.")
+            os_pick = None
 
-    selected = getattr(getattr(event, "selection", None), "rows", None) or []
-    if not selected:
+    with right:
+        st.markdown(f"**Curriculum** - {len(cu_refs)} units")
+        if cu_refs:
+            suggested_cu = os_to_cu.get(os_pick, (None, None))[0]                 if os_pick is not None else None
+            cu_event = st.dataframe(
+                [{"": "suggested" if j == suggested_cu else "",
+                  "Unit": _unit_label(r),
+                  "Code": _ref_code(r)}
+                 for j, r in enumerate(cu_refs)],
+                width="stretch", hide_index=True,
+                selection_mode="single-row", on_select="rerun",
+                key=f"cu_table::{ss.cu_sig}",
+                column_config={
+                    "": st.column_config.TextColumn(
+                        width="small",
+                        help="The counterpart suggested for the unit selected "
+                             "on the left"),
+                    "Code": st.column_config.TextColumn(width="small")})
+            cu_pick = _selected_row(cu_event)
+        else:
+            st.info("No Curriculum loaded.")
+            cu_pick = None
+
+    # ----- resolve the pair ------------------------------------------------- #
+    manual = os_pick is not None and cu_pick is not None
+    if manual:
+        os_i, cu_j = os_pick, cu_pick
+        kind = "manual"
+    elif os_pick is not None and os_pick in os_to_cu:
+        os_i, (cu_j, kind) = os_pick, os_to_cu[os_pick]
+    elif cu_pick is not None and cu_pick in cu_to_os:
+        (os_i, kind), cu_j = cu_to_os[cu_pick], cu_pick
+    else:
+        os_i = os_pick
+        cu_j = cu_pick
+        kind = None
+
+    if os_i is None or cu_j is None:
+        if os_pick is None and cu_pick is None:
+            st.info("Select a unit to continue.")
+        else:
+            missing = "Curriculum" if cu_j is None else "Occupational Standard"
+            st.warning(f"No counterpart was found for that unit, so a Learning "
+                       f"Plan can't be built from it yet. Select the matching "
+                       f"unit in the {missing} table to pair them by hand.")
         return None, None
-    pair = pairs[selected[0]]
 
-    if not pair.is_matched:
-        missing = "Curriculum" if pair.cu_ref is None else "Occupational Standard"
-        st.warning(f"This unit was only found in the "
-                   f"{'Occupational Standard' if pair.cu_ref is None else 'Curriculum'}"
-                   f" — the {missing} has no matching unit, so a Learning Plan "
-                   "can't be built from it. Pick a paired row, or load the right "
-                   f"{missing}.")
-        return None, None
-    if not pair.is_reliable:
-        st.warning("These two units were paired on their titles, not on a unit "
-                   "code — confirm they really correspond before generating.")
-    return pair.os_ref, pair.cu_ref
+    os_ref, cu_ref = os_refs[os_i], cu_refs[cu_j]
+    pairing = ("Paired by hand" if kind == "manual"
+               else "Paired automatically on the unit code"
+               if kind in (unit_match.MATCH_ISCED, unit_match.MATCH_CODE)
+               else "Paired automatically on the unit title")
+    st.success(f"**{_unit_label(os_ref)}**  ↔  **{_unit_label(cu_ref)}**  ·  "
+               f"{pairing}.")
+
+    if kind in (unit_match.MATCH_TITLE, unit_match.MATCH_FUZZY):
+        st.warning("These two were matched on their titles, not on a unit code - "
+                   "confirm they correspond, or pick the right one on either side.")
+    elif kind == "manual":
+        os_code, cu_code = _ref_code(os_ref), _ref_code(cu_ref)
+        if (os_code != "-" and cu_code != "-"
+                and cp.norm_code_loose(os_code) != cp.norm_code_loose(cu_code)
+                and cp.norm(os_code) != cp.norm(cu_code)):
+            st.warning(f"Their unit codes differ ({os_code} vs {cu_code}) - "
+                       "generate only if you are sure these are the same unit.")
+    return os_ref, cu_ref
 
 
 # =========================================================================== #
@@ -904,8 +988,8 @@ def render_create_flow() -> None:
     if not ss.os_refs and not ss.cu_refs:
         return
 
-    st.header("2. Select the unit of competency")
-    os_ref, cu_ref = render_unit_table()
+    st.header("2. Match the units to plan")
+    os_ref, cu_ref = render_unit_tables()
 
     # ----- 3. Generate Learning Plan --------------------------------------- #
     if os_ref is not None and cu_ref is not None:

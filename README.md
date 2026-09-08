@@ -138,10 +138,14 @@ automatically, and an unchanged one is downloaded only once.
   TVET codes and no ISCED code, multi-unit `.docx` files, and headers that print
   the code above the title. Units the roster names but that can't be located are
   reported in the UI rather than silently dropped.
-- **Mismatched OS/Curriculum units** → the two unit lists are paired into one
-  table (`unit_match.py`), cascading ISCED code → TVET code ignoring the `OS`/`CU`
-  segment → title → fuzzy title. A unit found in only one document still gets a
-  row rather than vanishing, and title-only pairings are flagged as unconfirmed.
+- **Mismatched OS/Curriculum units** → the two documents' units are shown as
+  **separate tables and paired by hand**. Automatic matching (`unit_match.py`)
+  is a suggestion only: it cascades ISCED code → TVET code ignoring the
+  `OS`/`CU` segment → title → fuzzy title, pre-fills the counterpart and marks
+  it, and says which basis it used — but the trainer confirms or overrides it.
+  The two documents word the same unit very differently ("Perform Secure
+  Computer Operations" against "Computer Operations"), and a unit that exists in
+  only one of them still needs to be visible, so the pairing is never imposed.
 
 ## Tests
 
