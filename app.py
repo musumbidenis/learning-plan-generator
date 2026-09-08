@@ -1,14 +1,18 @@
 """Streamlit UI - Learning Plan Generator (KSTVET REF KTTC/TP/LP/F07, RVNP).
 
-Manual, sequential flow (the two source documents are chosen independently):
+Flow:
 
-  1. Upload the Occupational Standard  -> units auto-extracted -> pick the OS unit
-  2. Upload the Curriculum             -> units auto-extracted -> pick the CU unit
+  1. Source documents - either browse the shared Google Drive library
+     (collection -> programme -> its Occupational Standard + Curriculum) or
+     upload the two files by hand. Both routes index the same way.
+  2. Select the unit - ONE table pairing each Occupational-Standard unit with
+     its Curriculum counterpart, so a mismatch is visible before generating.
   3. Generate Learning Plan -> the selected units are extracted automatically
-     (deterministic, no AI) -> preview + plan details -> one grounded Mistral
-     call -> .docx
+     (deterministic, no AI) -> preview + plan details -> grounded Mistral
+     calls -> .docx
 
-The Mistral key + model are configured in ai_client.py (not entered in the UI).
+The Mistral key + model are configured in ai_client.py (not entered in the UI);
+the Drive library needs GOOGLE_API_KEY and is read-only.
 Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency).
 """
 
@@ -27,11 +31,15 @@ import streamlit as st
 import ai_client
 import curriculum_parser as cp
 import doc_builder
+import drive_client
+import drive_library
 import learning_plan_parser
 import os_parser
 import planner
 import runlog
 import session_plan_builder
+import unit_match
+from drive_client import DriveError, DriveFile
 from models import CurriculumUnit, PlanInputs, Session, Unit
 from pdf_utils import load_document
 
@@ -61,6 +69,8 @@ _DEFAULTS = dict(
     lp_sessions=None, lp_key=None,
     # uploaded-Learning-Plan path (generate Session Plans without OS + Curriculum)
     up_sig=None, up_unit=None, up_sessions=None, up_inputs=None,
+    # Drive library browsing (which folder / files the documents came from)
+    lib_collection_id=None, lib_programme_id=None,
 )
 for _k, _v in _DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -78,10 +88,6 @@ def _save_upload(uploaded) -> str:
     tmp.write(uploaded.getbuffer())
     tmp.close()
     return tmp.name
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 # Words kept lowercase inside a title (never at the start); acronyms kept upper.
@@ -113,11 +119,6 @@ def _pretty_name(title: str) -> str:
     return " ".join(out) or (title or "")
 
 
-def _ref_label(ref) -> str:
-    # show only the readable unit name in the dropdown (no codes)
-    return _pretty_name(ref.title)
-
-
 def _no_units_message(pages, doc: str) -> str:
     """Explain why a successfully-loaded document yielded zero units, pointing at
     the likely cause: a scanned/image-only PDF (no extractable text) vs. a
@@ -138,6 +139,59 @@ def _invalidate_extraction() -> None:
     # a new selection invalidates any previously-generated plan / session plans
     ss.lp_sessions = None
     ss.lp_key = None
+
+
+# --------------------------------------------------------------------------- #
+# Loading one source document (shared by the Drive library and file upload)
+# --------------------------------------------------------------------------- #
+_SIDE_LABEL = {"os": "Occupational Standard", "cu": "Curriculum"}
+
+
+def _ingest(side: str, path: str, sig) -> None:
+    """Load one source document and index its units into session state.
+
+    `side` is 'os' or 'cu'. The two sides are independent peers: loading one
+    never clears the other, so a Curriculum from the Drive library can sit
+    alongside an Occupational Standard the trainer uploaded by hand.
+    """
+    label = _SIDE_LABEL[side]
+    ss[f"{side}_sig"] = sig
+    ss[f"{side}_path"] = path
+    _invalidate_extraction()
+    with st.spinner(f"Reading the {label} and extracting units..."):
+        try:
+            runlog.log(f"Loading {label}")
+            with runlog.timed(f"Load {label}"):
+                pages = load_document(path)
+            with runlog.timed(f"Index {label} units"):
+                refs = (os_parser.index_os_units(pages) if side == "os"
+                        else cp.index_curriculum_units(pages))
+            ss[f"{side}_pages"], ss[f"{side}_refs"] = pages, refs
+            runlog.log(f"Indexed {len(refs)} {label} units")
+        except Exception as e:  # noqa: BLE001
+            ss[f"{side}_pages"], ss[f"{side}_refs"] = None, []
+            runlog.error(f"Failed to read {label}: {e}")
+            st.error(f"Failed to read the {label}: {e}")
+
+
+def _clear_side(side: str) -> None:
+    """Forget whichever document was loaded into `side`."""
+    if ss[f"{side}_sig"] is None and not ss[f"{side}_refs"]:
+        return
+    ss[f"{side}_sig"] = None
+    ss[f"{side}_path"] = None
+    ss[f"{side}_pages"] = None
+    ss[f"{side}_refs"] = []
+    _invalidate_extraction()
+
+
+def _side_status(side: str) -> None:
+    """One line telling the trainer what is loaded for this side, or why not."""
+    label = _SIDE_LABEL[side]
+    if ss[f"{side}_refs"]:
+        st.success(f"**{len(ss[f'{side}_refs'])}** units read from the {label}.")
+    elif ss[f"{side}_pages"] is not None:
+        st.error(_no_units_message(ss[f"{side}_pages"], label))
 
 
 # =========================================================================== #
@@ -565,106 +619,270 @@ def render_upload_flow() -> None:
 
 
 # =========================================================================== #
+# Source 1 - the shared Google Drive library
+# =========================================================================== #
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_collections() -> List[DriveFile]:
+    return drive_library.list_collections()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_programmes(collection_id: str) -> List[DriveFile]:
+    return drive_library.list_programmes(collection_id)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_files(programme_id: str) -> List[DriveFile]:
+    return drive_library.programme_files(programme_id)
+
+
+def _load_drive_side(side: str, file: DriveFile) -> None:
+    """Fetch one library document (cached on disk) and index it."""
+    sig = ("drive", file.id, file.modified_time)
+    if sig == ss[f"{side}_sig"]:
+        return                                    # already loaded, unchanged
+    try:
+        with st.spinner(f"Fetching '{file.name}' from Drive..."):
+            path = drive_library.ensure_local(file)
+    except DriveError as e:
+        runlog.error(f"Drive download failed for '{file.name}': {e}")
+        st.error(f"Couldn't fetch '{file.name}' from Drive: {e}")
+        return
+    _ingest(side, path, sig)
+
+
+def _pick_role_file(side: str, files: List[DriveFile], guess: DriveFile | None,
+                    programme_id: str) -> DriveFile | None:
+    """Dropdown over every file in the folder, pre-set to the filename guess.
+
+    Filenames in the library follow no convention, so the guess is only ever a
+    starting point - this is where the trainer corrects it.
+    """
+    label = _SIDE_LABEL[side]
+    default = files.index(guess) + 1 if guess in files else 0
+    choice = st.selectbox(
+        label, range(len(files) + 1), index=default,
+        format_func=lambda i: "- not in this folder -" if i == 0 else files[i - 1].name,
+        key=f"lib_{side}::{programme_id}")
+    return None if choice == 0 else files[choice - 1]
+
+
+def render_library_source() -> None:
+    """Collection -> programme -> the two documents, read from Drive."""
+    st.caption("Documents are read from the shared Drive library. To add a "
+               "programme or a whole new collection, create the folder in Drive "
+               "and drop the files in - then hit Refresh here.")
+
+    c1, c2 = st.columns([0.78, 0.22])
+    if c2.button("🔄 Refresh library", use_container_width=True,
+                 help="Re-read the folder structure from Drive"):
+        _cached_collections.clear()
+        _cached_programmes.clear()
+        _cached_files.clear()
+        st.rerun()
+
+    try:
+        collections = _cached_collections()
+    except DriveError as e:
+        st.error(str(e))
+        return
+    if not collections:
+        st.warning("The library folder doesn't contain any collections yet.")
+        return
+
+    with c1:
+        ci = st.selectbox("Collection", range(len(collections)), index=None,
+                          placeholder="- select a collection -",
+                          format_func=lambda i: collections[i].name,
+                          key="lib_collection")
+    if ci is None:
+        st.info("Pick a collection (RVNP, a CDACC cycle, ...) to see its programmes.")
+        return
+    collection = collections[ci]
+    ss.lib_collection_id = collection.id
+
+    try:
+        programmes = _cached_programmes(collection.id)
+    except DriveError as e:
+        st.error(str(e))
+        return
+    if not programmes:
+        st.warning(f"**{collection.name}** has no programme folders in it yet.")
+        return
+
+    pi = st.selectbox("Programme", range(len(programmes)), index=None,
+                      placeholder="- select a programme -",
+                      format_func=lambda i: programmes[i].name,
+                      key=f"lib_programme::{collection.id}")
+    if pi is None:
+        return
+    programme = programmes[pi]
+    ss.lib_programme_id = programme.id
+
+    try:
+        files = _cached_files(programme.id)
+    except DriveError as e:
+        st.error(str(e))
+        return
+    if not files:
+        st.warning(f"**{programme.name}** has no documents in it yet. Add the "
+                   "Occupational Standard and Curriculum in Drive and hit "
+                   "Refresh, or switch to *Upload files* above.")
+        _clear_side("os")
+        _clear_side("cu")
+        return
+
+    os_guess, cu_guess, extras = drive_library.classify(files)
+    if extras:
+        st.caption("Couldn't tell from the filename what these are: "
+                   + ", ".join(f"`{f.name}`" for f in extras)
+                   + " - assign them below if you need them.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        os_choice = _pick_role_file("os", files, os_guess, programme.id)
+    with g2:
+        cu_choice = _pick_role_file("cu", files, cu_guess, programme.id)
+
+    if os_choice is cu_choice and os_choice is not None:
+        st.error("The same file is selected as both documents. Pick a different "
+                 "file for one of them.")
+        return
+
+    # Either document may be missing from the folder - several programmes hold
+    # only one of the two today. Load what is there and offer an uploader for
+    # the rest, so the trainer is never blocked by an incomplete folder.
+    for side, choice in (("os", os_choice), ("cu", cu_choice)):
+        if choice is not None:
+            _load_drive_side(side, choice)
+        elif ss[f"{side}_sig"] and ss[f"{side}_sig"][0] == "drive":
+            _clear_side(side)                     # deselected in the dropdown
+
+    for side, choice in (("os", os_choice), ("cu", cu_choice)):
+        if choice is None and not ss[f"{side}_refs"]:
+            st.info(f"No {_SIDE_LABEL[side]} in this folder — upload one to "
+                    "continue.")
+            _upload_side(side, key=f"lib_up_{side}::{programme.id}")
+        _side_status(side)
+
+
+# =========================================================================== #
+# Source 2 - upload the two documents by hand
+# =========================================================================== #
+def _upload_side(side: str, *, key: str) -> None:
+    """One file uploader wired into the shared `_ingest` path."""
+    uploaded = st.file_uploader(f"{_SIDE_LABEL[side]} (PDF/DOCX)",
+                                type=["pdf", "docx"], key=key)
+    if uploaded is None:
+        return
+    sig = ("upload", uploaded.name, uploaded.size)
+    if sig != ss[f"{side}_sig"]:
+        _ingest(side, _save_upload(uploaded), sig)
+
+
+def render_upload_source() -> None:
+    u1, u2 = st.columns(2)
+    with u1:
+        _upload_side("os", key="os_file")
+        _side_status("os")
+    with u2:
+        _upload_side("cu", key="cu_file")
+        _side_status("cu")
+    if not ss.os_refs and not ss.cu_refs:
+        st.info("Upload the Occupational Standard and the Curriculum to begin.")
+
+
+# =========================================================================== #
+# The matched unit table (one row per unit, both documents side by side)
+# =========================================================================== #
+_MATCH_BADGE = {
+    unit_match.MATCH_ISCED: "✓ code",
+    unit_match.MATCH_CODE: "✓ code",
+    unit_match.MATCH_TITLE: "≈ title",
+    unit_match.MATCH_FUZZY: "≈ title",
+    unit_match.MATCH_NONE: "⚠ unpaired",
+}
+
+
+def render_unit_table():
+    """Show every unit with its counterpart; return the selected (os_ref, cu_ref)."""
+    if not ss.os_refs and not ss.cu_refs:
+        return None, None
+
+    pairs = unit_match.pair_units(ss.os_refs, ss.cu_refs)
+    matched = sum(1 for p in pairs if p.is_matched)
+    st.caption(f"**{matched}** of **{len(pairs)}** units appear in both documents. "
+               "Select the row you want to plan.")
+
+    rows = [{
+        "Match": _MATCH_BADGE.get(p.match, ""),
+        "Occupational Standard unit": _pretty_name(p.os_ref.title) if p.os_ref else "—",
+        "Curriculum unit": _pretty_name(p.cu_ref.title) if p.cu_ref else "—",
+        "Code": p.code or "—",
+    } for p in pairs]
+
+    event = st.dataframe(
+        rows, use_container_width=True, hide_index=True,
+        selection_mode="single-row", on_select="rerun", key="unit_table",
+        column_config={
+            "Match": st.column_config.TextColumn(width="small"),
+            "Code": st.column_config.TextColumn(width="small"),
+        })
+
+    selected = getattr(getattr(event, "selection", None), "rows", None) or []
+    if not selected:
+        return None, None
+    pair = pairs[selected[0]]
+
+    if not pair.is_matched:
+        missing = "Curriculum" if pair.cu_ref is None else "Occupational Standard"
+        st.warning(f"This unit was only found in the "
+                   f"{'Occupational Standard' if pair.cu_ref is None else 'Curriculum'}"
+                   f" — the {missing} has no matching unit, so a Learning Plan "
+                   "can't be built from it. Pick a paired row, or load the right "
+                   f"{missing}.")
+        return None, None
+    if not pair.is_reliable:
+        st.warning("These two units were paired on their titles, not on a unit "
+                   "code — confirm they really correspond before generating.")
+    return pair.os_ref, pair.cu_ref
+
+
+# =========================================================================== #
 # Flow A - build a Learning Plan from the Occupational Standard + Curriculum
 # =========================================================================== #
+_SRC_LIBRARY = "Drive library"
+_SRC_UPLOAD = "Upload files"
+
+
 def render_create_flow() -> None:
-    # ----- 1. Upload the Occupational Standard ----------------------------- #
-    st.header("1. Upload the Occupational Standard")
-    os_file = st.file_uploader("Occupational Standard (PDF/DOCX)",
-                               type=["pdf", "docx"], key="os_file")
+    # ----- 1. Where do the two documents come from? ------------------------ #
+    st.header("1. Source documents")
 
-    if os_file is not None:
-        sig = (os_file.name, os_file.size)
-        if sig != ss.os_sig:
-            ss.os_sig = sig
-            ss.os_path = _save_upload(os_file)
-            # a new OS invalidates the curriculum choice and any extraction
-            ss.cu_sig = None
-            ss.cu_path = None
-            ss.cu_pages = None
-            ss.cu_refs = []
-            _invalidate_extraction()
-            with st.spinner("Reading the Occupational Standard and extracting units..."):
-                try:
-                    runlog.log("Loading Occupational Standard")
-                    with runlog.timed("Load Occupational Standard"):
-                        ss.os_pages = load_document(ss.os_path)
-                    with runlog.timed("Index OS units"):
-                        ss.os_refs = os_parser.index_os_units(ss.os_pages)
-                    runlog.log(f"Indexed {len(ss.os_refs)} OS units")
-                except Exception as e:  # noqa: BLE001
-                    ss.os_refs = []
-                    ss.os_pages = None
-                    runlog.error(f"Failed to read Occupational Standard: {e}")
-                    st.error(f"Failed to read the Occupational Standard: {e}")
+    if drive_client.is_configured():
+        source = st.radio("Where are the Occupational Standard and Curriculum?",
+                          [_SRC_LIBRARY, _SRC_UPLOAD], horizontal=True,
+                          key="src_mode")
+    else:
+        source = _SRC_UPLOAD
+        st.caption("Set `GOOGLE_API_KEY` to browse the shared Drive library "
+                   "instead of uploading each time - see the README.")
 
-    os_ref = None
-    if ss.os_refs:
-        st.success(f"Extracted **{len(ss.os_refs)}** units from the Occupational Standard.")
-        os_idx = st.selectbox(
-            "Select the OS unit of competency",
-            range(len(ss.os_refs)), index=None,
-            placeholder="- select an OS unit -",
-            format_func=lambda i: _ref_label(ss.os_refs[i]),
-            key=f"os_pick::{ss.os_sig}")
-        if os_idx is not None:
-            os_ref = ss.os_refs[os_idx]
-    elif ss.os_pages is not None:
-        st.error(_no_units_message(ss.os_pages, "Occupational Standard"))
-    elif os_file is None:
-        st.info("Upload the Occupational Standard to begin.")
+    if source == _SRC_LIBRARY:
+        render_library_source()
+    else:
+        render_upload_source()
 
-    # ----- 2. Upload the Curriculum ---------------------------------------- #
-    cu_ref = None
-    if os_ref is not None:
-        st.header("2. Upload the Curriculum")
-        cu_file = st.file_uploader("Curriculum (PDF/DOCX)",
-                                   type=["pdf", "docx"], key=f"cu_file::{ss.os_sig}")
+    # ----- 2. Pick the unit from the matched table ------------------------- #
+    if not ss.os_refs and not ss.cu_refs:
+        return
 
-        if cu_file is not None:
-            sig = (cu_file.name, cu_file.size)
-            if sig != ss.cu_sig:
-                ss.cu_sig = sig
-                ss.cu_path = _save_upload(cu_file)
-                _invalidate_extraction()
-                with st.spinner("Reading the Curriculum and extracting units..."):
-                    try:
-                        runlog.log("Loading Curriculum")
-                        with runlog.timed("Load Curriculum"):
-                            ss.cu_pages = load_document(ss.cu_path)
-                        with runlog.timed("Index Curriculum units"):
-                            ss.cu_refs = cp.index_curriculum_units(ss.cu_pages)
-                        runlog.log(f"Indexed {len(ss.cu_refs)} curriculum units")
-                    except Exception as e:  # noqa: BLE001
-                        ss.cu_refs = []
-                        ss.cu_pages = None
-                        runlog.error(f"Failed to read Curriculum: {e}")
-                        st.error(f"Failed to read the Curriculum: {e}")
-
-        if ss.cu_refs:
-            st.success(f"Extracted **{len(ss.cu_refs)}** units from the Curriculum.")
-            cu_idx = st.selectbox(
-                "Select the Curriculum unit of learning",
-                range(len(ss.cu_refs)), index=None,
-                placeholder="- select a curriculum unit -",
-                format_func=lambda i: _ref_label(ss.cu_refs[i]),
-                key=f"cu_pick::{ss.cu_sig}")
-            if cu_idx is not None:
-                cu_ref = ss.cu_refs[cu_idx]
-        elif ss.cu_pages is not None:
-            st.error(_no_units_message(ss.cu_pages, "Curriculum"))
-        elif cu_file is None:
-            st.info("Upload the Curriculum, then select the matching unit.")
+    st.header("2. Select the unit of competency")
+    os_ref, cu_ref = render_unit_table()
 
     # ----- 3. Generate Learning Plan --------------------------------------- #
     if os_ref is not None and cu_ref is not None:
         st.header("3. Generate Learning Plan")
-
-        if (os_ref.isced_code and cu_ref.isced_code
-                and _norm(os_ref.isced_code) != _norm(cu_ref.isced_code)):
-            st.warning("Selected OS and Curriculum units have different ISCED codes "
-                       f"({os_ref.isced_code} vs {cu_ref.isced_code}) - confirm they "
-                       "correspond.")
 
         cur_key = (ss.os_sig, os_ref.isced_code, os_ref.title,
                    ss.cu_sig, cu_ref.isced_code, cu_ref.title)

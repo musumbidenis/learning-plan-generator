@@ -224,22 +224,36 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
     return unit
 
 
+def norm(s: str) -> str:
+    """Comparison form of a code or title: lowercase, alphanumerics only."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def norm_code_loose(s: str) -> str:
+    """Normalised code with the 'OS' vs 'CU' discriminator dropped.
+
+    IT/OS/ICTA/CC/02/5/MA (Occupational Standard) and IT/CU/ICTA/CC/02/5/MA
+    (Curriculum) name the same unit, so removing that one segment makes the two
+    code families compare equal.
+    """
+    parts = [p for p in re.split(r"[/\\]", s or "") if p.strip()]
+    if len(parts) >= 2 and parts[1].strip().upper() in ("OS", "CU"):
+        return norm("/".join([parts[0]] + parts[2:]))
+    n = norm(s)
+    if n.startswith("itos"):
+        return n.replace("os", "", 1)
+    if n.startswith("itcu"):
+        return n.replace("cu", "", 1)
+    return n
+
+
 def find_unit(units: List[CurriculumUnit], isced_code: str = "",
               os_code: str = "", title: str = "") -> Optional[CurriculumUnit]:
     """Match a curriculum unit to an OS unit. ISCED code is the reliable join key.
 
-    OS code and curriculum code differ only in the segment 'OS' vs 'CU'
-    (IT/OS/ICTA/CC/02/5/MA  <->  IT/CU/ICTA/CC/02/5/MA), so we also try a
-    normalised compare that ignores that segment.
+    OS code and curriculum code differ only in the segment 'OS' vs 'CU', so we
+    also try a normalised compare that ignores that segment.
     """
-    def norm(s: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-    def norm_code_loose(s: str) -> str:
-        # drop the OS/CU discriminator so the two code families compare equal
-        return norm(s).replace("os", "", 1) if norm(s).startswith("itos") \
-            else norm(s).replace("cu", "", 1) if norm(s).startswith("itcu") else norm(s)
-
     if isced_code:
         target = norm(isced_code)
         for u in units:

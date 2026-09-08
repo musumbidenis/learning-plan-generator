@@ -13,7 +13,6 @@ any blank cell, so the output is never empty even if the API misbehaves.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from typing import List, Optional
@@ -964,35 +963,15 @@ def generate_session_plan(unit: Unit, session: Session, inputs: PlanInputs, *,
         session_time=session_time)
 
 
-_ENV_LOADED = False
-
-
-def _ensure_env_loaded() -> None:
-    """Load .env into os.environ exactly once per process (idempotent)."""
-    global _ENV_LOADED
-    if not _ENV_LOADED:
-        from dotenv import load_dotenv
-        load_dotenv()
-        _ENV_LOADED = True
-
-
 def _config(name: str) -> str:
     """Read a config value from the environment / .env, then Streamlit secrets.
 
-    Locally the value comes from .env (loaded into os.environ once). On Streamlit
-    Community Cloud there is no .env - secrets are set in the app's Secrets box
-    and exposed via st.secrets, which this falls back to. No secret is ever
-    hard-coded in source or committed to the repo.
+    Delegates to `config.get` so the Drive layer and this module resolve settings
+    the same way. Kept as a module-level name because the rest of this file (and
+    its tests) call it.
     """
-    _ensure_env_loaded()
-    val = os.getenv(name, "").strip()
-    if val:
-        return val
-    try:                                   # only present when running under Streamlit
-        import streamlit as st
-        return str(st.secrets.get(name, "")).strip()
-    except Exception:
-        return ""
+    import config
+    return config.get(name)
 
 
 def load_api_key() -> str:
