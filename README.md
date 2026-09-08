@@ -56,11 +56,12 @@ Training Tools/                      ← the library root
   RVNP/
 ```
 
-Pick a **collection** then a **programme**, and both documents are fetched and
-indexed for you. Filenames follow no convention, so which file is the
-Occupational Standard and which the Curriculum is *guessed* from the name and
-shown in two dropdowns you can correct. A programme folder holding only one of
-the two still works: the missing side gets a file uploader.
+Pick a **collection** then a **programme** - that is the whole instruction.
+Which file is the Occupational Standard and which the Curriculum is worked out
+from the filenames and both are fetched automatically; a correction control
+appears only when the folder is ambiguous (an unrecognised file, or more than
+two of them). A programme folder holding only one of the two still works: the
+missing side gets a file uploader.
 
 **Read-only, on purpose.** The app never writes to Drive. To add a programme —
 or a whole new collection such as `RVNP` — create the folder in Drive, drop the
@@ -138,14 +139,15 @@ automatically, and an unchanged one is downloaded only once.
   TVET codes and no ISCED code, multi-unit `.docx` files, and headers that print
   the code above the title. Units the roster names but that can't be located are
   reported in the UI rather than silently dropped.
-- **Mismatched OS/Curriculum units** → the two documents' units are shown as
-  **separate tables and paired by hand**. Automatic matching (`unit_match.py`)
-  is a suggestion only: it cascades ISCED code → TVET code ignoring the
-  `OS`/`CU` segment → title → fuzzy title, pre-fills the counterpart and marks
-  it, and says which basis it used — but the trainer confirms or overrides it.
-  The two documents word the same unit very differently ("Perform Secure
-  Computer Operations" against "Computer Operations"), and a unit that exists in
-  only one of them still needs to be visible, so the pairing is never imposed.
+- **Mismatched OS/Curriculum units** → `unit_match.py` pairs the two unit lists
+  automatically, cascading ISCED code → TVET code ignoring the `OS`/`CU` segment
+  → title → fuzzy title, and the matched pairs are what step 2 leads with. What
+  it *cannot* place is the point: those units are listed separately, per
+  document, to be paired by hand. The two files word the same unit very
+  differently ("Perform Secure Computer Operations" against "Computer
+  Operations") and a unit often exists in only one of them, so nothing is
+  dropped for failing to match. On the real Cyber Security pair, 14 of 14 OS
+  units match on the ISCED code and one curriculum unit is left to pair by hand.
 
 ## Tests
 

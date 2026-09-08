@@ -5,10 +5,10 @@ Flow:
   1. Source documents - either browse the shared Google Drive library
      (collection -> programme -> its Occupational Standard + Curriculum) or
      upload the two files by hand. Both routes index the same way.
-  2. Select the unit - the two documents' units shown as separate tables and
-     paired BY HAND, with the automatic match offered as a suggestion. The
-     documents word their titles differently and some units carry no usable
-     heading, so the trainer confirms the pairing rather than inheriting it.
+  2. Select the unit - units matched across the two documents are listed as
+     ready pairs; anything the matcher could not place is listed separately,
+     per document, to be paired by hand. A unit that appears in only one file,
+     or that the two files word differently, therefore stays visible.
   3. Generate Learning Plan -> the selected units are extracted automatically
      (deterministic, no AI) -> preview + plan details -> grounded Mistral
      calls -> .docx
@@ -202,23 +202,31 @@ def _clear_side(side: str) -> None:
     _invalidate_extraction()
 
 
-def _side_status(side: str) -> None:
-    """One line telling the trainer what is loaded for this side, or why not."""
-    label = _SIDE_LABEL[side]
-    if ss[f"{side}_refs"]:
-        st.success(f"**{len(ss[f'{side}_refs'])}** units read from the {label}.")
-        missing = ss.get(f"{side}_missing") or []
-        if missing:
-            # The document's own units table names more units than we could
-            # find in its body - say which, rather than quietly showing fewer.
-            total = len(ss[f"{side}_refs"]) + len(missing)
-            st.warning(
-                f"{len(missing)} of {total} units listed in the {label}'s own "
-                "units table could not be located in the document: "
-                + ", ".join(f"*{m.title}*" for m in missing[:6])
-                + ("..." if len(missing) > 6 else ""))
-    elif ss[f"{side}_pages"] is not None:
-        st.error(_no_units_message(ss[f"{side}_pages"], label))
+def _documents_status() -> None:
+    """One compact line covering both documents.
+
+    Each side used to announce itself with its own success banner plus its own
+    warning, so simply loading two files filled the screen with notices before
+    the trainer had done anything. Errors still speak up; everything else is a
+    single caption with the detail folded away.
+    """
+    parts = []
+    for side in ("os", "cu"):
+        label = _SIDE_LABEL[side]
+        if ss[f"{side}_refs"]:
+            parts.append(f"**{label}:** {len(ss[f'{side}_refs'])} units")
+        elif ss[f"{side}_pages"] is not None:
+            st.error(_no_units_message(ss[f"{side}_pages"], label))
+    if parts:
+        st.caption("  ·  ".join(parts))
+
+    unfound = [(side, m) for side in ("os", "cu")
+               for m in (ss.get(f"{side}_missing") or [])]
+    if unfound:
+        with st.expander(f"{len(unfound)} units named in a document's own units "
+                         "table could not be located in it"):
+            for side, m in unfound:
+                st.markdown(f"- {_SIDE_LABEL[side]}: {m.title}")
 
 
 # =========================================================================== #
@@ -695,14 +703,12 @@ def _pick_role_file(side: str, files: List[DriveFile], guess: DriveFile | None,
 
 
 def render_library_source() -> None:
-    """Collection -> programme -> the two documents, read from Drive."""
-    st.caption("Documents are read from the shared Drive library. To add a "
-               "programme or a whole new collection, create the folder in Drive "
-               "and drop the files in - then hit Refresh here.")
-
+    """Collection -> programme -> the two documents, fetched automatically."""
     c1, c2 = st.columns([0.78, 0.22])
     if c2.button("🔄 Refresh library", width="stretch",
-                 help="Re-read the folder structure from Drive"):
+                 help="Re-read the folder structure from Drive. Add a programme "
+                      "or a new collection by creating the folder in Drive, then "
+                      "refreshing here."):
         _cached_collections.clear()
         _cached_programmes.clear()
         _cached_files.clear()
@@ -723,7 +729,6 @@ def render_library_source() -> None:
                           format_func=lambda i: collections[i].name,
                           key="lib_collection")
     if ci is None:
-        st.info("Pick a collection (RVNP, a CDACC cycle, ...) to see its programmes.")
         return
     collection = collections[ci]
     ss.lib_collection_id = collection.id
@@ -759,38 +764,40 @@ def render_library_source() -> None:
         _clear_side("cu")
         return
 
-    os_guess, cu_guess, extras = drive_library.classify(files)
-    if extras:
-        st.caption("Couldn't tell from the filename what these are: "
-                   + ", ".join(f"`{f.name}`" for f in extras)
-                   + " - assign them below if you need them.")
+    # Picking a programme is the whole instruction: work out which file is which
+    # and fetch both. The role dropdowns that used to sit here made the trainer
+    # restate what the folder already says.
+    os_choice, cu_choice, extras = drive_library.classify(files)
 
-    g1, g2 = st.columns(2)
-    with g1:
-        os_choice = _pick_role_file("os", files, os_guess, programme.id)
-    with g2:
-        cu_choice = _pick_role_file("cu", files, cu_guess, programme.id)
+    # Offer the correction only where the guess could actually be wrong.
+    if extras or len(files) > 2:
+        with st.expander("Wrong files? Choose them yourself"):
+            g1, g2 = st.columns(2)
+            with g1:
+                os_choice = _pick_role_file("os", files, os_choice, programme.id)
+            with g2:
+                cu_choice = _pick_role_file("cu", files, cu_choice, programme.id)
+            if os_choice is cu_choice and os_choice is not None:
+                st.error("That is the same file for both documents.")
+                return
 
-    if os_choice is cu_choice and os_choice is not None:
-        st.error("The same file is selected as both documents. Pick a different "
-                 "file for one of them.")
-        return
-
-    # Either document may be missing from the folder - several programmes hold
-    # only one of the two today. Load what is there and offer an uploader for
-    # the rest, so the trainer is never blocked by an incomplete folder.
+    # Either document may be missing - several programme folders hold only one
+    # of the two - so load what is there and offer an uploader for the rest.
     for side, choice in (("os", os_choice), ("cu", cu_choice)):
         if choice is not None:
             _load_drive_side(side, choice)
         elif ss[f"{side}_sig"] and ss[f"{side}_sig"][0] == "drive":
-            _clear_side(side)                     # deselected in the dropdown
+            _clear_side(side)
+
+    fetched = [f"**{_SIDE_LABEL[side]}:** {choice.name}"
+               for side, choice in (("os", os_choice), ("cu", cu_choice))
+               if choice is not None]
+    if fetched:
+        st.caption("  ·  ".join(fetched))
 
     for side, choice in (("os", os_choice), ("cu", cu_choice)):
         if choice is None and not ss[f"{side}_refs"]:
-            st.info(f"No {_SIDE_LABEL[side]} in this folder — upload one to "
-                    "continue.")
             _upload_side(side, key=f"lib_up_{side}::{programme.id}")
-        _side_status(side)
 
 
 # =========================================================================== #
@@ -813,12 +820,8 @@ def render_upload_source() -> None:
     u1, u2 = st.columns(2)
     with u1:
         _upload_side("os", key="os_file")
-        _side_status("os")
     with u2:
         _upload_side("cu", key="cu_file")
-        _side_status("cu")
-    if not ss.os_refs and not ss.cu_refs:
-        st.info("Upload the Occupational Standard and the Curriculum to begin.")
 
 
 # =========================================================================== #
@@ -848,115 +851,97 @@ def _selected_row(event) -> "int | None":
     return rows[0] if rows else None
 
 
-def render_unit_tables():
-    """Both documents' units, side by side, paired by hand.
+def render_unit_selection():
+    """Auto-matched units first; whatever didn't match is paired by hand.
 
-    Automatic matching is only ever a suggestion here: the two documents word
-    their titles differently, some units carry no usable heading at all, and a
-    wrong pairing silently produces a Learning Plan for the wrong unit. So the
-    trainer picks, and the suggestion is pre-filled and marked rather than
-    imposed.
+    Matching on the unit code is reliable enough to lead with - on the real
+    Cyber Security documents every one of the 14 units paired on its ISCED code.
+    What matters is the remainder: units the matcher could not place must stay
+    visible and selectable, because a unit that exists in only one document, or
+    whose title the two documents word differently, is exactly the case a
+    trainer needs to resolve themselves.
     """
     os_refs, cu_refs = ss.os_refs, ss.cu_refs
     if not os_refs and not cu_refs:
         return None, None
 
     os_to_cu, cu_to_os = unit_match.suggest_counterparts(os_refs, cu_refs)
-    st.caption("Pick the unit in each document. Selecting one side suggests its "
-               "counterpart automatically - select on the other side to override, "
-               "or click a selected row again to clear it.")
+    matched = sorted(os_to_cu.items())
+    os_left = [i for i in range(len(os_refs)) if i not in os_to_cu]
+    cu_left = [j for j in range(len(cu_refs)) if j not in cu_to_os]
 
-    left, right = st.columns(2)
+    # ----- matched pairs ---------------------------------------------------- #
+    pick = None
+    if matched:
+        event = st.dataframe(
+            [{"Occupational Standard": _unit_label(os_refs[i]),
+              "Curriculum": _unit_label(cu_refs[j]),
+              "Code": _ref_code(os_refs[i]),
+              "Matched on": "code" if kind in (unit_match.MATCH_ISCED,
+                                               unit_match.MATCH_CODE) else "title"}
+             for i, (j, kind) in matched],
+            width="stretch", hide_index=True,
+            selection_mode="single-row", on_select="rerun",
+            key=f"pair_table::{ss.os_sig}::{ss.cu_sig}",
+            column_config={
+                "Code": st.column_config.TextColumn(width="small"),
+                "Matched on": st.column_config.TextColumn(width="small")})
+        pick = _selected_row(event)
 
-    with left:
-        st.markdown(f"**Occupational Standard** - {len(os_refs)} units")
-        if os_refs:
-            os_event = st.dataframe(
-                [{"Unit": _unit_label(r),
-                  "Code": _ref_code(r),
-                  "Curriculum": _MATCH_BADGE.get(
-                      os_to_cu[i][1] if i in os_to_cu else unit_match.MATCH_NONE, "")}
-                 for i, r in enumerate(os_refs)],
-                width="stretch", hide_index=True,
-                selection_mode="single-row", on_select="rerun",
-                key=f"os_table::{ss.os_sig}",
-                column_config={
-                    "Code": st.column_config.TextColumn(width="small"),
-                    "Curriculum": st.column_config.TextColumn(
-                        width="small",
-                        help="Whether this unit has a counterpart in the "
-                             "Curriculum, and how confidently")})
-            os_pick = _selected_row(os_event)
-        else:
-            st.info("No Occupational Standard loaded.")
-            os_pick = None
+    if pick is not None:
+        i, (j, kind) = matched[pick]
+        if kind in (unit_match.MATCH_TITLE, unit_match.MATCH_FUZZY):
+            st.warning("These two were matched on their titles, not on a unit "
+                       "code - check they correspond before generating.")
+        return os_refs[i], cu_refs[j]
 
-    with right:
-        st.markdown(f"**Curriculum** - {len(cu_refs)} units")
-        if cu_refs:
-            suggested_cu = os_to_cu.get(os_pick, (None, None))[0]                 if os_pick is not None else None
-            cu_event = st.dataframe(
-                [{"": "suggested" if j == suggested_cu else "",
-                  "Unit": _unit_label(r),
-                  "Code": _ref_code(r)}
-                 for j, r in enumerate(cu_refs)],
-                width="stretch", hide_index=True,
-                selection_mode="single-row", on_select="rerun",
-                key=f"cu_table::{ss.cu_sig}",
-                column_config={
-                    "": st.column_config.TextColumn(
-                        width="small",
-                        help="The counterpart suggested for the unit selected "
-                             "on the left"),
-                    "Code": st.column_config.TextColumn(width="small")})
-            cu_pick = _selected_row(cu_event)
-        else:
-            st.info("No Curriculum loaded.")
-            cu_pick = None
-
-    # ----- resolve the pair ------------------------------------------------- #
-    manual = os_pick is not None and cu_pick is not None
-    if manual:
-        os_i, cu_j = os_pick, cu_pick
-        kind = "manual"
-    elif os_pick is not None and os_pick in os_to_cu:
-        os_i, (cu_j, kind) = os_pick, os_to_cu[os_pick]
-    elif cu_pick is not None and cu_pick in cu_to_os:
-        (os_i, kind), cu_j = cu_to_os[cu_pick], cu_pick
-    else:
-        os_i = os_pick
-        cu_j = cu_pick
-        kind = None
-
-    if os_i is None or cu_j is None:
-        if os_pick is None and cu_pick is None:
-            st.info("Select a unit to continue.")
-        else:
-            missing = "Curriculum" if cu_j is None else "Occupational Standard"
-            st.warning(f"No counterpart was found for that unit, so a Learning "
-                       f"Plan can't be built from it yet. Select the matching "
-                       f"unit in the {missing} table to pair them by hand.")
+    # ----- the remainder, paired by hand ------------------------------------ #
+    if not os_left and not cu_left:
         return None, None
 
-    os_ref, cu_ref = os_refs[os_i], cu_refs[cu_j]
-    pairing = ("Paired by hand" if kind == "manual"
-               else "Paired automatically on the unit code"
-               if kind in (unit_match.MATCH_ISCED, unit_match.MATCH_CODE)
-               else "Paired automatically on the unit title")
-    st.success(f"**{_unit_label(os_ref)}**  ↔  **{_unit_label(cu_ref)}**  ·  "
-               f"{pairing}.")
+    with st.expander(
+            f"Unmatched units - {len(os_left)} in the Occupational Standard, "
+            f"{len(cu_left)} in the Curriculum - pair them by hand",
+            expanded=not matched):
+        left, right = st.columns(2)
+        with left:
+            st.caption("Occupational Standard")
+            if os_left:
+                os_event = st.dataframe(
+                    [{"Unit": _unit_label(os_refs[i]),
+                      "Code": _ref_code(os_refs[i])} for i in os_left],
+                    width="stretch", hide_index=True,
+                    selection_mode="single-row", on_select="rerun",
+                    key=f"os_left::{ss.os_sig}::{ss.cu_sig}",
+                    column_config={"Code": st.column_config.TextColumn(
+                        width="small")})
+                os_row = _selected_row(os_event)
+            else:
+                st.caption("_none_")
+                os_row = None
+        with right:
+            st.caption("Curriculum")
+            if cu_left:
+                cu_event = st.dataframe(
+                    [{"Unit": _unit_label(cu_refs[j]),
+                      "Code": _ref_code(cu_refs[j])} for j in cu_left],
+                    width="stretch", hide_index=True,
+                    selection_mode="single-row", on_select="rerun",
+                    key=f"cu_left::{ss.os_sig}::{ss.cu_sig}",
+                    column_config={"Code": st.column_config.TextColumn(
+                        width="small")})
+                cu_row = _selected_row(cu_event)
+            else:
+                st.caption("_none_")
+                cu_row = None
 
-    if kind in (unit_match.MATCH_TITLE, unit_match.MATCH_FUZZY):
-        st.warning("These two were matched on their titles, not on a unit code - "
-                   "confirm they correspond, or pick the right one on either side.")
-    elif kind == "manual":
-        os_code, cu_code = _ref_code(os_ref), _ref_code(cu_ref)
-        if (os_code != "-" and cu_code != "-"
-                and cp.norm_code_loose(os_code) != cp.norm_code_loose(cu_code)
-                and cp.norm(os_code) != cp.norm(cu_code)):
-            st.warning(f"Their unit codes differ ({os_code} vs {cu_code}) - "
-                       "generate only if you are sure these are the same unit.")
-    return os_ref, cu_ref
+        if os_row is None or cu_row is None:
+            return None, None
+
+        os_ref, cu_ref = os_refs[os_left[os_row]], cu_refs[cu_left[cu_row]]
+        st.caption(f"Pairing **{_unit_label(os_ref)}** with "
+                   f"**{_unit_label(cu_ref)}**.")
+        return os_ref, cu_ref
 
 
 # =========================================================================== #
@@ -983,13 +968,14 @@ def render_create_flow() -> None:
         render_library_source()
     else:
         render_upload_source()
+    _documents_status()
 
     # ----- 2. Pick the unit from the matched table ------------------------- #
     if not ss.os_refs and not ss.cu_refs:
         return
 
-    st.header("2. Match the units to plan")
-    os_ref, cu_ref = render_unit_tables()
+    st.header("2. Choose the unit")
+    os_ref, cu_ref = render_unit_selection()
 
     # ----- 3. Generate Learning Plan --------------------------------------- #
     if os_ref is not None and cu_ref is not None:
