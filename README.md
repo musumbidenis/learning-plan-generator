@@ -9,7 +9,7 @@ session content uses AI, in grounded, schema-constrained API calls.**
 ## Pipeline
 
 ```
-[OS file] + [Curriculum file]   ← from the Drive library, or uploaded
+[OS file] + [Curriculum file]   ← PDF or any Word format; Drive library or upload
    │
    ├─(A) DETERMINISTIC PARSERS  ─ os_parser.py / curriculum_parser.py   [no AI]
    │      └ word-coordinate column splitting (anti-bleed); regex structure
@@ -93,9 +93,10 @@ automatically, and an unchanged one is downloaded only once.
 | `config.py` | – | one place resolving settings: `.env` → environment → `st.secrets` |
 | `drive_client.py` | – | read-only Google Drive REST v3 calls (API key, no OAuth) |
 | `drive_library.py` | – | collection → programme → OS/Curriculum, plus the local download cache |
+| `word_reader.py` | A0 | read any word-processor format (.docx/.docm/.dotx/.dotm, .doc, .rtf, .odt/.ott) into neutral blocks |
 | `unit_index.py` | A0 | finds the units in a document: reads its preliminary units table, then locates each one |
 | `unit_match.py` | – | pairs OS units with Curriculum units for the matched selection table |
-| `pdf_utils.py` | – | word-coordinate column splitting, PDF/DOCX loading, noise filtering |
+| `pdf_utils.py` | – | word-coordinate column splitting, document loading, noise filtering |
 | `os_parser.py` | A1 | parse OS units: title, codes, level, description, elements + PCs, evidence-guide methods |
 | `curriculum_parser.py` | A2 | parse curriculum LOs → sub-topics (sessions) + key points + suggested methods |
 | `planner.py` | B | build the session skeleton, map PCs, place CATs, stamp the schedule |
@@ -117,6 +118,16 @@ automatically, and an unchanged one is downloaded only once.
   never truncate, with a salvage pass that recovers the complete leading objects
   of a cut-off array; the deterministic schedule is re-stamped afterwards so the
   AI can't override it.
+- **Word documents that aren't `.docx`** → `word_reader.py` reads the whole
+  family in pure Python — no LibreOffice or Word install required, for the same
+  reason OCR was left out. `.docx`/`.docm`/`.dotx`/`.dotm` come from
+  `word/document.xml` directly (python-docx rejects several of them on content
+  type alone), `.odt`/`.ott` from `content.xml`, `.rtf` from a tokeniser that
+  keeps `\cell`/`\row` tables, and legacy `.doc` from the Word 97 piece table
+  via `olefile`. The format is decided by **sniffing magic bytes, never the
+  extension**, so a `.docx` someone renamed to `.doc` still opens. Verified on
+  real CDACC files: three `.doc` documents that previously could not be opened
+  at all now yield 15, 14 and 10 units with their tables intact.
 - **Documents the shape detector couldn't read** → `unit_index.py` tries four
   strategies and keeps whichever finds the most units, so nothing that parses
   today parses worse. The best of them reads the **preliminary units table**

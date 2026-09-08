@@ -33,6 +33,10 @@ DOCX_MIME = ("application/vnd.openxmlformats-officedocument."
              "wordprocessingml.document")
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# Suffixes a downloaded file may legitimately keep (see word_reader).
+_KNOWN_EXTENSIONS = (".pdf", ".docx", ".docm", ".dotx", ".dotm", ".doc",
+                     ".dot", ".rtf", ".odt", ".ott")
+
 LIST_TIMEOUT = 30          # seconds
 DOWNLOAD_TIMEOUT = 180     # a curriculum PDF can be several MB
 _PAGE_SIZE = 200
@@ -65,7 +69,9 @@ class DriveFile:
         if self.is_google_doc:
             return ".docx"                 # we export Docs as .docx
         ext = os.path.splitext(self.name)[1].lower()
-        return ext if ext in (".pdf", ".docx") else ".pdf"
+        # keep the real suffix for every format the readers understand; the
+        # loader sniffs the content anyway, so an odd one still opens
+        return ext if ext in _KNOWN_EXTENSIONS else ".pdf"
 
 
 def load_api_key() -> str:

@@ -280,6 +280,108 @@ def _title_near_code(page: Page) -> str:
     return ""
 
 
+# How far above a code line a unit title may reasonably sit.
+_TITLE_LOOKBACK = 6
+# Below this a candidate reads as prose, not as a heading.
+_TITLE_SCORE_FLOOR = 1.0
+
+
+def _title_score(text: str) -> float:
+    """How much a line reads like a unit title rather than body prose.
+
+    Unit titles in these documents are short and upper-case ("APPLY
+    COMMUNICATION SKILLS"). Taking the nearest usable line instead picked up
+    trailing evidence-guide prose from the preceding unit - real examples being
+    "Oral questioning Context of assessment" and "In a simulated work
+    environment Guidance information".
+    """
+    t = (text or "").strip()
+    if not (3 <= len(t) <= 90):
+        return -1.0
+    letters = [c for c in t if c.isalpha()]
+    if not letters:
+        return -1.0
+
+    score = 2.0 * (sum(1 for c in letters if c.isupper()) / len(letters))
+    words = t.split()
+    if len(words) > 12:
+        score -= 1.0
+    elif len(words) <= 8:
+        score += 0.3
+    if t.endswith("."):
+        score -= 1.0                      # a sentence, not a heading
+    return score
+
+
+# "This unit covers the competencies required to perform computer repair and
+# maintenance. It entails ..." -> "Perform computer repair and maintenance"
+_RE_DESCRIPTION = re.compile(
+    r"UNIT\s+DESCRIPTION\s*:?\s*(.+?)"
+    r"(?:ELEMENTS?\s+AND\s+PERFORMANCE|PERFORMANCE\s+CR\w+|"
+    r"Summary\s+of\s+Learning|\Z)", re.I | re.S)
+_RE_DESCRIPTION_LEAD = re.compile(
+    r"^.*?\b(?:competenc\w*\s+(?:required\s+)?to|required\s+to)\s+", re.I | re.S)
+
+
+def _title_from_description(page: Page) -> str:
+    """Fall back to the unit description when no heading is on the page.
+
+    Some documents - legacy .doc conversions especially - carry the unit code
+    and description but leave the heading behind on the previous page. The
+    description still says exactly what the unit is ("...required to perform
+    computer repair and maintenance"), which makes a far better title than the
+    stray line of prose that happens to sit above the code.
+    """
+    m = _RE_DESCRIPTION.search(page.text or "")
+    if not m:
+        return ""
+    body = clean_text(re.sub(r"\s+", " ", m.group(1)))
+    lead = _RE_DESCRIPTION_LEAD.search(body)
+    if lead:
+        body = body[lead.end():]
+    # keep the first clause: "...repair and maintenance. It entails ..."
+    body = re.split(r"(?<=[a-z])\.\s|\.\s+It\s", body)[0].strip(" .")
+    if len(body) < 4 or len(body) > 120:
+        return ""
+    return body[:1].upper() + body[1:]
+
+
+def _best_title(page: Page) -> str:
+    """The line above the code that best reads as this unit's title."""
+    lines = column_lines(page.words, 0, 10_000)
+    idx = next((i for i, ln in enumerate(lines)
+                if RE_ISCED_CODE_SHAPE.search(ln.text)
+                or RE_TVET_CODE_SHAPE.search(ln.text)), None)
+    if idx is None:
+        return ""
+
+    def usable(text: str) -> bool:
+        t = (text or "").strip()
+        return bool(t) and not is_noise_line(t) \
+            and not RE_ISCED_CODE_SHAPE.search(t) \
+            and not RE_TVET_CODE_SHAPE.search(t) \
+            and not _RE_CODE_LABEL.search(t) \
+            and not _RE_ROW_NOISE.match(t) \
+            and not _RE_BODY_MARKER.search(t)
+
+    window = [ln.text for ln in lines[max(0, idx - _TITLE_LOOKBACK):idx]
+              if usable(ln.text)]
+    if window:
+        # nearest-first on a tie, so an adjacent heading beats a distant one
+        best = max(reversed(window), key=_title_score)
+        if _title_score(best) >= _TITLE_SCORE_FLOOR:
+            return clean_text(best)
+        # nothing above reads like a heading - the description knows better
+        # than a stray line of prose does
+        return _title_from_description(page) or clean_text(window[-1])
+
+    # nothing usable above the code: the header may print the code first
+    below = _title_near_code(page)
+    if below and _title_score(below) >= _TITLE_SCORE_FLOOR:
+        return below
+    return _title_from_description(page) or below
+
+
 def _relaxed_starts(pages: Sequence[Page]) -> List[int]:
     """The original rule, but accepting EITHER code family and a title on
     either side of the code."""
@@ -315,7 +417,8 @@ def _refs_from_starts(pages: Sequence[Page], starts: Sequence[int],
         page = by_index.get(start)
         if page is None:
             continue
-        title = unit_title_above_code(page) or _title_near_code(page)
+        title = _best_title(page) or unit_title_above_code(page) \
+            or _title_near_code(page)
         if not title:
             continue
         isced = RE_ISCED_CODE_SHAPE.search(page.text)

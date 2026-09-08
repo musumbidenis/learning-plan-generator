@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple
 
 import config
 import runlog
+import word_reader
 from drive_client import DriveError, DriveFile, download, list_children
 
 # The "Training Tools" folder, shared 'anyone with the link -> Viewer'.
@@ -38,8 +39,9 @@ DEFAULT_LIBRARY_FOLDER_ID = "1dGIPeezcayb-xHSYZsPa0MGv3clkRMGi"
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".drive_cache")
 
 # Only these are worth handing to the parsers; anything else in a programme
-# folder (spreadsheets, images, notes) is ignored.
-READABLE_EXTENSIONS = (".pdf", ".docx")
+# folder (spreadsheets, images, notes) is ignored. The word-processor formats
+# come from `word_reader`, so the library and the uploader accept the same set.
+READABLE_EXTENSIONS = (".pdf",) + word_reader.WORD_EXTENSIONS
 
 # Role labels used across this module and the UI.
 ROLE_OS = "OS"

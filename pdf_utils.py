@@ -8,6 +8,7 @@ naive `extract_text()` line order (which interleaves columns -> the classic
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -242,6 +243,11 @@ def _split_blocks_into_pages(blocks: List[Tuple[bool, List[Tuple[str, float]]]]
     return [_split_page_on_unit_headers(pg) for pg in pages]
 
 
+# Lines of lead-in carried onto a new pseudo-page, so the unit title is on the
+# same page as the code that identifies it.
+_UNIT_HEADER_LOOKBACK = 4
+
+
 def _split_page_on_unit_headers(lines: List[Tuple[str, float]]):
     """Split one pseudo-page again wherever a second unit header begins."""
     code_rows = [i for i, (text, x) in enumerate(lines)
@@ -251,8 +257,11 @@ def _split_page_on_unit_headers(lines: List[Tuple[str, float]]):
         return [lines]
     cuts = []
     for i in code_rows[1:]:
-        # the heading is the line above the code; start the new page there
-        cut = i - 1 if i > 0 else i
+        # Start the new page a few lines above the code, not just one. The unit
+        # heading does not always sit immediately above it, and cutting tight
+        # left the title resolver with a single candidate - which, when that one
+        # line was trailing prose from the previous unit, became the unit title.
+        cut = max(0, i - _UNIT_HEADER_LOOKBACK)
         if not cuts or cut > cuts[-1]:
             cuts.append(cut)
     out, prev = [], 0
@@ -264,47 +273,37 @@ def _split_page_on_unit_headers(lines: List[Tuple[str, float]]):
     return [chunk for chunk in out if chunk]
 
 
-def load_docx_pages(path: str) -> List[Page]:
-    """Best-effort DOCX loader.
+def load_word_pages(path: str) -> List[Page]:
+    """Load ANY supported word-processor document into the uniform Page list.
 
-    DOCX has no x-coordinates, so we synthesise pseudo-columns from table cells:
-    each table row contributes its cells as words at fixed pseudo-x positions
-    (col 0 -> x0=80, col 1 -> x0=235, col 2 -> x0=440), letting the same
-    column-aware parsers work. Plain paragraphs become single left-column words.
+    Word-processor formats have no x-coordinates, so we synthesise pseudo-columns
+    from table cells: each row contributes its cells as words at fixed pseudo-x
+    positions (col 0 -> x0=80, col 1 -> x0=235, col 2 -> x0=440), letting the
+    same column-aware parsers work. Plain paragraphs become single left-column
+    words.
 
-    It has no pages either, so we synthesise those too - see
+    They have no pages either, so we synthesise those too - see
     `_split_blocks_into_pages`.
-    """
-    from docx import Document  # local import so PDF-only installs still work
 
-    doc = Document(path)
+    The reading itself lives in `word_reader`, which covers .docx/.docm/.dotx/
+    .dotm, .odt/.ott, .rtf and the legacy .doc binary behind one interface.
+    """
+    import word_reader
+
     PSEUDO_X = [80.0, 235.0, 440.0]
 
     # (starts_a_new_page, [(line_text, pseudo_x), ...]) in document order
     blocks: List[Tuple[bool, List[Tuple[str, float]]]] = []
-
-    from docx.oxml.text.paragraph import CT_P
-    from docx.oxml.table import CT_Tbl
-    from docx.text.paragraph import Paragraph
-    from docx.table import Table
-
-    body = doc.element.body
-    for child in body.iterchildren():
-        if isinstance(child, CT_P):
-            para = Paragraph(child, doc)
-            breaks = _docx_page_break_count(para)
-            text = clean_text(para.text)
-            lines = [(text, PSEUDO_X[0])] if text else []
-            blocks.append((breaks > 0, lines))
-        elif isinstance(child, CT_Tbl):
-            table = Table(child, doc)
-            lines = []
-            for row in table.rows:
-                for ci, cell in enumerate(row.cells[:3]):
-                    text = clean_text(cell.text)
-                    if text:
-                        lines.append((text, PSEUDO_X[min(ci, 2)]))
-            blocks.append((False, lines))
+    for block in word_reader.read_blocks(path):
+        if block.kind == word_reader.BREAK:
+            blocks.append((True, []))
+            continue
+        lines = []
+        for ci, cell in enumerate(block.cells[:3]):
+            text = clean_text(cell)
+            if text:
+                lines.append((text, PSEUDO_X[min(ci, 2)]))
+        blocks.append((False, lines))
 
     pages: List[Page] = []
     for group in _split_blocks_into_pages(blocks):
@@ -335,14 +334,28 @@ def load_docx_pages(path: str) -> List[Page]:
     return pages or [Page(index=0, text="", words=[])]
 
 
+# Kept under its old name: callers and tests still ask for a DOCX by name.
+load_docx_pages = load_word_pages
+
+
 def load_document(path: str) -> List[Page]:
-    """Load a PDF or DOCX into the uniform Page list."""
-    low = path.lower()
-    if low.endswith(".pdf"):
+    """Load a document into the uniform Page list, whatever format it is in.
+
+    The format is sniffed from the file's magic bytes rather than trusted from
+    its extension - a renamed file is a common reason a document "won't open",
+    and there is no good reason for it to fail here.
+    """
+    import word_reader
+
+    fmt = word_reader.sniff_format(path)
+    if fmt == word_reader.FMT_PDF:
         return load_pdf_pages(path)
-    if low.endswith(".docx"):
-        return load_docx_pages(path)
-    raise ValueError(f"Unsupported document type: {path}")
+    if fmt in word_reader._READERS:
+        return load_word_pages(path)
+    raise ValueError(
+        f"Unsupported document type: {os.path.basename(path)}. Supported: PDF, "
+        "and Word documents in .docx, .docm, .dotx, .dotm, .doc, .rtf, .odt or "
+        ".ott form.")
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,7 @@ import runlog
 import session_plan_builder
 import unit_index
 import unit_match
+import word_reader
 from drive_client import DriveError, DriveFile
 from models import CurriculumUnit, PlanInputs, Session, Unit
 from pdf_utils import load_document
@@ -129,9 +130,9 @@ def _no_units_message(pages, doc: str) -> str:
     has_text = any(getattr(p, "words", None) for p in (pages or []))
     if not has_text:
         return (f"Couldn't read any text from the {doc} - it looks scanned or "
-                "image-only. Upload a text-based PDF (or run OCR on it first).")
+                "image-only. Use a text-based file (or run OCR on it first).")
     return (f"No units found in the {doc}. The file may use an unexpected layout "
-            "or may not be a CDACC unit document. Try the official PDF.")
+            "or may not be a CDACC unit document. Try the official copy.")
 
 
 def _invalidate_extraction() -> None:
@@ -148,6 +149,9 @@ def _invalidate_extraction() -> None:
 # Loading one source document (shared by the Drive library and file upload)
 # --------------------------------------------------------------------------- #
 _SIDE_LABEL = {"os": "Occupational Standard", "cu": "Curriculum"}
+
+# Every format the readers understand, without the leading dot Streamlit omits.
+_UPLOAD_TYPES = ["pdf"] + [e.lstrip(".") for e in word_reader.WORD_EXTENSIONS]
 
 
 def _ingest(side: str, path: str, sig) -> None:
@@ -792,8 +796,10 @@ def render_library_source() -> None:
 # =========================================================================== #
 def _upload_side(side: str, *, key: str) -> None:
     """One file uploader wired into the shared `_ingest` path."""
-    uploaded = st.file_uploader(f"{_SIDE_LABEL[side]} (PDF/DOCX)",
-                                type=["pdf", "docx"], key=key)
+    uploaded = st.file_uploader(
+        f"{_SIDE_LABEL[side]} (PDF or Word)", type=_UPLOAD_TYPES, key=key,
+        help="PDF, or a Word document in .docx, .docm, .dotx, .dotm, .doc, "
+             ".rtf, .odt or .ott form.")
     if uploaded is None:
         return
     sig = ("upload", uploaded.name, uploaded.size)
