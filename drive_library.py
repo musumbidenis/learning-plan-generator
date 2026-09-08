@@ -1,17 +1,23 @@
 """The OS + Curriculum document library, backed by a shared Google Drive folder.
 
-Layout (three levels, exactly as the folder is organised in Drive):
+The library root holds one folder per programme, each with that programme's two
+documents:
 
-    Training Tools/                       <- the library root
-      CDACC CYCLE 03/                     <- a collection
-        ICT Technician Level 6/           <- a programme
-          <Occupational Standard>.pdf
-          <Curriculum>.pdf
-      CDACC CYCLE 04 .../
-      RVNP/                               <- appears here as soon as it exists
+    Occupational Standards and CBET Curriculum/   <- the library root
+      Accountancy Level 6/                        <- a programme
+        Occupational Standards.pdf
+        Curriculum.pdf
+      ICT Technician Level 6/
+      ...
 
-Read-only by design: new programmes and collections are created in Drive itself
-and show up on the next refresh. Nothing here writes to Drive.
+Some libraries group programmes under a further level (RVNP, CDACC CYCLE 03,
+...). Rather than make that a setting the trainer has to get right, the shape is
+worked out from the folder itself: if the root's subfolders hold documents they
+are programmes, and if they hold only folders they are collections of them. See
+`detect_layout`.
+
+Read-only by design: new programmes are created in Drive itself and show up on
+the next refresh. Nothing here writes to Drive.
 
 Downloads are cached under `.drive_cache/`, keyed on the file's Drive id AND its
 modifiedTime - so a document replaced in Drive is fetched again automatically
@@ -23,18 +29,17 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import config
 import runlog
 import word_reader
 from drive_client import DriveError, DriveFile, download, list_children
 
-# The "Training Tools" folder, shared 'anyone with the link -> Viewer'.
-# Overridable so the app can be pointed at a different library without a code
-# change (e.g. a personal copy of the folder).
-DEFAULT_LIBRARY_FOLDER_ID = "1dGIPeezcayb-xHSYZsPa0MGv3clkRMGi"
+# "Occupational Standards and CBET Curriculum", shared 'anyone with the link ->
+# Viewer'. Overridable so the app can be pointed at a different library without
+# a code change (e.g. a personal copy of the folder).
+DEFAULT_LIBRARY_FOLDER_ID = "11gAs0Y3zLmPj4mykyKzjBWy-0TxT3mbU"
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".drive_cache")
 
@@ -43,9 +48,22 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".drive_cac
 # come from `word_reader`, so the library and the uploader accept the same set.
 READABLE_EXTENSIONS = (".pdf",) + word_reader.WORD_EXTENSIONS
 
+# Files named like documents that are not documents: macOS AppleDouble stubs
+# (a 4 KB '._Curriculum.pdf' sitting beside the real one), Finder metadata and
+# Word lock files. Offering one of these as a choice of document is never right.
+_RE_JUNK_NAME = re.compile(r"^(?:\._|~\$|\.DS_Store$)")
+
 # Role labels used across this module and the UI.
 ROLE_OS = "OS"
 ROLE_CU = "CU"
+
+# How the root folder is organised.
+LAYOUT_FLAT = "flat"        # root -> programme -> documents
+LAYOUT_NESTED = "nested"    # root -> collection -> programme -> documents
+
+# Folders sampled when working the layout out - enough to see past an empty
+# folder or two without turning the first page load into a crawl.
+_LAYOUT_PROBE = 4
 
 
 def library_root_id() -> str:
@@ -55,29 +73,55 @@ def library_root_id() -> str:
 # --------------------------------------------------------------------------- #
 # Browsing
 # --------------------------------------------------------------------------- #
+def is_readable(f: DriveFile) -> bool:
+    """Whether `f` is a document one of the parsers could actually open."""
+    if f.is_folder or _RE_JUNK_NAME.search(f.name or ""):
+        return False
+    return f.is_google_doc or (f.name or "").lower().endswith(READABLE_EXTENSIONS)
+
+
+def _folders(items: List[DriveFile]) -> List[DriveFile]:
+    return [f for f in items if f.is_folder]
+
+
+def top_level_folders() -> List[DriveFile]:
+    """The root's subfolders - programmes or collections, per `detect_layout`."""
+    return _folders(list_children(library_root_id()))
+
+
+def detect_layout(folders: List[DriveFile]) -> str:
+    """Whether `folders` are programmes themselves, or collections of them.
+
+    A programme folder is recognised by what it holds: its documents. Only the
+    first few are sampled, so a single empty programme folder can't decide it.
+    """
+    for f in folders[:_LAYOUT_PROBE]:
+        try:
+            children = list_children(f.id)
+        except DriveError:
+            continue                    # a folder we can't read proves nothing
+        if any(is_readable(c) for c in children):
+            return LAYOUT_FLAT
+    return LAYOUT_NESTED
+
+
 def list_collections() -> List[DriveFile]:
-    """The top-level groupings: RVNP, CDACC CYCLE 03, CDACC CYCLE 04, ..."""
-    return [f for f in list_children(library_root_id()) if f.is_folder]
+    """The top-level groupings, for a library organised with them."""
+    return top_level_folders()
 
 
 def list_programmes(collection_id: str) -> List[DriveFile]:
     """The programme folders inside one collection."""
-    return [f for f in list_children(collection_id) if f.is_folder]
+    return _folders(list_children(collection_id))
 
 
 def programme_files(programme_id: str) -> List[DriveFile]:
     """The readable documents inside one programme folder.
 
-    Google Docs are included (they are exported to .docx on download); folders
-    and unreadable formats are filtered out.
+    Google Docs are included (they are exported to .docx on download); folders,
+    unreadable formats and filesystem litter are filtered out.
     """
-    out = []
-    for f in list_children(programme_id):
-        if f.is_folder:
-            continue
-        if f.is_google_doc or f.name.lower().endswith(READABLE_EXTENSIONS):
-            out.append(f)
-    return out
+    return [f for f in list_children(programme_id) if is_readable(f)]
 
 
 # --------------------------------------------------------------------------- #
@@ -102,40 +146,58 @@ def guess_role(name: str) -> Optional[str]:
     return None
 
 
+def _format_rank(f: DriveFile) -> int:
+    """Which copy to prefer when a folder holds the same document twice.
+
+    Dozens of programmes carry both 'Curriculum.docx' and 'Curriculum.pdf'. The
+    PDF is the better source: it keeps the page geometry the parsers split
+    columns on, and Word's automatic list numbering - which the .docx text
+    drops entirely - is baked into it as ordinary text.
+    """
+    ext = os.path.splitext(f.name or "")[1].lower()
+    if ext == ".pdf":
+        return 0
+    if f.is_google_doc or ext in word_reader.WORD_EXTENSIONS:
+        return 1
+    return 2
+
+
+def _best(candidates: List[DriveFile]) -> Optional[DriveFile]:
+    if not candidates:
+        return None
+    return min(candidates, key=_format_rank)    # ties keep the folder's order
+
+
 def classify(files: List[DriveFile]) -> Tuple[Optional[DriveFile],
                                               Optional[DriveFile],
                                               List[DriveFile]]:
     """Split a programme folder into (occupational_standard, curriculum, extras).
 
-    `extras` holds everything not confidently assigned - files whose name says
-    nothing, and any duplicate beyond the first of each role. The UI surfaces
-    them so the trainer can assign them by hand; nothing is silently discarded.
+    `extras` holds everything not chosen - files whose name says nothing, and
+    the other copies of a document already picked. The UI surfaces them so the
+    trainer can assign them by hand; nothing is silently discarded.
     """
-    os_file: Optional[DriveFile] = None
-    cu_file: Optional[DriveFile] = None
-    extras: List[DriveFile] = []
-
+    by_role: Dict[Optional[str], List[DriveFile]] = {ROLE_OS: [], ROLE_CU: [],
+                                                     None: []}
     for f in files:
-        role = guess_role(f.name)
-        if role == ROLE_OS and os_file is None:
-            os_file = f
-        elif role == ROLE_CU and cu_file is None:
-            cu_file = f
-        else:
-            extras.append(f)
+        by_role[guess_role(f.name)].append(f)
+
+    os_file = _best(by_role[ROLE_OS])
+    cu_file = _best(by_role[ROLE_CU])
 
     # A folder holding exactly two files, one recognised and one the filename
     # says nothing about: the silent one is almost certainly the missing half.
     # A second file of a role we already filled is NOT a candidate - two
     # curricula stay two curricula.
-    if (len(files) == 2 and len(extras) == 1
-            and guess_role(extras[0].name) is None
+    if (len(files) == 2 and len(by_role[None]) == 1
             and (os_file is None) != (cu_file is None)):
         if os_file is None:
-            os_file, extras = extras[0], []
+            os_file = by_role[None][0]
         else:
-            cu_file, extras = extras[0], []
+            cu_file = by_role[None][0]
 
+    chosen = {id(os_file), id(cu_file)}
+    extras = [f for f in files if id(f) not in chosen]
     return os_file, cu_file, extras
 
 
@@ -167,7 +229,8 @@ def ensure_local(file: DriveFile) -> str:
 
 __all__ = [
     "DriveError", "DriveFile", "ROLE_CU", "ROLE_OS", "CACHE_DIR",
-    "DEFAULT_LIBRARY_FOLDER_ID", "library_root_id", "list_collections",
-    "list_programmes", "programme_files", "guess_role", "classify",
-    "cache_path", "ensure_local",
+    "DEFAULT_LIBRARY_FOLDER_ID", "LAYOUT_FLAT", "LAYOUT_NESTED",
+    "library_root_id", "top_level_folders", "detect_layout", "list_collections",
+    "list_programmes", "programme_files", "is_readable", "guess_role",
+    "classify", "cache_path", "ensure_local",
 ]

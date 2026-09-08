@@ -8,14 +8,28 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import drive_library as dl
 from drive_client import DriveFile
 
-# The one document actually in the library today, plus the shapes we expect to
-# meet as the folders fill up.
+# Names taken from the library itself: nearly every one of its ~290 programme
+# folders holds 'Curriculum.pdf' + 'Occupational Standard(s).pdf', and the ones
+# that don't are the interesting cases below.
 CURRICULUM_REAL = "Moduralized Curriculum ICT Operator Level 4.V1 18 MARCH.pdf"
+
+WORD_MIME = ("application/vnd.openxmlformats-officedocument."
+             "wordprocessingml.document")
 
 
 def f(name, file_id=None, modified="2026-05-14T08:31:17Z"):
     return DriveFile(id=file_id or name, name=name, mime_type="application/pdf",
                      modified_time=modified, size=1234)
+
+
+def word(name, file_id=None):
+    return DriveFile(id=file_id or name, name=name, mime_type=WORD_MIME,
+                     modified_time="2026-05-14T08:31:17Z", size=1234)
+
+
+def folder(name, file_id=None):
+    return DriveFile(id=file_id or name, name=name,
+                     mime_type="application/vnd.google-apps.folder")
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +113,93 @@ def test_every_input_file_is_accounted_for():
     os_file, cu_file, extras = dl.classify(files)
     seen = [x for x in (os_file, cu_file) if x is not None] + extras
     assert sorted(id(x) for x in seen) == sorted(id(x) for x in files)
+
+
+def test_the_pdf_copy_wins_over_the_word_copy_of_the_same_document():
+    """Dozens of programme folders hold both; the PDF is the better source."""
+    files = [word("Curriculum.docx"), f("Curriculum.pdf"),
+             word("Occupational Standards.docx"), f("Occupational Standards.pdf")]
+    os_file, cu_file, extras = dl.classify(files)
+    assert os_file.name == "Occupational Standards.pdf"
+    assert cu_file.name == "Curriculum.pdf"
+    assert [e.name for e in extras] == ["Curriculum.docx",
+                                        "Occupational Standards.docx"]
+
+
+def test_a_word_copy_is_used_when_it_is_the_only_one():
+    files = [word("Curriculum.docx"), word("Occupational Standard.docx")]
+    os_file, cu_file, _ = dl.classify(files)
+    assert os_file is files[1] and cu_file is files[0]
+
+
+# --------------------------------------------------------------------------- #
+# is_readable - what belongs in a programme folder's file list
+# --------------------------------------------------------------------------- #
+def test_macos_appledouble_stubs_are_not_offered_as_documents():
+    """A real folder holds nine 4 KB '._' stubs beside the two real PDFs."""
+    junk = f("._Wildlife management curriculum level 5.pdf")
+    assert not dl.is_readable(junk)
+    assert dl.is_readable(f("curriculum.pdf"))
+
+
+def test_finder_and_word_litter_is_ignored():
+    assert not dl.is_readable(f(".DS_Store"))
+    assert not dl.is_readable(word("~$Curriculum.docx"))
+
+
+def test_a_google_doc_without_an_extension_is_readable():
+    gdoc = DriveFile(id="1", name="Occupational Standard",
+                     mime_type="application/vnd.google-apps.document")
+    assert dl.is_readable(gdoc)
+
+
+def test_folders_and_unreadable_formats_are_not_documents():
+    assert not dl.is_readable(folder("Assessment Guides"))
+    assert not dl.is_readable(f("Trainee list.xlsx"))
+
+
+# --------------------------------------------------------------------------- #
+# detect_layout - programmes at the root, or grouped under collections
+# --------------------------------------------------------------------------- #
+def _fake_children(mapping, monkeypatch):
+    monkeypatch.setattr(dl, "list_children", lambda fid: mapping.get(fid, []))
+
+
+def test_folders_holding_documents_are_programmes(monkeypatch):
+    top = [folder("Accountancy Level 6", "a"), folder("Rigging Level 4", "b")]
+    _fake_children({"a": [f("Curriculum.pdf"), f("Occupational Standards.pdf")]},
+                   monkeypatch)
+    assert dl.detect_layout(top) == dl.LAYOUT_FLAT
+
+
+def test_folders_holding_only_folders_are_collections(monkeypatch):
+    top = [folder("CDACC CYCLE 03", "a"), folder("CDACC CYCLE 04", "b")]
+    _fake_children({"a": [folder("ICT Technician Level 6", "a1")],
+                    "b": [folder("ICT Level 4", "b1")]}, monkeypatch)
+    assert dl.detect_layout(top) == dl.LAYOUT_NESTED
+
+
+def test_an_empty_first_programme_folder_does_not_decide_the_layout(monkeypatch):
+    top = [folder("Rigging Level 4", "a"), folder("Accountancy Level 6", "b")]
+    _fake_children({"a": [], "b": [f("Curriculum.pdf")]}, monkeypatch)
+    assert dl.detect_layout(top) == dl.LAYOUT_FLAT
+
+
+def test_a_folder_that_cannot_be_read_does_not_decide_the_layout(monkeypatch):
+    top = [folder("Private", "a"), folder("Accountancy Level 6", "b")]
+
+    def children(fid):
+        if fid == "a":
+            raise dl.DriveError("no permission")
+        return [f("Curriculum.pdf")]
+
+    monkeypatch.setattr(dl, "list_children", children)
+    assert dl.detect_layout(top) == dl.LAYOUT_FLAT
+
+
+def test_a_library_with_no_folders_at_all_is_not_an_error(monkeypatch):
+    _fake_children({}, monkeypatch)
+    assert dl.detect_layout([]) == dl.LAYOUT_NESTED
 
 
 # --------------------------------------------------------------------------- #

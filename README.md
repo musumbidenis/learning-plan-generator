@@ -47,25 +47,37 @@ Instead of uploading the two PDFs every time, the app can read them from the
 shared Google Drive folder they already live in:
 
 ```text
-Training Tools/                      ← the library root
-  CDACC CYCLE 03/                    ← a collection
-    ICT Technician Level 6/          ← a programme
-      <Occupational Standard>.pdf
-      <Curriculum>.pdf
-  CDACC CYCLE 04 .../
-  RVNP/
+Occupational Standards and CBET Curriculum/   ← the library root
+  Accountancy Level 6/                        ← a programme
+    Occupational Standards.pdf
+    Curriculum.pdf
+  ICT Technician Level 6/
+  ...                                         ← ~290 programmes
 ```
 
-Pick a **collection** then a **programme** - that is the whole instruction.
+Pick a **programme** - that is the whole instruction (the box is type-to-search).
 Which file is the Occupational Standard and which the Curriculum is worked out
 from the filenames and both are fetched automatically; a correction control
 appears only when the folder is ambiguous (an unrecognised file, or more than
-two of them). A programme folder holding only one of the two still works: the
-missing side gets a file uploader.
+two of them). Where a programme carries the same document twice, once as `.pdf`
+and once as `.docx`, the PDF is preferred — it keeps the page geometry the
+parsers read columns from, and Word's automatic list numbering survives in it as
+text. A folder holding only one of the two documents still works: the missing
+side gets a file uploader.
 
-**Read-only, on purpose.** The app never writes to Drive. To add a programme —
-or a whole new collection such as `RVNP` — create the folder in Drive, drop the
-files in, and press **🔄 Refresh library**.
+A library that groups programmes one level deeper —
+
+```text
+Training Tools/
+  CDACC CYCLE 03/                    ← a collection
+    ICT Technician Level 6/          ← a programme
+```
+
+— also works: the app looks at what the root's subfolders contain and adds a
+**Collection** box only when it needs one. Nothing to configure.
+
+**Read-only, on purpose.** The app never writes to Drive. To add a programme,
+create its folder in Drive, drop the files in, and press **🔄 Refresh library**.
 
 Setup (~3 minutes, no OAuth consent screen and no service account):
 
@@ -93,7 +105,7 @@ automatically, and an unchanged one is downloaded only once.
 | `models.py` | – | dataclasses flowing through the pipeline |
 | `config.py` | – | one place resolving settings: `.env` → environment → `st.secrets` |
 | `drive_client.py` | – | read-only Google Drive REST v3 calls (API key, no OAuth) |
-| `drive_library.py` | – | collection → programme → OS/Curriculum, plus the local download cache |
+| `drive_library.py` | – | programme → OS/Curriculum, the folder-shape detection, plus the local download cache |
 | `word_reader.py` | A0 | read any word-processor format (.docx/.docm/.dotx/.dotm, .doc, .rtf, .odt/.ott) into neutral blocks |
 | `unit_index.py` | A0 | finds the units in a document: reads its preliminary units table, then locates each one |
 | `unit_match.py` | – | pairs OS units with Curriculum units for the matched selection table |

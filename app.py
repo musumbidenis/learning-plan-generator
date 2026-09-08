@@ -3,8 +3,8 @@
 Flow:
 
   1. Source documents - either browse the shared Google Drive library
-     (collection -> programme -> its Occupational Standard + Curriculum) or
-     upload the two files by hand. Both routes index the same way.
+     (programme -> its Occupational Standard + Curriculum) or upload the two
+     files by hand. Both routes index the same way.
   2. Select the unit - units matched across the two documents are listed as
      ready pairs; anything the matcher could not place is listed separately,
      per document, to be paired by hand. A unit that appears in only one file,
@@ -650,8 +650,10 @@ def render_upload_flow() -> None:
 # Source 1 - the shared Google Drive library
 # =========================================================================== #
 @st.cache_data(ttl=600, show_spinner=False)
-def _cached_collections() -> List[DriveFile]:
-    return drive_library.list_collections()
+def _cached_root() -> tuple[str, List[DriveFile]]:
+    """The root's folders, and whether they are programmes or collections."""
+    folders = drive_library.top_level_folders()
+    return drive_library.detect_layout(folders), folders
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -696,49 +698,61 @@ def _pick_role_file(side: str, files: List[DriveFile], guess: DriveFile | None,
 
 
 def render_library_source() -> None:
-    """Collection -> programme -> the two documents, fetched automatically."""
+    """Programme -> the two documents, fetched automatically.
+
+    The library holds a folder per programme. A library that groups them one
+    level deeper (RVNP, CDACC CYCLE 03, ...) gets a Collection box first; that
+    is decided by `drive_library.detect_layout`, not asked of the trainer.
+    """
     c1, c2 = st.columns([0.78, 0.22])
     if c2.button("🔄 Refresh library", width="stretch",
                  help="Re-read the folder structure from Drive. Add a programme "
-                      "or a new collection by creating the folder in Drive, then "
-                      "refreshing here."):
-        _cached_collections.clear()
+                      "by creating its folder in Drive, then refreshing here."):
+        _cached_root.clear()
         _cached_programmes.clear()
         _cached_files.clear()
         st.rerun()
 
     try:
-        collections = _cached_collections()
+        layout, top_folders = _cached_root()
     except DriveError as e:
         st.error(str(e))
         return
-    if not collections:
-        st.warning("The library folder doesn't contain any collections yet.")
+    if not top_folders:
+        st.warning("The library folder doesn't contain any programmes yet.")
         return
 
-    with c1:
-        ci = st.selectbox("Collection", range(len(collections)), index=None,
-                          placeholder="- select a collection -",
-                          format_func=lambda i: collections[i].name,
-                          key="lib_collection")
-    if ci is None:
-        return
-    collection = collections[ci]
-    ss.lib_collection_id = collection.id
+    if layout == drive_library.LAYOUT_FLAT:
+        parent_id, programmes = drive_library.library_root_id(), top_folders
+        ss.lib_collection_id = None
+        box = c1
+    else:
+        with c1:
+            ci = st.selectbox("Collection", range(len(top_folders)), index=None,
+                              placeholder="- select a collection -",
+                              format_func=lambda i: top_folders[i].name,
+                              key="lib_collection")
+        if ci is None:
+            return
+        collection = top_folders[ci]
+        ss.lib_collection_id = parent_id = collection.id
+        try:
+            programmes = _cached_programmes(collection.id)
+        except DriveError as e:
+            st.error(str(e))
+            return
+        if not programmes:
+            st.warning(f"**{collection.name}** has no programme folders in it yet.")
+            return
+        box = st.container()
 
-    try:
-        programmes = _cached_programmes(collection.id)
-    except DriveError as e:
-        st.error(str(e))
-        return
-    if not programmes:
-        st.warning(f"**{collection.name}** has no programme folders in it yet.")
-        return
-
-    pi = st.selectbox("Programme", range(len(programmes)), index=None,
-                      placeholder="- select a programme -",
-                      format_func=lambda i: programmes[i].name,
-                      key=f"lib_programme::{collection.id}")
+    with box:
+        pi = st.selectbox("Programme", range(len(programmes)), index=None,
+                          placeholder="- select a programme -",
+                          format_func=lambda i: programmes[i].name,
+                          help="Type to search - the list holds every programme "
+                               "in the library.",
+                          key=f"lib_programme::{parent_id}")
     if pi is None:
         return
     programme = programmes[pi]
