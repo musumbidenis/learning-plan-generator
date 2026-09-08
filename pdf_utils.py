@@ -208,6 +208,62 @@ def load_pdf_pages(path: str) -> List[Page]:
     return pages
 
 
+def _docx_page_break_count(para) -> int:
+    """How many explicit page breaks this paragraph carries."""
+    from docx.oxml.ns import qn
+    return sum(1 for br in para._element.findall(".//" + qn("w:br"))
+               if br.get(qn("w:type")) == "page")
+
+
+def _split_blocks_into_pages(blocks: List[Tuple[bool, List[Tuple[str, float]]]]
+                             ) -> List[List[Tuple[str, float]]]:
+    """Group DOCX blocks into pseudo-pages.
+
+    A .docx has no pages, but the parsers work per page: a unit's span is
+    [start_page, end_page). Returning one page for the whole file - as this
+    loader used to - therefore capped a multi-unit document at a single unit,
+    and usually found none at all, because one page carrying every unit's code
+    fails the 'exactly one code' test.
+
+    Pages break at explicit page breaks; failing that (or where a break-free
+    document still holds several units) they break before each unit heading -
+    the line preceding a code line - which is exactly the boundary the parsers
+    want.
+    """
+    pages: List[List[Tuple[str, float]]] = []
+    current: List[Tuple[str, float]] = []
+    for is_break, lines in blocks:
+        if is_break and current:
+            pages.append(current)
+            current = []
+        current.extend(lines)
+    if current:
+        pages.append(current)
+    return [_split_page_on_unit_headers(pg) for pg in pages]
+
+
+def _split_page_on_unit_headers(lines: List[Tuple[str, float]]):
+    """Split one pseudo-page again wherever a second unit header begins."""
+    code_rows = [i for i, (text, x) in enumerate(lines)
+                 if x == 80.0 and (RE_ISCED_CODE_SHAPE.search(text)
+                                   or RE_TVET_CODE_SHAPE.search(text))]
+    if len(code_rows) < 2:
+        return [lines]
+    cuts = []
+    for i in code_rows[1:]:
+        # the heading is the line above the code; start the new page there
+        cut = i - 1 if i > 0 else i
+        if not cuts or cut > cuts[-1]:
+            cuts.append(cut)
+    out, prev = [], 0
+    for cut in cuts:
+        if cut > prev:
+            out.append(lines[prev:cut])
+            prev = cut
+    out.append(lines[prev:])
+    return [chunk for chunk in out if chunk]
+
+
 def load_docx_pages(path: str) -> List[Page]:
     """Best-effort DOCX loader.
 
@@ -215,24 +271,18 @@ def load_docx_pages(path: str) -> List[Page]:
     each table row contributes its cells as words at fixed pseudo-x positions
     (col 0 -> x0=80, col 1 -> x0=235, col 2 -> x0=440), letting the same
     column-aware parsers work. Plain paragraphs become single left-column words.
+
+    It has no pages either, so we synthesise those too - see
+    `_split_blocks_into_pages`.
     """
     from docx import Document  # local import so PDF-only installs still work
 
     doc = Document(path)
-    words: List[dict] = []
-    top = 0.0
     PSEUDO_X = [80.0, 235.0, 440.0]
 
-    def add_cell(text: str, x0: float, ytop: float) -> None:
-        text = clean_text(text)
-        if not text:
-            return
-        # split a cell into words sharing the same baseline & x0
-        for tok in text.split(" "):
-            words.append({"text": tok, "x0": x0, "x1": x0 + 5 * len(tok),
-                          "top": ytop, "bottom": ytop + 10})
+    # (starts_a_new_page, [(line_text, pseudo_x), ...]) in document order
+    blocks: List[Tuple[bool, List[Tuple[str, float]]]] = []
 
-    # Iterate body elements in document order (paragraphs + tables).
     from docx.oxml.text.paragraph import CT_P
     from docx.oxml.table import CT_Tbl
     from docx.text.paragraph import Paragraph
@@ -242,23 +292,47 @@ def load_docx_pages(path: str) -> List[Page]:
     for child in body.iterchildren():
         if isinstance(child, CT_P):
             para = Paragraph(child, doc)
-            if para.text.strip():
-                add_cell(para.text, PSEUDO_X[0], top)
-                top += 14
+            breaks = _docx_page_break_count(para)
+            text = clean_text(para.text)
+            lines = [(text, PSEUDO_X[0])] if text else []
+            blocks.append((breaks > 0, lines))
         elif isinstance(child, CT_Tbl):
             table = Table(child, doc)
+            lines = []
             for row in table.rows:
-                cells = row.cells
-                for ci, cell in enumerate(cells[:3]):
-                    add_cell(cell.text, PSEUDO_X[min(ci, 2)], top)
-                top += 14
+                for ci, cell in enumerate(row.cells[:3]):
+                    text = clean_text(cell.text)
+                    if text:
+                        lines.append((text, PSEUDO_X[min(ci, 2)]))
+            blocks.append((False, lines))
 
-    # Re-derive page text from the words for region detection.
-    full_text = "\n".join(
-        " ".join(w["text"] for w in grp)
-        for grp in _group_words_into_lines(words)
-    )
-    return [Page(index=0, text=full_text, words=words)]
+    pages: List[Page] = []
+    for group in _split_blocks_into_pages(blocks):
+        for chunk in group:
+            words: List[dict] = []
+            top = 0.0
+            last_x = None
+            for text, x0 in chunk:
+                # a new left-column line starts a new baseline; cells of one
+                # table row share theirs, which is what the column parsers expect
+                if last_x is not None and x0 <= last_x:
+                    top += 14
+                last_x = x0
+                x = x0
+                for tok in text.split(" "):
+                    if not tok:
+                        continue
+                    words.append({"text": tok, "x0": x, "x1": x + 5 * len(tok),
+                                  "top": top, "bottom": top + 10})
+                    x += 5 * len(tok) + 5
+            if not words:
+                continue
+            full_text = "\n".join(
+                " ".join(w["text"] for w in grp)
+                for grp in _group_words_into_lines(words))
+            pages.append(Page(index=len(pages), text=full_text, words=words))
+
+    return pages or [Page(index=0, text="", words=[])]
 
 
 def load_document(path: str) -> List[Page]:

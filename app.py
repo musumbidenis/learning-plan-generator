@@ -38,6 +38,7 @@ import os_parser
 import planner
 import runlog
 import session_plan_builder
+import unit_index
 import unit_match
 from drive_client import DriveError, DriveFile
 from models import CurriculumUnit, PlanInputs, Session, Unit
@@ -71,6 +72,8 @@ _DEFAULTS = dict(
     up_sig=None, up_unit=None, up_sessions=None, up_inputs=None,
     # Drive library browsing (which folder / files the documents came from)
     lib_collection_id=None, lib_programme_id=None,
+    # units a document's own contents table names but that couldn't be found
+    os_missing=[], cu_missing=[],
 )
 for _k, _v in _DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -164,12 +167,19 @@ def _ingest(side: str, path: str, sig) -> None:
             with runlog.timed(f"Load {label}"):
                 pages = load_document(path)
             with runlog.timed(f"Index {label} units"):
-                refs = (os_parser.index_os_units(pages) if side == "os"
-                        else cp.index_curriculum_units(pages))
-            ss[f"{side}_pages"], ss[f"{side}_refs"] = pages, refs
-            runlog.log(f"Indexed {len(refs)} {label} units")
+                result = unit_index.index_units(
+                    pages, "OS" if side == "os" else "CU")
+            ss[f"{side}_pages"] = pages
+            ss[f"{side}_refs"] = result.refs
+            ss[f"{side}_missing"] = result.missing
+            runlog.log(f"Indexed {len(result.refs)} {label} units "
+                       f"via '{result.strategy}'"
+                       + (f"; {len(result.missing)} listed in the document's own "
+                          "units table could not be located"
+                          if result.missing else ""))
         except Exception as e:  # noqa: BLE001
             ss[f"{side}_pages"], ss[f"{side}_refs"] = None, []
+            ss[f"{side}_missing"] = []
             runlog.error(f"Failed to read {label}: {e}")
             st.error(f"Failed to read the {label}: {e}")
 
@@ -182,6 +192,7 @@ def _clear_side(side: str) -> None:
     ss[f"{side}_path"] = None
     ss[f"{side}_pages"] = None
     ss[f"{side}_refs"] = []
+    ss[f"{side}_missing"] = []
     _invalidate_extraction()
 
 
@@ -190,6 +201,16 @@ def _side_status(side: str) -> None:
     label = _SIDE_LABEL[side]
     if ss[f"{side}_refs"]:
         st.success(f"**{len(ss[f'{side}_refs'])}** units read from the {label}.")
+        missing = ss.get(f"{side}_missing") or []
+        if missing:
+            # The document's own units table names more units than we could
+            # find in its body - say which, rather than quietly showing fewer.
+            total = len(ss[f"{side}_refs"]) + len(missing)
+            st.warning(
+                f"{len(missing)} of {total} units listed in the {label}'s own "
+                "units table could not be located in the document: "
+                + ", ".join(f"*{m.title}*" for m in missing[:6])
+                + ("..." if len(missing) > 6 else ""))
     elif ss[f"{side}_pages"] is not None:
         st.error(_no_units_message(ss[f"{side}_pages"], label))
 

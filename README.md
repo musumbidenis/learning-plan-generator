@@ -93,6 +93,7 @@ automatically, and an unchanged one is downloaded only once.
 | `config.py` | – | one place resolving settings: `.env` → environment → `st.secrets` |
 | `drive_client.py` | – | read-only Google Drive REST v3 calls (API key, no OAuth) |
 | `drive_library.py` | – | collection → programme → OS/Curriculum, plus the local download cache |
+| `unit_index.py` | A0 | finds the units in a document: reads its preliminary units table, then locates each one |
 | `unit_match.py` | – | pairs OS units with Curriculum units for the matched selection table |
 | `pdf_utils.py` | – | word-coordinate column splitting, PDF/DOCX loading, noise filtering |
 | `os_parser.py` | A1 | parse OS units: title, codes, level, description, elements + PCs, evidence-guide methods |
@@ -116,6 +117,16 @@ automatically, and an unchanged one is downloaded only once.
   never truncate, with a salvage pass that recovers the complete leading objects
   of a cut-off array; the deterministic schedule is re-stamped afterwards so the
   AI can't override it.
+- **Documents the shape detector couldn't read** → `unit_index.py` tries four
+  strategies and keeps whichever finds the most units, so nothing that parses
+  today parses worse. The best of them reads the **preliminary units table**
+  ("Summary of Units of Learning", "UNIT CATEGORY | UNIT CODE | UNITS NAME"),
+  which names every unit up front, then goes and locates each one — turning
+  detection from a guess into a search for known targets. Three shapes that
+  previously yielded **zero** units now read correctly: documents carrying only
+  TVET codes and no ISCED code, multi-unit `.docx` files, and headers that print
+  the code above the title. Units the roster names but that can't be located are
+  reported in the UI rather than silently dropped.
 - **Mismatched OS/Curriculum units** → the two unit lists are paired into one
   table (`unit_match.py`), cascading ISCED code → TVET code ignoring the `OS`/`CU`
   segment → title → fuzzy title. A unit found in only one document still gets a
