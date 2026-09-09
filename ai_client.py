@@ -42,6 +42,12 @@ GROQ_MODELS_ENDPOINT = "https://api.groq.com/openai/v1/models"
 LIST_MODELS_TIMEOUT = 30
 PROBE_TIMEOUT = 30
 
+# Room for the probe's answer. Not 20: the gpt-oss models spend tokens
+# reasoning before they write anything, so a tight ceiling cut them off
+# mid-thought and Groq rejected the empty result as a schema failure - which
+# read as "this model can't do schemas" and disqualified the best models.
+PROBE_TOKENS = 512
+
 # How long to allow one grounded request. A model that has never completed one
 # gets less rope: it is far more likely to be a model that cannot do the job
 # than a slow answer worth waiting for.
@@ -72,6 +78,9 @@ _RE_SPECIAL_PURPOSE = re.compile(
 # 'openai/gpt-oss-120b' -> 120, so the larger model of a family goes first.
 _RE_MODEL_SIZE = re.compile(r"(\d+)\s*b(?:\b|-)")
 
+# 'qwen/qwen3.8-27b' -> 3.8, so the newer of two same-sized siblings goes first.
+_RE_MODEL_VERSION = re.compile(r"(\d+\.\d+)")
+
 # The model chosen for this process, once something has answered.
 _RESOLVED_MODEL = ""
 
@@ -96,29 +105,56 @@ class AIError(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Response schema (forces valid structured JSON)
 # --------------------------------------------------------------------------- #
+def _strict(schema: dict) -> dict:
+    """Make a schema satisfy strict structured-output rules, in place.
+
+    A strict schema is accepted only if every object forbids extra properties
+    and requires every property it declares. Applying that here keeps the
+    schema definitions themselves readable, and keeps the rule in one place.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    if schema.get("type") == "object":
+        props = schema.get("properties") or {}
+        schema["additionalProperties"] = False
+        schema["required"] = list(props)
+        for value in props.values():
+            _strict(value)
+    elif schema.get("type") == "array":
+        _strict(schema.get("items") or {})
+    return schema
+
+
 def _response_schema() -> dict:
+    """The Learning-Plan rows, wrapped in an object.
+
+    The rows are an array, but a strict schema's ROOT must be an object - so
+    they travel under a `sessions` key, which `call_model` unwraps. Groq
+    rejects a top-level array outright.
+    """
     str_array = {"type": "array", "items": {"type": "string"}}
-    return {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "week": {"type": "integer"},
-                "session_no": {"type": "string"},
-                "is_cat": {"type": "boolean"},
-                "session_title": {"type": "string"},
-                "learning_outcomes": str_array,
-                "key_points": str_array,
-                "trainee_activities": str_array,
-                "resources": str_array,
-                "assessments": str_array,
+    return _strict({
+        "type": "object",
+        "properties": {
+            "sessions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "week": {"type": "integer"},
+                        "session_no": {"type": "string"},
+                        "is_cat": {"type": "boolean"},
+                        "session_title": {"type": "string"},
+                        "learning_outcomes": str_array,
+                        "key_points": str_array,
+                        "trainee_activities": str_array,
+                        "resources": str_array,
+                        "assessments": str_array,
+                    },
+                },
             },
-            "required": [
-                "week", "session_no", "session_title", "learning_outcomes",
-                "key_points", "trainee_activities", "resources", "assessments",
-            ],
         },
-    }
+    })
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +201,7 @@ The supplied session titles and Curriculum Learning Key Points are auto-extracte
 
 CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = "-Graded Knowledge.".
 
-TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY the JSON array.
+TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY a JSON object of the form {{"sessions": [ ... ]}}.
 """
 
 
@@ -218,16 +254,27 @@ def _parse_duration(raw: str) -> float:
 def _wait_wanted(resp) -> float:
     """How long the server says to wait, in seconds, uncapped.
 
-    Retry-After first; Groq also puts the same information in its
-    x-ratelimit-reset-* headers, and sends those when Retry-After is absent.
+    Retry-After first. Failing that, Groq's x-ratelimit-* headers - but only
+    the reset of a limit that has actually run out. Every response carries a
+    reset for BOTH the per-minute tokens (seconds away) and the per-day
+    requests (hours away), so taking the longest would read a busy minute as a
+    day's allowance gone.
     """
     headers = getattr(resp, "headers", None) or {}
     wait = _parse_duration(headers.get("Retry-After", ""))
     if wait:
         return wait
-    resets = [_parse_duration(v) for k, v in headers.items()
-              if "ratelimit-reset" in k.lower()]
-    return max([w for w in resets if w] or [0.0])
+    waits = []
+    for key, value in headers.items():
+        low = key.lower()
+        if "ratelimit-remaining" not in low:
+            continue
+        if _parse_duration(value) > 0:            # something left of this one
+            continue
+        reset = headers.get(low.replace("remaining", "reset"), "") or \
+            headers.get(key.replace("remaining", "reset"), "")
+        waits.append(_parse_duration(reset))
+    return max(waits or [0.0])
 
 
 def _is_exhausted(resp) -> bool:
@@ -581,9 +628,15 @@ def _as_list(value) -> List[str]:
             if isinstance(item, (list, tuple, dict)):
                 out.extend(_as_list(item))
             else:
-                t = str(item).strip()
-                if t:
-                    out.append(t)
+                # An element may itself hold several lines: gpt-oss returns a
+                # key point as "HEADING:\n- one\n- two" where another model
+                # returns three elements. The document renders one paragraph
+                # per element, and a newline inside one collapses to a space
+                # in Word, so split here and both read the same.
+                for line in str(item).split("\n"):
+                    t = line.strip()
+                    if t:
+                        out.append(t)
         return out
     return [str(value).strip()]
 
@@ -842,9 +895,14 @@ def _model_rank(name: str) -> tuple:
         if family in lower:
             base = float(i)
             break
-    # within a family, more parameters first: ministral-14b before ministral-3b
+    # within a family, more parameters first (gpt-oss-120b before -20b), then
+    # the newer version (qwen3.8 before qwen3.6)
     size = _RE_MODEL_SIZE.search(lower)
-    return (base, -int(size.group(1)) if size else 0, name)
+    version = _RE_MODEL_VERSION.search(lower)
+    return (base,
+            -int(size.group(1)) if size else 0,
+            -float(version.group(1)) if version else 0.0,
+            name)
 
 
 def _candidate_models(model: str, api_key: str) -> List[str]:
@@ -856,7 +914,10 @@ def _candidate_models(model: str, api_key: str) -> List[str]:
     usable = [m for m in discovered
               if not _RE_SPECIAL_PURPOSE.search(m) and m != model]
     ordered = [model] + sorted(usable, key=_model_rank)
-    return [m for m in ordered if m not in _UNAVAILABLE_MODELS]
+    # Ruling models out must never leave nothing to try: a dropped connection
+    # can rule out the only model we know about AND make discovery come back
+    # empty, and one more attempt beats failing the generation outright.
+    return [m for m in ordered if m not in _UNAVAILABLE_MODELS] or ordered
 
 
 def _answers(model: str, api_key: str) -> bool:
@@ -871,7 +932,8 @@ def _answers(model: str, api_key: str) -> bool:
               "required": ["ok"], "additionalProperties": False}
     try:
         resp = _post(model, api_key, 'Reply {"ok":"yes"}', timeout=PROBE_TIMEOUT,
-                     schema=schema, schema_name="probe", max_tokens=20)
+                     schema=schema, schema_name="probe",
+                     max_tokens=PROBE_TOKENS)
     except requests.RequestException:
         return True                   # a network blip proves nothing; let it try
     if resp.status_code == 200:
@@ -1051,15 +1113,13 @@ def _delivery_steps_schema() -> dict:
                 "trainee_activity": str_array,
                 "learning_check": str_array,
             },
-            "required": ["step_label", "minutes", "trainer_activity",
-                         "trainee_activity", "learning_check"],
         },
     }
 
 
 def _session_plan_schema() -> dict:
     str_array = {"type": "array", "items": {"type": "string"}}
-    return {
+    return _strict({
         "type": "object",
         "properties": {
             "introduction": str_array,
@@ -1069,9 +1129,7 @@ def _session_plan_schema() -> dict:
             "lln_requirements": {"type": "string"},
             "safety_requirements": {"type": "string"},
         },
-        "required": ["introduction", "delivery_steps", "review", "assignment",
-                     "lln_requirements", "safety_requirements"],
-    }
+    })
 
 
 def build_session_plan_prompt(unit: Unit, session: Session,

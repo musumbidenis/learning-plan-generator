@@ -269,18 +269,33 @@ def _refusal_resp():
                               '`json_schema` is not supported for this model"}}')
 
 
-def _exhausted_resp(reset="2h13m0s"):
-    """A 429 for the free tier's DAILY cap: the reset is hours away, so no
-    amount of backing off will clear it."""
+def _exhausted_resp():
+    """A 429 for the free tier's DAILY request cap: none left, reset hours
+    away, so no amount of backing off will clear it."""
     resp = FakeResp(429, text='{"error": {"message": "Rate limit reached"}}')
-    resp.headers = {"x-ratelimit-reset-requests": reset}
+    resp.headers = {"x-ratelimit-limit-requests": "1000",
+                    "x-ratelimit-remaining-requests": "0",
+                    "x-ratelimit-reset-requests": "2h13m0s",
+                    "x-ratelimit-limit-tokens": "8000",
+                    "x-ratelimit-remaining-tokens": "7821",
+                    "x-ratelimit-reset-tokens": "1.342s"}
     return resp
 
 
-def _busy_resp(reset="7.66s"):
-    """A 429 for the per-minute limit, which clears in seconds."""
+def _busy_resp():
+    """A 429 for the per-minute TOKEN limit, which clears in seconds.
+
+    Note the trap in these headers, taken from a real response: the day's
+    request reset is always present and minutes away, so reading the longest
+    reset would call a busy minute a day's allowance gone.
+    """
     resp = FakeResp(429, text='{"error": {"message": "Rate limit reached"}}')
-    resp.headers = {"x-ratelimit-reset-requests": reset}
+    resp.headers = {"x-ratelimit-limit-requests": "1000",
+                    "x-ratelimit-remaining-requests": "998",
+                    "x-ratelimit-reset-requests": "2m52.8s",
+                    "x-ratelimit-limit-tokens": "8000",
+                    "x-ratelimit-remaining-tokens": "0",
+                    "x-ratelimit-reset-tokens": "7.66s"}
     return resp
 
 
@@ -294,9 +309,14 @@ def test_groq_states_a_reset_as_a_duration():
 
 
 def test_a_used_up_allowance_is_told_apart_from_a_busy_minute():
-    """The per-minute limit clears while you wait; the daily one does not."""
+    """The per-minute limit clears while you wait; the daily one does not.
+
+    The reset that matters is the one whose allowance is actually gone - every
+    response carries a reset for both, so the longest is the wrong answer.
+    """
     assert ai_client._is_exhausted(_exhausted_resp())
     assert not ai_client._is_exhausted(_busy_resp())
+    assert ai_client._retry_after(_busy_resp()) == 7.66     # waits the tokens out
     assert not ai_client._is_exhausted(FakeResp(429, text=""))
 
 
@@ -449,6 +469,19 @@ def test_when_nothing_answers_the_error_says_what_to_do(monkeypatch):
     assert "console.groq.com" in message
     assert "GROQ_MODEL" in message
     assert "qwen/qwen3.8-27b" in message          # names what it tried
+
+
+def test_a_multi_line_list_item_becomes_one_paragraph_each():
+    """gpt-oss returns a key point as one string holding a heading and its
+    bullets; another model returns them as separate elements. The document
+    writes one paragraph per element and Word collapses a newline inside one
+    into a space, so they are split apart here and both render the same."""
+    assert ai_client._as_list(["THREAT CATEGORIES:\n- Malware\n- Phishing",
+                               "SECURITY CONTROLS:"]) == \
+        ["THREAT CATEGORIES:", "- Malware", "- Phishing", "SECURITY CONTROLS:"]
+    # a plain list is untouched, and a bare string is still never char-split
+    assert ai_client._as_list(["a", "b"]) == ["a", "b"]
+    assert ai_client._as_list("solo") == ["solo"]
 
 
 def test_the_batch_is_sized_for_the_token_allowance_not_the_model():
@@ -687,5 +720,5 @@ def test_build_prompt_includes_curriculum_only_instruction():
     prompt = ai_client.build_prompt(unit, [session])
 
     assert "Do NOT invent syllabus content; use what is given." in prompt
-    assert "Return ONLY the JSON array." in prompt
+    assert 'Return ONLY a JSON object of the form {"sessions": [ ... ]}.' in prompt
     assert "ASSESSMENT COVERAGE" in prompt
