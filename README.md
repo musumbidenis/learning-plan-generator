@@ -37,24 +37,37 @@ cp .env.example .env        # then add your MISTRAL_API_KEY
 streamlit run app.py
 ```
 
-The API key is sent as a Bearer token to Mistral's chat completions API. Default
-model: `mistral-small-latest`, overridable with `MISTRAL_MODEL`.
+The API key is sent as a Bearer token to Mistral's chat completions API.
+`MISTRAL_MODEL` (default `mistral-small-latest`) says which model to *prefer* —
+which model actually generates is settled at run time, because a workspace can
+be allowed to call a model or not.
 
-**If your Mistral workspace has no paid plan**, `mistral-small-latest` is not
-included in it. Mistral doesn't refuse it outright — it provisions the workspace
-*zero requests a minute* for that model, which arrives as HTTP 429, so waiting
-never clears it. The app recognises a zero allowance (and a 403
-`tier_not_allowed`), and falls back to a model every workspace can call —
-`open-mistral-nemo`, then `ministral-8b-latest` — rather than failing the
-generation. The run log names whichever model answered. Output quality is
-noticeably better on `mistral-small-latest`, so add a plan at
-[console.mistral.ai](https://console.mistral.ai) when you can; a refusal is
-remembered for the life of the process, so restart the app after upgrading.
+**How the model is chosen.** Mistral excludes a model from a plan by
+provisioning the workspace *zero requests a minute* for it — that arrives as
+HTTP 429, so waiting never clears it — or, for some models, a 403
+`tier_not_allowed`. So rather than carry a list of second choices, the app asks
+`/v1/models` what this key can see, orders the candidates most-capable-first,
+and tries them until one answers a real request. The preferred model leads;
+after that it is Mistral's own list, so a model released tomorrow is tried on
+its merits. Code, audio and OCR models are skipped — they would answer, they
+just write poor lesson prose. The choice is settled once per process and named
+in the run log.
 
-A genuine rate limit (an allowance you have simply used up this minute) is waited
-out — 3s, 8s, 15s, 30s, honouring the server's `Retry-After` — instead of
-discarding the batches already generated. 401, and any 403 that isn't about the
-plan, still surface as a clear "key invalid/expired" message.
+A model that answers a probe and then can't complete a real batch is not a model
+that works: two timeouts running, or three dropped connections, and the next
+candidate takes over mid-generation rather than the plan failing. One timeout is
+usually the API being busy, so it is retried on the same model first. A genuine
+rate limit — an allowance you have simply used up this minute — is waited out
+(3s, 8s, 15s, 30s, honouring the server's `Retry-After`) instead of discarding
+the batches already generated. 401, and any 403 that isn't about the plan, still
+surface as a clear "key invalid/expired" message.
+
+Batches are sized for whichever model answers: eight sessions per call for
+`mistral-small` and up, three for a smaller model, which neither fits eight in
+one answer nor finishes them inside the timeout. Output quality does follow the
+model, so add a plan at [console.mistral.ai](https://console.mistral.ai) when you
+can; the verdict is remembered for the life of the process, so restart the app
+after upgrading.
 
 ## The Drive document library (optional)
 

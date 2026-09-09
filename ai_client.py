@@ -29,19 +29,58 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
 DEFAULT_MODEL = "mistral-small-latest"
 
-# Models a Mistral workspace can call without a paid plan, best first. Used
-# only when the configured model turns out not to be included in the plan -
-# a Learning Plan from a smaller model beats no Learning Plan at all.
-FALLBACK_MODELS = ("open-mistral-nemo", "ministral-8b-latest")
+# Which model actually generates is settled at run time (see `resolve_model`):
+# a workspace can be provisioned zero requests a minute for a model its plan
+# excludes, so the configured name is a preference, not a guarantee.
+MISTRAL_MODELS_ENDPOINT = "https://api.mistral.ai/v1/models"
+LIST_MODELS_TIMEOUT = 30
+PROBE_TIMEOUT = 30
+
+# How long to allow one grounded request. A model that has never completed one
+# gets less rope: it is far more likely to be a model that cannot do the job
+# than a slow answer worth waiting for.
+REQUEST_TIMEOUT = 180
+UNPROVEN_TIMEOUT = 90
+# One timeout is usually the API being busy; twice running is the model.
+UNPROVEN_ATTEMPTS = 2
+
+# How many models to work through before giving up on a request.
+MODEL_ATTEMPTS = 4
+
+# Models that have completed a real structured request in this process.
+_PROVEN_MODELS: set = set()
+
+# Ordering for that search, best first, matched as a substring of the model
+# name. It decides only what to TRY first; anything not listed is tried in the
+# middle, so a model released after this line was written still gets a turn.
+_MODEL_FAMILIES = (
+    "mistral-large", "mistral-medium", "magistral-medium", "mistral-small",
+    "magistral-small", "open-mistral-nemo", "ministral", "open-mistral",
+)
+
+# Purpose-built models: they are chat models, and they would answer, but code,
+# audio and OCR models write poor lesson prose. Labs models are not on general
+# release and refuse the request anyway.
+_RE_SPECIAL_PURPOSE = re.compile(
+    r"codestral|mistral-code|voxtral|pixtral|devstral|ocr|embed|moderation"
+    r"|labs-|vibe-cli", re.I)
+
+# 'ministral-14b-latest' -> 14, so the larger model of a family goes first.
+_RE_MODEL_SIZE = re.compile(r"(\d+)\s*b(?:\b|-)")
+
+# The model chosen for this process, once something has answered.
+_RESOLVED_MODEL = ""
 
 # Sessions per grounded Learning-Plan call. A full term (e.g. 24 sessions) does
 # not fit in one JSON response - it gets truncated to invalid JSON - so we
 # generate in batches and concatenate the rows in order.
 LP_SESSION_CHUNK = 8
 
-# A fallback model is both slower and shorter-winded than the default: eight
-# sessions neither fit in one answer nor finish inside the request timeout.
-FALLBACK_SESSION_CHUNK = 3
+# Batch for a smaller model. Below about 20B a model is both slower and
+# shorter-winded: eight sessions neither fit in one answer nor finish inside
+# the request timeout.
+SMALL_MODEL_CHUNK = 3
+SMALL_MODEL_PARAMS = 20
 
 
 class AIError(RuntimeError):
@@ -136,7 +175,15 @@ _MAX_RETRY_AFTER = 60.0
 
 
 class _ModelUnavailable(Exception):
-    """The workspace's plan doesn't include this model. Internal to this module."""
+    """This model can't do the job - excluded by the plan, or unable to answer.
+
+    Internal to this module: the caller moves on to the next candidate.
+    """
+
+    def __init__(self, model: str, reason: str):
+        super().__init__(f"{model}: {reason}")
+        self.model = model
+        self.reason = reason
 
 
 # 'This model is not available in your subscription tier'
@@ -294,40 +341,44 @@ def _emit_progress(progress_cb, message: str) -> None:
 _UNAVAILABLE_MODELS: set = set()
 
 
-def _model_chain(model: str) -> List[str]:
-    """The model to use, then the ones to fall back to if the plan forbids it."""
-    chain = [model] + [m for m in FALLBACK_MODELS if m != model]
-    return [m for m in chain if m not in _UNAVAILABLE_MODELS] or chain
-
-
 def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                schema_name: str, progress_cb=None, temperature: float = 0.2):
-    """One grounded request, on the best model this workspace is allowed to use.
+    """One grounded request, on a model this workspace can actually call.
 
-    A free Mistral workspace is provisioned zero requests a minute for the
-    paid models, so the configured one can be unusable through no fault of the
-    key. Falling back keeps the generation running; the run log names whichever
-    model actually answered.
+    The model is settled before any of this by `resolve_model`. If it stops
+    answering mid-run - a plan changing under us - the refusal is recorded and
+    the next-best model is resolved and used, rather than failing the plan.
     """
-    chain = _model_chain(model)
-    for i, candidate in enumerate(chain):
+    # A model ruled out on an earlier call must not be tried again: every batch
+    # of a Learning Plan comes through here, and re-discovering the same hang
+    # would cost the timeout over and over.
+    if model in _UNAVAILABLE_MODELS:
+        model = resolve_model(api_key, progress_cb=progress_cb)
+
+    tried: List[str] = []
+    last_reason = ""
+    for _ in range(MODEL_ATTEMPTS):
         try:
-            return _chat_json_once(prompt, api_key, candidate, schema,
+            return _chat_json_once(prompt, api_key, model, schema,
                                    schema_name, progress_cb=progress_cb,
                                    temperature=temperature)
-        except _ModelUnavailable:
-            _UNAVAILABLE_MODELS.add(candidate)
-            if i + 1 >= len(chain):
-                break
-            message = (f"AI: {candidate} isn't included in your Mistral plan; "
-                       f"falling back to {chain[i + 1]}")
+        except _ModelUnavailable as e:
+            _UNAVAILABLE_MODELS.add(e.model)
+            tried.append(e.model)
+            last_reason = e.reason
+            message = f"AI: {e.model} {e.reason}; trying another model"
             _emit_progress(progress_cb, message)
             runlog.log(message)
+            try:
+                model = resolve_model(api_key, progress_cb=progress_cb)
+            except AIError:
+                break
 
     raise AIError(
-        "Your Mistral plan doesn't include any of the models tried (%s). Add a "
-        "paid plan at console.mistral.ai to use %s, or set MISTRAL_MODEL in "
-        ".env to a model your plan allows." % (", ".join(chain), model))
+        "No Mistral model completed the request. Tried %s; the last one %s. "
+        "If none of them is included in your plan, add one at "
+        "console.mistral.ai or set MISTRAL_MODEL in .env to a model it allows."
+        % (", ".join(tried) or model, last_reason or "failed"))
 
 
 def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
@@ -342,11 +393,28 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
     _emit_progress(progress_cb, f"AI: trying model {model}")
     net_attempt = 0
     waited = 0
+    timeouts = 0
+    proven = model in _PROVEN_MODELS
     while True:
         try:
             resp = _post(model, api_key, prompt, schema=schema,
-                         schema_name=schema_name, temperature=temperature)
-        except (requests.Timeout, requests.ConnectionError) as e:
+                         schema_name=schema_name, temperature=temperature,
+                         timeout=REQUEST_TIMEOUT if proven else UNPROVEN_TIMEOUT)
+        except requests.Timeout as e:
+            # Some models take a short prompt happily and then never finish a
+            # real one - ministral-14b answers a probe in a second and hangs on
+            # a full batch under the same schema. A model that has never
+            # delivered and keeps timing out is not working; one that has been
+            # delivering all along has hit a blip and deserves the retry.
+            if not proven:
+                timeouts += 1
+                if timeouts >= UNPROVEN_ATTEMPTS:
+                    raise _ModelUnavailable(
+                        model, "didn't answer in time, twice running") from None
+                _emit_progress(progress_cb,
+                               f"AI: {model} didn't answer in time; trying it "
+                               f"once more")
+                continue
             net_attempt += 1
             if net_attempt < 3:
                 _emit_progress(progress_cb,
@@ -355,6 +423,19 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
                 time.sleep(net_attempt * 0.5)
                 continue
             raise AIError(f"{model}: network error: {e}") from e
+        except requests.ConnectionError as e:
+            net_attempt += 1
+            if net_attempt < 3:
+                _emit_progress(progress_cb,
+                               f"AI: transient network issue for {model}, "
+                               f"retrying ({net_attempt}/3)")
+                time.sleep(net_attempt * 0.5)
+                continue
+            # Three dropped connections in a row: move to another model rather
+            # than lose the batches already generated. If the network itself is
+            # down the next model fails the same way, and the caller says so.
+            raise _ModelUnavailable(
+                model, f"couldn't be reached ({type(e).__name__})") from None
         except requests.RequestException as e:
             raise AIError(f"{model}: network error: {e}") from e
 
@@ -365,6 +446,7 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
                 text = _extract_text(payload)
             except AIError as e:
                 raise AIError(f"{model}: {e}") from e
+            _PROVEN_MODELS.add(model)
             try:
                 return json.loads(text)
             except json.JSONDecodeError as e:
@@ -385,7 +467,7 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
         # A model outside the workspace's plan answers 403 'tier_not_allowed';
         # the key itself is fine, so this is not an auth failure.
         if resp.status_code == 403 and _RE_TIER_REFUSAL.search(resp.text or ""):
-            raise _ModelUnavailable(model)
+            raise _ModelUnavailable(model, "isn't included in your Mistral plan")
 
         if resp.status_code in (401, 403):
             raise AIError(
@@ -402,7 +484,8 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
             # than a refusal. Waiting for an allowance that will never come
             # cost a minute and then failed anyway.
             if _has_no_allowance(resp):
-                raise _ModelUnavailable(model)
+                raise _ModelUnavailable(model,
+                                        "isn't included in your Mistral plan")
             if waited < len(_RATE_LIMIT_BACKOFF):
                 pause = _retry_after(resp) or _RATE_LIMIT_BACKOFF[waited]
                 waited += 1
@@ -683,35 +766,133 @@ def _format_curriculum_keypoints(points: List[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Public orchestration
 # --------------------------------------------------------------------------- #
-# Models already probed this process, available or not.
-_PROBED_MODELS: set = set()
+def list_chat_models(api_key: str) -> List[str]:
+    """Every chat model this key can see, one name per model.
 
-
-def _probe_model(model: str, api_key: str, progress_cb=None) -> None:
-    """Find out cheaply whether the plan includes `model`, before batching.
-
-    Discovering it on the first real batch is expensive: that request carries a
-    full eight-session prompt, and if the fallback then answers it, the batch
-    was sized for a model that never ran. One throwaway token settles it.
+    Mistral lists each model several times over - `mistral-medium-latest` and
+    eight aliases of it - so the family is collapsed to a single name, and the
+    '-latest' one is preferred because it survives a version bump.
     """
-    if model in _PROBED_MODELS or model in _UNAVAILABLE_MODELS:
-        return
-    _PROBED_MODELS.add(model)
     try:
-        resp = _post(model, api_key, "ok", timeout=30, max_tokens=1,
-                     structured=False)
+        resp = requests.get(MISTRAL_MODELS_ENDPOINT,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            timeout=LIST_MODELS_TIMEOUT)
+    except requests.RequestException as e:
+        raise AIError(f"Couldn't list the Mistral models: {e}") from None
+    if resp.status_code != 200:
+        raise AIError(f"Couldn't list the Mistral models (HTTP "
+                      f"{resp.status_code}). {resp.text[:200]}")
+
+    names: List[str] = []
+    seen: set = set()
+    for entry in resp.json().get("data", []):
+        if not (entry.get("capabilities") or {}).get("completion_chat"):
+            continue
+        family = frozenset([entry.get("id", "")]
+                           + list(entry.get("aliases") or []))
+        if not family or family in seen:
+            continue
+        seen.add(family)
+        names.append(sorted(family,
+                            key=lambda n: (not n.endswith("-latest"), len(n)))[0])
+    return names
+
+
+def _model_rank(name: str) -> tuple:
+    """Sort key: how well a model is likely to write a Learning Plan.
+
+    Not a quality league table - just enough ordering to try the capable
+    models first. A model the list knows nothing about sorts in the middle,
+    ahead of the small ones, so a newly released model is tried on its own
+    merits rather than ignored.
+    """
+    lower = (name or "").lower()
+    base = float(len(_MODEL_FAMILIES)) / 2
+    for i, family in enumerate(_MODEL_FAMILIES):
+        if family in lower:
+            base = float(i)
+            break
+    # within a family, more parameters first: ministral-14b before ministral-3b
+    size = _RE_MODEL_SIZE.search(lower)
+    return (base, -int(size.group(1)) if size else 0, name)
+
+
+def _candidate_models(model: str, api_key: str) -> List[str]:
+    """The configured model first, then every other one, most capable first."""
+    try:
+        discovered = list_chat_models(api_key)
+    except AIError:
+        discovered = []               # can't list: the configured model is all we have
+    usable = [m for m in discovered
+              if not _RE_SPECIAL_PURPOSE.search(m) and m != model]
+    ordered = [model] + sorted(usable, key=_model_rank)
+    return [m for m in ordered if m not in _UNAVAILABLE_MODELS]
+
+
+def _answers(model: str, api_key: str) -> bool:
+    """Whether `model` will take a structured request from this workspace.
+
+    The probe uses JSON-schema mode because every real call does: a model that
+    chats happily but rejects the schema is no use here, and finding that out
+    on the first batch would waste a full eight-session prompt.
+    """
+    schema = {"type": "object", "properties": {"ok": {"type": "string"}},
+              "required": ["ok"], "additionalProperties": False}
+    try:
+        resp = _post(model, api_key, 'Reply {"ok":"yes"}', timeout=PROBE_TIMEOUT,
+                     schema=schema, schema_name="probe", max_tokens=20)
     except requests.RequestException:
-        return                        # a network blip proves nothing about the plan
-    if resp.status_code == 429 and _has_no_allowance(resp):
-        pass
-    elif resp.status_code == 403 and _RE_TIER_REFUSAL.search(resp.text or ""):
-        pass
-    else:
-        return
+        return True                   # a network blip proves nothing; let it try
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 429 and not _has_no_allowance(resp):
+        return True                   # a busy minute, not a plan boundary
     _UNAVAILABLE_MODELS.add(model)
-    message = f"AI: {model} isn't included in your Mistral plan"
-    _emit_progress(progress_cb, message)
-    runlog.log(message)
+    return False
+
+
+def resolve_model(api_key: str, model: Optional[str] = None,
+                  progress_cb=None) -> str:
+    """The model to generate with: the configured one, or the best that answers.
+
+    Mistral gates a model the workspace's plan excludes by allowing it zero
+    requests a minute, so 'configured' and 'usable' are different questions.
+    Rather than carry a hard-coded list of second choices, ask the API what
+    exists and try them in order until one answers. Settled once per process.
+    """
+    global _RESOLVED_MODEL
+    model = model or load_model_name()
+    if _RESOLVED_MODEL and _RESOLVED_MODEL not in _UNAVAILABLE_MODELS:
+        return _RESOLVED_MODEL
+
+    candidates = _candidate_models(model, api_key)
+    for candidate in candidates:
+        if not _answers(candidate, api_key):
+            continue
+        if candidate != model:
+            message = (f"AI: {model} isn't available on your Mistral plan; "
+                       f"generating with {candidate}")
+            _emit_progress(progress_cb, message)
+            runlog.log(message)
+        _RESOLVED_MODEL = candidate
+        return candidate
+
+    raise AIError(
+        "No Mistral model your key can call will take a Learning Plan request. "
+        "Tried %s. Add a paid plan at console.mistral.ai, or set MISTRAL_MODEL "
+        "in .env to a model your plan allows."
+        % (", ".join(candidates) or model))
+
+
+def batch_size_for(model: str) -> int:
+    """How many sessions to ask for at once, given the model's size."""
+    size = _RE_MODEL_SIZE.search((model or "").lower())
+    if size and int(size.group(1)) < SMALL_MODEL_PARAMS:
+        return SMALL_MODEL_CHUNK
+    # 'nemo' and the small-family models carry no size in their name
+    if _model_rank(model)[0] >= _MODEL_FAMILIES.index("open-mistral-nemo"):
+        return SMALL_MODEL_CHUNK
+    return LP_SESSION_CHUNK
 
 
 def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
@@ -746,10 +927,11 @@ def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
 
 def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
                       model: Optional[str] = None, progress_cb=None) -> List[Session]:
-    """Run the single grounded AI call and merge the result into the skeleton.
+    """Run the grounded AI calls and merge the result into the skeleton.
 
-    The model defaults to `mistral-large-latest` unless the caller pins a
-    different one via `model` or `MISTRAL_MODEL`.
+    The model is `model` or `MISTRAL_MODEL` where the workspace's plan allows
+    it, and otherwise the most capable model that does answer - see
+    `resolve_model`.
     """
     # Key semantics: api_key=None  -> use the configured (.env / hard-coded) key
     if api_key is None:
@@ -757,19 +939,14 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     if not api_key:
         raise AIError("No Mistral API key available.")
 
-    # Resolve the model unless the caller pinned one.
-    if model is None:
-        model = load_model_name()
+    model = resolve_model(api_key, model, progress_cb)
     runlog.log(f"AI: model = {model}")
 
     # Generate in batches so a long term's JSON never overflows the token limit
     # (a single 24-session response gets truncated -> invalid JSON). Rows are
-    # concatenated in order, preserving alignment with the deterministic skeleton.
-    # Size the batches for the model that will actually answer them.
-    _probe_model(model, api_key, progress_cb)
-    answering = _model_chain(model)[0]
-    size = FALLBACK_SESSION_CHUNK if answering in FALLBACK_MODELS         else LP_SESSION_CHUNK
-
+    # concatenated in order, preserving alignment with the deterministic
+    # skeleton, and sized for the model that will actually answer them.
+    size = batch_size_for(model)
     chunks = [sessions[i:i + size] for i in range(0, len(sessions), size)]
     ai_rows: List[dict] = []
     for ci, chunk in enumerate(chunks, start=1):
@@ -777,6 +954,9 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
         _emit_progress(progress_cb,
                        f"AI: generating sessions {first}-{last} of {len(sessions)} "
                        f"(batch {ci}/{len(chunks)})")
+        # a batch may have moved us to another model; the rest follow it there
+        model = resolve_model(api_key, model if model not in _UNAVAILABLE_MODELS
+                              else None, progress_cb)
         ai_rows.extend(_generate_batch(unit, chunk, api_key, model, progress_cb))
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
@@ -801,10 +981,9 @@ def regenerate_learning_plan_session(unit: Unit, sessions: List[Session], idx: i
 
     if api_key is None:
         api_key = load_api_key()
-    if model is None:
-        model = load_model_name()
     if not api_key:
         raise AIError("No Mistral API key available.")
+    model = resolve_model(api_key, model, progress_cb)
 
     prompt = build_prompt(unit, [session])
     _emit_progress(progress_cb, f"Regenerating session {session.session_no}")
@@ -1137,8 +1316,6 @@ def generate_session_plan(unit: Unit, session: Session, inputs: PlanInputs, *,
     """
     if api_key is None:
         api_key = load_api_key()
-    if model is None:
-        model = load_model_name()
 
     if not api_key:
         _emit_progress(progress_cb, "Session plan: no API key - building offline.")
@@ -1147,6 +1324,7 @@ def generate_session_plan(unit: Unit, session: Session, inputs: PlanInputs, *,
             trainer_number=trainer_number, session_date=session_date,
             session_time=session_time, duration_minutes=duration_minutes)
 
+    model = resolve_model(api_key, model, progress_cb)
     prompt = build_session_plan_prompt(unit, session, duration_minutes)
     _emit_progress(progress_cb, "Session plan: prompt prepared")
     ai = _chat_json(prompt, api_key, model, _session_plan_schema(),
