@@ -12,7 +12,7 @@ import requests
 import json
 
 import ai_client
-from ai_client import AIError, _extract_text, call_mistral
+from ai_client import AIError, _extract_text, call_model
 from models import Session, Unit
 
 
@@ -33,8 +33,8 @@ def _ok_payload(text):
 # The fixture below stubs discovery out; this keeps a handle on the real one.
 REAL_LIST_CHAT_MODELS = ai_client.list_chat_models
 
-DISCOVERED = ["mistral-medium-latest", "mistral-small-latest",
-              "ministral-14b-latest", "ministral-8b-latest", "codestral-latest"]
+DISCOVERED = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+              "llama-3.3-70b-versatile", "whisper-large-v3"]
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +42,7 @@ def offline(monkeypatch):
     """Nothing in this module may touch the API - model discovery included.
 
     `generate_sessions` asks Mistral which models exist and probes one before
-    generating. Tests that stub only `call_mistral` would otherwise have let
+    generating. Tests that stub only `call_model` would otherwise have let
     that out onto the network.
     """
     monkeypatch.setattr(ai_client, "_post",
@@ -80,34 +80,34 @@ def test_extract_text_surfaces_finish_reason():
 
 
 # --------------------------------------------------------------------------- #
-# call_mistral behaviour
+# call_model behaviour
 # --------------------------------------------------------------------------- #
-def test_call_mistral_raises_aierror_on_empty_choice(monkeypatch):
+def test_call_model_raises_aierror_on_empty_choice(monkeypatch):
     monkeypatch.setattr(
         ai_client, "_post",
         lambda model, api_key, prompt, timeout=180, **kwargs:
             FakeResp(200, {"choices": [{"finish_reason": "content_filter"}]}))
     with pytest.raises(AIError):
-        call_mistral("prompt", "key", "m1")
+        call_model("prompt", "key", "m1")
 
 
-def test_call_mistral_raises_aierror_on_invalid_json(monkeypatch):
+def test_call_model_raises_aierror_on_invalid_json(monkeypatch):
     monkeypatch.setattr(
         ai_client, "_post",
         lambda model, api_key, prompt, timeout=180, **kwargs:
             FakeResp(200, _ok_payload("not json at all")))
     with pytest.raises(AIError):
-        call_mistral("p", "k", "m1")
+        call_model("p", "k", "m1")
 
 
-def test_call_mistral_aborts_immediately_on_403(monkeypatch):
+def test_call_model_aborts_immediately_on_403(monkeypatch):
     """A 403 is a key problem, not a model problem."""
     def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         return FakeResp(403, text="PERMISSION_DENIED")
 
     monkeypatch.setattr(ai_client, "_post", fake_post)
     with pytest.raises(AIError):
-        call_mistral("p", "k", "m1")
+        call_model("p", "k", "m1")
 
 
 def test_one_timeout_does_not_condemn_a_model(monkeypatch):
@@ -124,7 +124,7 @@ def test_one_timeout_does_not_condemn_a_model(monkeypatch):
     monkeypatch.setattr(ai_client, "_post", fake_post)
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
 
-    assert call_mistral("p", "k", "ministral-8b-latest") == []
+    assert call_model("p", "k", "ministral-8b-latest") == []
     assert seen == ["ministral-8b-latest", "ministral-8b-latest"]
     assert "ministral-8b-latest" not in ai_client._UNAVAILABLE_MODELS
 
@@ -143,7 +143,7 @@ def test_a_proven_model_retries_a_transient_timeout(monkeypatch):
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
     monkeypatch.setattr(ai_client, "_PROVEN_MODELS", {"m1"})
 
-    assert call_mistral("p", "k", "m1") == []
+    assert call_model("p", "k", "m1") == []
     assert attempts == ["m1", "m1", "m1"]
 
 
@@ -161,7 +161,7 @@ def test_a_model_that_has_never_delivered_and_hangs_is_replaced(monkeypatch):
     monkeypatch.setattr(ai_client, "_post", fake_post)
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
 
-    assert call_mistral("p", "k", "mistral-small-latest") == []
+    assert call_model("p", "k", "mistral-small-latest") == []
     # tried it twice - one timeout is usually the API being busy - then moved on
     assert [m for m, _ in seen].count("mistral-small-latest") ==         ai_client.UNPROVEN_ATTEMPTS
     # and gave the unproven model less rope than a proven one gets
@@ -169,7 +169,7 @@ def test_a_model_that_has_never_delivered_and_hangs_is_replaced(monkeypatch):
     assert seen[-1][0] != "mistral-small-latest"
 
 
-def test_call_mistral_retries_connection_reset(monkeypatch):
+def test_call_model_retries_connection_reset(monkeypatch):
     attempts = []
 
     def fake_post(model, api_key, prompt, timeout=180, **kwargs):
@@ -184,7 +184,7 @@ def test_call_mistral_retries_connection_reset(monkeypatch):
     monkeypatch.setattr(ai_client, "_post", fake_post)
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
 
-    assert call_mistral("p", "k", "m1") == []
+    assert call_model("p", "k", "m1") == []
     assert len(attempts) == 3
 
 
@@ -207,7 +207,7 @@ def test_a_rate_limit_is_waited_out_rather_than_failing_the_generation(monkeypat
     monkeypatch.setattr(ai_client, "_post", fake_post)
     monkeypatch.setattr(ai_client.time, "sleep", slept.append)
 
-    assert call_mistral("p", "k", "m1") == []
+    assert call_model("p", "k", "m1") == []
     assert len(attempts) == 3
     assert slept == list(ai_client._RATE_LIMIT_BACKOFF[:2])
 
@@ -227,7 +227,7 @@ def test_the_servers_own_retry_after_wins_over_our_backoff(monkeypatch):
     monkeypatch.setattr(ai_client, "_post", fake_post)
     monkeypatch.setattr(ai_client.time, "sleep", slept.append)
 
-    assert call_mistral("p", "k", "m1") == []
+    assert call_model("p", "k", "m1") == []
     assert slept == [7.0]
 
 
@@ -253,98 +253,121 @@ def test_a_persistent_rate_limit_gives_up_with_something_actionable(monkeypatch)
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
 
     with pytest.raises(AIError) as excinfo:
-        call_mistral("p", "k", "m1")
+        call_model("p", "k", "m1")
     message = str(excinfo.value)
     assert "429" in message
     assert "minute" in message.lower()
 
 
 # --------------------------------------------------------------------------- #
-# A model the workspace's plan doesn't include
+# A model this account can't use
 # --------------------------------------------------------------------------- #
-def _no_allowance_resp():
-    """What Mistral sends for a model a free workspace may not call: a rate
-    limit whose allowance is zero, which no amount of waiting will clear."""
-    resp = FakeResp(429, text='{"message": "Rate limit exceeded"}')
-    resp.headers = {"x-ratelimit-limit-req-minute": "0",
-                    "x-ratelimit-remaining-req-minute": "0"}
+def _refusal_resp():
+    """What Groq sends for a model that won't take the request: a 400 naming
+    the reason. The key is fine, so this is not an auth failure."""
+    return FakeResp(400, text='{"error": {"message": "response_format '
+                              '`json_schema` is not supported for this model"}}')
+
+
+def _exhausted_resp(reset="2h13m0s"):
+    """A 429 for the free tier's DAILY cap: the reset is hours away, so no
+    amount of backing off will clear it."""
+    resp = FakeResp(429, text='{"error": {"message": "Rate limit reached"}}')
+    resp.headers = {"x-ratelimit-reset-requests": reset}
     return resp
 
 
-def test_a_zero_allowance_is_told_apart_from_a_busy_minute():
-    assert ai_client._has_no_allowance(_no_allowance_resp())
-    busy = FakeResp(429, text="")
-    busy.headers = {"x-ratelimit-limit-req-minute": "188",
-                    "x-ratelimit-remaining-req-minute": "0"}
-    assert not ai_client._has_no_allowance(busy)
-    assert not ai_client._has_no_allowance(FakeResp(429, text=""))
+def _busy_resp(reset="7.66s"):
+    """A 429 for the per-minute limit, which clears in seconds."""
+    resp = FakeResp(429, text='{"error": {"message": "Rate limit reached"}}')
+    resp.headers = {"x-ratelimit-reset-requests": reset}
+    return resp
 
 
-def _plan_allows(*allowed):
-    """A fake _post where only `allowed` models answer; the rest are excluded
-    from the plan the way Mistral does it - zero requests a minute."""
+def test_groq_states_a_reset_as_a_duration():
+    assert ai_client._parse_duration("7.66s") == 7.66
+    assert ai_client._parse_duration("2m59.56s") == 179.56
+    assert ai_client._parse_duration("1h2m3.5s") == 3723.5
+    assert ai_client._parse_duration("90") == 90.0          # plain seconds
+    assert ai_client._parse_duration("") == 0.0
+    assert ai_client._parse_duration("soon") == 0.0
+
+
+def test_a_used_up_allowance_is_told_apart_from_a_busy_minute():
+    """The per-minute limit clears while you wait; the daily one does not."""
+    assert ai_client._is_exhausted(_exhausted_resp())
+    assert not ai_client._is_exhausted(_busy_resp())
+    assert not ai_client._is_exhausted(FakeResp(429, text=""))
+
+
+def test_a_retry_after_header_still_wins_when_present():
+    resp = FakeResp(429, text="")
+    resp.headers = {"Retry-After": "7", "x-ratelimit-reset-requests": "2h"}
+    assert ai_client._retry_after(resp) == 7.0
+
+
+def _account_allows(*allowed):
+    """A fake _post where only `allowed` models answer; the rest refuse."""
     def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         if model in allowed:
             return FakeResp(200, _ok_payload('{"ok": "yes"}'))
-        return _no_allowance_resp()
+        return _refusal_resp()
     return fake_post
 
 
-def test_the_configured_model_is_used_when_the_plan_allows_it(monkeypatch):
-    monkeypatch.setattr(ai_client, "_post", _plan_allows("mistral-small-latest"))
-    assert ai_client.resolve_model("k", "mistral-small-latest") ==         "mistral-small-latest"
+def test_the_configured_model_is_used_when_the_account_can_call_it(monkeypatch):
+    monkeypatch.setattr(ai_client, "_post", _account_allows("openai/gpt-oss-120b"))
+    assert ai_client.resolve_model("k", "openai/gpt-oss-120b") == \
+        "openai/gpt-oss-120b"
 
 
-def test_a_model_the_plan_excludes_gives_way_to_one_that_answers(monkeypatch):
-    """Mistral allows an excluded model zero requests a minute, so waiting can
-    never clear it - the only way on is a model the plan does include."""
-    monkeypatch.setattr(ai_client, "_post", _plan_allows("ministral-14b-latest"))
-    assert ai_client.resolve_model("k", "mistral-small-latest") ==         "ministral-14b-latest"
+def test_a_model_that_refuses_the_schema_gives_way_to_one_that_takes_it(monkeypatch):
+    """Only some Groq models do strict constrained decoding; the rest answer
+    400 to the probe and rule themselves out."""
+    monkeypatch.setattr(ai_client, "_post", _account_allows("qwen/qwen3.8-27b"))
+    assert ai_client.resolve_model("k", "openai/gpt-oss-120b") == "qwen/qwen3.8-27b"
 
 
 def test_the_candidates_come_from_the_api_most_capable_first(monkeypatch):
     """The list is whatever the key can see, not a list written in here."""
-    order = ai_client._candidate_models("mistral-small-latest", "k")
-    assert order[0] == "mistral-small-latest"          # the configured one leads
-    assert order[1:] == ["mistral-medium-latest", "ministral-14b-latest",
-                         "ministral-8b-latest"]
+    order = ai_client._candidate_models("openai/gpt-oss-120b", "k")
+    assert order[0] == "openai/gpt-oss-120b"           # the configured one leads
+    assert order[1:] == ["openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+                         "llama-3.3-70b-versatile"]
 
 
-def test_a_code_model_is_never_chosen_to_write_lesson_content(monkeypatch):
-    """codestral answers perfectly well; it just writes poor lesson prose."""
-    assert "codestral-latest" not in ai_client._candidate_models("m", "k")
-    for name in ("voxtral-small-latest", "codestral-2508", "labs-leanstral-1-5",
-                 "mistral-ocr-latest", "mistral-vibe-cli-fast"):
+def test_a_speech_or_safety_model_is_never_chosen_to_write_lesson_content():
+    """They answer perfectly well; they just write poor lesson prose."""
+    assert "whisper-large-v3" not in ai_client._candidate_models("m", "k")
+    for name in ("whisper-large-v3-turbo", "meta-llama/llama-prompt-guard-2-86m",
+                 "openai/gpt-oss-safeguard-20b", "canopylabs/orpheus-v1-english",
+                 "text-embedding-3-small"):
         assert ai_client._RE_SPECIAL_PURPOSE.search(name), name
 
 
 def test_a_model_this_code_has_never_heard_of_is_still_tried(monkeypatch):
-    """Ranked in the middle - ahead of the small models, behind the big ones -
-    so a model released after this was written gets its turn."""
+    """Ranked in the middle - ahead of the small ones, behind the big ones - so
+    a model released after this was written gets its turn."""
     monkeypatch.setattr(ai_client, "list_chat_models",
-                        lambda key: ["ministral-8b-latest", "mistral-zeta-latest",
-                                     "mistral-medium-latest"])
-    order = ai_client._candidate_models("mistral-small-latest", "k")
-    assert order == ["mistral-small-latest", "mistral-medium-latest",
-                     "mistral-zeta-latest", "ministral-8b-latest"]
+                        lambda key: ["llama-3.3-70b-versatile", "moonshot/kimi-k2",
+                                     "openai/gpt-oss-20b"])
+    order = ai_client._candidate_models("openai/gpt-oss-120b", "k")
+    assert order == ["openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                     "llama-3.3-70b-versatile", "moonshot/kimi-k2"]
 
 
 def test_the_bigger_model_of_a_family_goes_first():
-    ranked = sorted(["ministral-3b-latest", "ministral-14b-latest",
-                     "ministral-8b-latest"], key=ai_client._model_rank)
-    assert ranked == ["ministral-14b-latest", "ministral-8b-latest",
-                      "ministral-3b-latest"]
+    ranked = sorted(["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
+                    key=ai_client._model_rank)
+    assert ranked == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
 
-def test_aliases_of_one_model_are_not_eight_candidates(monkeypatch):
-    """Mistral lists mistral-medium-latest under nine names."""
+def test_a_retired_model_is_not_offered_as_a_candidate(monkeypatch):
+    """Groq's listing is flat, with `active` saying what can still be called."""
     payload = {"data": [
-        {"id": "mistral-medium-2604", "capabilities": {"completion_chat": True},
-         "aliases": ["mistral-medium-latest", "mistral-medium"]},
-        {"id": "mistral-medium-latest", "capabilities": {"completion_chat": True},
-         "aliases": ["mistral-medium-2604", "mistral-medium"]},
-        {"id": "mistral-embed", "capabilities": {"completion_chat": False},
-         "aliases": []},
+        {"id": "openai/gpt-oss-120b", "object": "model", "active": True},
+        {"id": "llama-3.1-70b-versatile", "object": "model", "active": False},
+        {"id": "qwen/qwen3.8-27b", "object": "model"},        # absent = callable
     ]}
 
     class Resp:
@@ -354,16 +377,33 @@ def test_aliases_of_one_model_are_not_eight_candidates(monkeypatch):
             return payload
 
     monkeypatch.setattr(ai_client.requests, "get", lambda *a, **k: Resp())
-    assert REAL_LIST_CHAT_MODELS("k") == ["mistral-medium-latest"]
+    assert REAL_LIST_CHAT_MODELS("k") == ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
 
 
 def test_a_busy_minute_does_not_disqualify_a_model(monkeypatch):
-    """A used-up allowance is not the same as no allowance."""
-    busy = FakeResp(429, text="Rate limit exceeded")
-    busy.headers = {"x-ratelimit-limit-req-minute": "188",
-                    "x-ratelimit-remaining-req-minute": "0"}
-    monkeypatch.setattr(ai_client, "_post", lambda *a, **k: busy)
-    assert ai_client.resolve_model("k", "mistral-small-latest") ==         "mistral-small-latest"
+    """A minute's tokens used up is not the same as the day's requests used up."""
+    monkeypatch.setattr(ai_client, "_post", lambda *a, **k: _busy_resp())
+    assert ai_client.resolve_model("k", "openai/gpt-oss-120b") == \
+        "openai/gpt-oss-120b"
+
+
+def test_a_daily_cap_moves_to_a_model_with_its_own_allowance(monkeypatch):
+    """The free tier's 1,000 a day is per model, so another model is the way on
+    - and waiting hours for the reset is not."""
+    slept = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        if model == "openai/gpt-oss-120b":
+            return _exhausted_resp()
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", slept.append)
+    monkeypatch.setattr(ai_client, "_RESOLVED_MODEL", "openai/gpt-oss-120b")
+
+    assert call_model("p", "k", "openai/gpt-oss-120b") == []
+    assert slept == []                    # no point waiting out a daily cap
+    assert "openai/gpt-oss-120b" in ai_client._UNAVAILABLE_MODELS
 
 
 def test_the_model_is_settled_once_for_the_process(monkeypatch):
@@ -372,59 +412,51 @@ def test_the_model_is_settled_once_for_the_process(monkeypatch):
 
     def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         probes.append(model)
-        return _plan_allows("ministral-14b-latest")(model, api_key, prompt)
+        return _account_allows("qwen/qwen3.8-27b")(model, api_key, prompt)
 
     monkeypatch.setattr(ai_client, "_post", fake_post)
-    first = ai_client.resolve_model("k", "mistral-small-latest")
+    first = ai_client.resolve_model("k", "openai/gpt-oss-120b")
     before = len(probes)
-    second = ai_client.resolve_model("k", "mistral-small-latest")
-    assert first == second == "ministral-14b-latest"
+    second = ai_client.resolve_model("k", "openai/gpt-oss-120b")
+    assert first == second == "qwen/qwen3.8-27b"
     assert len(probes) == before          # settled, not asked again
 
 
 def test_a_model_that_stops_answering_mid_run_is_replaced(monkeypatch):
-    """The plan can change under a running generation."""
+    """An allowance can run out under a running generation."""
     calls = []
 
     def fake_post(model, api_key, prompt, timeout=180, **kwargs):
         calls.append(model)
-        if model == "mistral-small-latest":
-            return _no_allowance_resp()
+        if model == "openai/gpt-oss-120b":
+            return _refusal_resp()
         return FakeResp(200, _ok_payload("[]"))
 
     monkeypatch.setattr(ai_client, "_post", fake_post)
-    monkeypatch.setattr(ai_client, "_RESOLVED_MODEL", "mistral-small-latest")
-    assert call_mistral("p", "k", "mistral-small-latest") == []
-    assert calls[0] == "mistral-small-latest"
-    assert calls[-1] != "mistral-small-latest"
+    monkeypatch.setattr(ai_client, "_RESOLVED_MODEL", "openai/gpt-oss-120b")
+    assert call_model("p", "k", "openai/gpt-oss-120b") == []
+    assert calls[0] == "openai/gpt-oss-120b"
+    assert calls[-1] != "openai/gpt-oss-120b"
 
 
 def test_when_nothing_answers_the_error_says_what_to_do(monkeypatch):
-    monkeypatch.setattr(ai_client, "_post", _plan_allows())      # nothing answers
+    monkeypatch.setattr(ai_client, "_post", _account_allows())   # nothing answers
     monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
 
     with pytest.raises(AIError) as excinfo:
-        ai_client.resolve_model("k", "mistral-small-latest")
+        ai_client.resolve_model("k", "openai/gpt-oss-120b")
     message = str(excinfo.value)
-    assert "console.mistral.ai" in message
-    assert "MISTRAL_MODEL" in message
-    assert "ministral-14b-latest" in message      # names what it tried
+    assert "console.groq.com" in message
+    assert "GROQ_MODEL" in message
+    assert "qwen/qwen3.8-27b" in message          # names what it tried
 
 
-def test_batches_are_sized_for_the_model_that_answers():
-    assert ai_client.batch_size_for("mistral-small-latest") ==         ai_client.LP_SESSION_CHUNK
-    assert ai_client.batch_size_for("mistral-medium-latest") ==         ai_client.LP_SESSION_CHUNK
-    for small in ("ministral-14b-latest", "ministral-8b-latest",
-                  "open-mistral-nemo"):
-        assert ai_client.batch_size_for(small) == ai_client.SMALL_MODEL_CHUNK
-
-
-def test_a_real_auth_failure_is_still_reported_as_one(monkeypatch):
-    """A 403 that isn't about the tier must not be read as a missing model."""
-    monkeypatch.setattr(ai_client, "_post",
-                        lambda *a, **k: FakeResp(403, text="Unauthorized"))
-    with pytest.raises(AIError, match="auth failed"):
-        call_mistral("p", "k", "m1")
+def test_the_batch_is_sized_for_the_token_allowance_not_the_model():
+    """8,000 tokens a minute is the ceiling, and a bigger model doesn't raise it."""
+    for model in ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"):
+        assert ai_client.batch_size_for(model) == ai_client.LP_SESSION_CHUNK
+    assert ai_client.LP_SESSION_CHUNK == 4
+    assert ai_client.MAX_OUTPUT_TOKENS == 6000
 
 
 # --------------------------------------------------------------------------- #
@@ -461,7 +493,7 @@ def test_chat_json_salvages_truncated_learning_plan(monkeypatch):
         ai_client, "_post",
         lambda model, api_key, prompt, timeout=180, **kwargs:
             FakeResp(200, _ok_payload(truncated)))
-    rows = call_mistral("p", "k", "m1")
+    rows = call_model("p", "k", "m1")
     assert [r["week"] for r in rows] == [1, 2]
 
 
@@ -560,7 +592,7 @@ def test_cat_content_is_scoped_to_sessions_since_previous_cat():
 
 
 def test_generate_sessions_batches_long_terms(monkeypatch):
-    """A 20-session term must be split into ceil(20/8)=3 grounded calls."""
+    """A 20-session term must be split into ceil(20/4)=5 grounded calls."""
     unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
@@ -568,10 +600,10 @@ def test_generate_sessions_batches_long_terms(monkeypatch):
                         key_points=["KEY POINT"]) for i in range(20)]
     calls = []
     monkeypatch.setattr(
-        ai_client, "call_mistral",
+        ai_client, "call_model",
         lambda prompt, api_key, model, progress_cb=None: (calls.append(1) or []))
     out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
-    assert len(calls) == 3                 # 3 batches for 20 sessions at chunk 8
+    assert len(calls) == 5                 # 5 batches for 20 sessions at chunk 4
     assert len(out) == 20                  # every session still present (backfilled)
 
 
@@ -591,7 +623,7 @@ def test_a_short_batch_is_retried_smaller_and_never_slides_the_rest(monkeypatch)
         sizes.append(asked)
         return [{"session_title": f"row {i}"} for i in range(min(asked, 3))]
 
-    monkeypatch.setattr(ai_client, "call_mistral", fake_call)
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
     out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
 
     assert len(out) == 16
@@ -607,40 +639,20 @@ def test_a_batch_that_returns_nothing_is_not_split(monkeypatch):
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
                         session_title=f"S{i}", pcs=["1.1 do it"],
-                        key_points=["KEY POINT"]) for i in range(8)]
+                        key_points=["KEY POINT"])
+                for i in range(ai_client.LP_SESSION_CHUNK)]
     calls = []
     monkeypatch.setattr(
-        ai_client, "call_mistral",
+        ai_client, "call_model",
         lambda prompt, api_key, model, progress_cb=None: (calls.append(1) or []))
     out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
     assert len(calls) == 1
-    assert len(out) == 8
+    assert len(out) == ai_client.LP_SESSION_CHUNK
 
 
-def test_the_batches_are_sized_for_the_model_that_will_answer(monkeypatch):
-    """Discovering the refusal on the first real batch wasted a full
-    eight-session prompt, and sized that batch for a model that never ran."""
-    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
-                assessment_methods=["Observation"])
-    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
-                        session_title=f"S{i}", pcs=["1.1 do it"],
-                        key_points=["KEY POINT"]) for i in range(9)]
-    batch_sizes = []
-
-    monkeypatch.setattr(ai_client, "_post", _plan_allows("ministral-14b-latest"))
-
-    def fake_call(prompt, api_key, model, progress_cb=None):
-        asked = prompt.count('"session_title"')
-        batch_sizes.append(asked)
-        return [{"session_title": f"row {i}"} for i in range(asked)]
-
-    monkeypatch.setattr(ai_client, "call_mistral", fake_call)
-    ai_client.generate_sessions(unit, sessions, api_key="k",
-                                model="mistral-small-latest")
-    assert batch_sizes == [3, 3, 3]        # not [8, 1]
-
-
-def test_a_usable_model_keeps_the_full_batch_size(monkeypatch):
+def test_a_term_is_asked_for_in_batches_of_four(monkeypatch):
+    """Nine sessions go out as 4 + 4 + 1, never as one prompt: Groq's ceiling is
+    8,000 tokens a minute and one big batch spends it all at once."""
     unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
@@ -648,19 +660,19 @@ def test_a_usable_model_keeps_the_full_batch_size(monkeypatch):
                         key_points=["KEY POINT"]) for i in range(9)]
     sizes = []
 
-    monkeypatch.setattr(ai_client, "_post",
-                        lambda *a, **k: FakeResp(200, _ok_payload("[]")))
-    monkeypatch.setattr(
-        ai_client, "call_mistral",
-        lambda prompt, api_key, model, progress_cb=None:
-            (sizes.append(prompt.count('"session_title"')) or []))
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        asked = prompt.count('"session_title"')
+        sizes.append(asked)
+        return [{"session_title": f"row {i}"} for i in range(asked)]
+
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
     ai_client.generate_sessions(unit, sessions, api_key="k",
-                                model="mistral-small-latest")
-    assert sizes == [8, 1]
+                                model="openai/gpt-oss-120b")
+    assert sizes == [4, 4, 1]
 
 
-def test_default_model_prefers_smaller_variant():
-    assert ai_client.DEFAULT_MODEL == "mistral-small-latest"
+def test_the_default_model_is_groqs_strongest_free_one():
+    assert ai_client.DEFAULT_MODEL == "openai/gpt-oss-120b"
 
 
 def test_build_prompt_includes_curriculum_only_instruction():

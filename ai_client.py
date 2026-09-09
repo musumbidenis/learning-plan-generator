@@ -1,4 +1,4 @@
-"""Module C - THE SINGLE AI CALL (Mistral, ONE grounded request).
+"""Module C - THE SINGLE AI CALL (Groq, ONE grounded request).
 
 The ONLY place AI is used in the whole pipeline. It fills the columns AI is good
 at - learning_outcomes, trainee_activities, resources, assessments - grounded in
@@ -8,6 +8,12 @@ the deterministically-parsed unit + curriculum content. `key_points` are supplie
 Everything before this stage (parsing, planning) and after it (doc building) is
 pure Python. Robust safety nets re-stamp the deterministic schedule and backfill
 any blank cell, so the output is never empty even if the API misbehaves.
+
+Why Groq: its free tier allows 1,000 requests a day with no card, and its
+gpt-oss and qwen3 models honour `response_format: json_schema` with strict
+constrained decoding - the guarantee everything downstream is built on. (Mistral
+was here before; on a free workspace it allows the capable models ZERO requests
+a minute, which left only the small ministral models.)
 """
 
 from __future__ import annotations
@@ -22,17 +28,17 @@ import requests
 import runlog
 from models import DeliveryStep, PlanInputs, Session, SessionPlan, Unit
 
-MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
-# The Mistral key is read from the environment / .env (MISTRAL_API_KEY) - see
+# The Groq key is read from the environment / .env (GROQ_API_KEY) - see
 # load_api_key(). It is never hard-coded in source and never entered in the UI.
 
-DEFAULT_MODEL = "mistral-small-latest"
+# Groq's strongest free model that does strict constrained decoding. Only a
+# preference: which model actually generates is settled at run time by
+# `resolve_model`, because an account may not be able to call this one.
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
-# Which model actually generates is settled at run time (see `resolve_model`):
-# a workspace can be provisioned zero requests a minute for a model its plan
-# excludes, so the configured name is a preference, not a guarantee.
-MISTRAL_MODELS_ENDPOINT = "https://api.mistral.ai/v1/models"
+GROQ_MODELS_ENDPOINT = "https://api.groq.com/openai/v1/models"
 LIST_MODELS_TIMEOUT = 30
 PROBE_TIMEOUT = 30
 
@@ -53,19 +59,17 @@ _PROVEN_MODELS: set = set()
 # Ordering for that search, best first, matched as a substring of the model
 # name. It decides only what to TRY first; anything not listed is tried in the
 # middle, so a model released after this line was written still gets a turn.
-_MODEL_FAMILIES = (
-    "mistral-large", "mistral-medium", "magistral-medium", "mistral-small",
-    "magistral-small", "open-mistral-nemo", "ministral", "open-mistral",
-)
+# gpt-oss and qwen3 are the families Groq documents as doing strict schema
+# decoding, which is why they lead.
+_MODEL_FAMILIES = ("gpt-oss", "qwen3", "llama-3.3", "llama", "compound")
 
-# Purpose-built models: they are chat models, and they would answer, but code,
-# audio and OCR models write poor lesson prose. Labs models are not on general
-# release and refuse the request anyway.
+# Purpose-built models: they are chat models, and they would answer, but speech,
+# safety and embedding models write poor lesson prose.
 _RE_SPECIAL_PURPOSE = re.compile(
-    r"codestral|mistral-code|voxtral|pixtral|devstral|ocr|embed|moderation"
-    r"|labs-|vibe-cli", re.I)
+    r"whisper|orpheus|prompt-guard|safeguard|guard|tts|embed|rerank|ocr"
+    r"|moderation", re.I)
 
-# 'ministral-14b-latest' -> 14, so the larger model of a family goes first.
+# 'openai/gpt-oss-120b' -> 120, so the larger model of a family goes first.
 _RE_MODEL_SIZE = re.compile(r"(\d+)\s*b(?:\b|-)")
 
 # The model chosen for this process, once something has answered.
@@ -74,13 +78,15 @@ _RESOLVED_MODEL = ""
 # Sessions per grounded Learning-Plan call. A full term (e.g. 24 sessions) does
 # not fit in one JSON response - it gets truncated to invalid JSON - so we
 # generate in batches and concatenate the rows in order.
-LP_SESSION_CHUNK = 8
+#
+# Four, not eight, because Groq's binding limit is not its 1,000 requests a day
+# but 8,000 TOKENS a minute on the gpt-oss models: eight sessions (~2k in, ~6k
+# out) spend a whole minute's allowance in one request.
+LP_SESSION_CHUNK = 4
 
-# Batch for a smaller model. Below about 20B a model is both slower and
-# shorter-winded: eight sessions neither fit in one answer nor finish inside
-# the request timeout.
-SMALL_MODEL_CHUNK = 3
-SMALL_MODEL_PARAMS = 20
+# Ceiling on one answer, for the same reason. Above this a single request can
+# exceed the per-minute token allowance and be refused outright.
+MAX_OUTPUT_TOKENS = 6000
 
 
 class AIError(RuntimeError):
@@ -166,10 +172,12 @@ TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONL
 # --------------------------------------------------------------------------- #
 # HTTP call
 # --------------------------------------------------------------------------- #
-# How long to wait after each HTTP 429, in order. Mistral's limit is per
-# minute, so these are generous enough to clear it and bounded enough that a
-# real quota exhaustion still reports back inside a minute.
+# How long to wait after each HTTP 429, in order. Groq's tightest limit is per
+# minute (8,000 tokens on the gpt-oss models), so these are generous enough to
+# clear it and bounded enough that a real exhaustion reports back inside a
+# minute.
 _RATE_LIMIT_BACKOFF = (3.0, 8.0, 15.0, 30.0)
+_RATE_LIMIT_BUDGET = sum(_RATE_LIMIT_BACKOFF)
 # Never sit on a server-supplied Retry-After longer than this.
 _MAX_RETRY_AFTER = 60.0
 
@@ -186,61 +194,83 @@ class _ModelUnavailable(Exception):
         self.reason = reason
 
 
-# 'This model is not available in your subscription tier'
-_RE_TIER_REFUSAL = re.compile(r"tier_not_allowed|not available in your subscription",
-                              re.I)
+# Groq states a reset as a duration: '7.66s', '2m59.56s', '1h2m3.5s'.
+_RE_DURATION = re.compile(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?"
+                          r"(?:(\d+(?:\.\d+)?)m?s)?$")
 
 
-def _has_no_allowance(resp) -> bool:
-    """Whether the workspace is allowed ZERO requests a minute for this model.
+def _parse_duration(raw: str) -> float:
+    """Seconds from '7.66s' / '2m59.56s' / '90' , or 0.0 when unreadable."""
+    text = str(raw or "").strip()
+    if not text:
+        return 0.0
+    try:                                  # a bare number of seconds
+        return float(text)
+    except ValueError:
+        pass
+    m = _RE_DURATION.fullmatch(text)
+    if not m or not any(m.groups()):
+        return 0.0
+    hours, minutes, seconds = (float(g or 0) for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds
 
-    Mistral gates some models by refusing them outright (403) and others by
-    provisioning no allowance at all, which surfaces as a rate limit that no
-    amount of waiting will clear. The headers tell the two apart:
-    'x-ratelimit-limit-req-minute: 0' is a plan boundary, not a busy minute.
+
+def _wait_wanted(resp) -> float:
+    """How long the server says to wait, in seconds, uncapped.
+
+    Retry-After first; Groq also puts the same information in its
+    x-ratelimit-reset-* headers, and sends those when Retry-After is absent.
     """
     headers = getattr(resp, "headers", None) or {}
-    limits = [v for k, v in headers.items()
-              if "ratelimit-limit" in k.lower() and "req" in k.lower()]
-    if not limits:
-        return False
-    try:
-        return all(float(v) == 0 for v in limits)
-    except (TypeError, ValueError):
-        return False
+    wait = _parse_duration(headers.get("Retry-After", ""))
+    if wait:
+        return wait
+    resets = [_parse_duration(v) for k, v in headers.items()
+              if "ratelimit-reset" in k.lower()]
+    return max([w for w in resets if w] or [0.0])
+
+
+def _is_exhausted(resp) -> bool:
+    """Whether this 429 is an allowance used up rather than a busy minute.
+
+    Groq's free tier is 1,000 requests a DAY per model on top of the per-minute
+    limits, and the day's reset is hours away. Sitting through the backoff for
+    that wastes a minute and then fails anyway - the useful move is to let the
+    caller try a different model, which has its own daily allowance.
+    """
+    return _wait_wanted(resp) > _RATE_LIMIT_BUDGET
 
 
 def _retry_after(resp) -> float:
-    """The server's own Retry-After in seconds, or 0.0 when it didn't say."""
-    raw = (getattr(resp, "headers", None) or {}).get("Retry-After", "")
-    try:
-        return max(0.0, min(float(str(raw).strip()), _MAX_RETRY_AFTER))
-    except (TypeError, ValueError):
-        return 0.0                       # an HTTP-date form; use our own backoff
+    """The server's own wait in seconds, capped at what we will sit through."""
+    return max(0.0, min(_wait_wanted(resp), _MAX_RETRY_AFTER))
 
 
 def _post(model: str, api_key: str, prompt: str, timeout: int = 180,
           schema: Optional[dict] = None,
           schema_name: str = "learning_plan_sessions",
-          temperature: float = 0.2, max_tokens: int = 14000,
-          structured: bool = True) -> dict:
-    """POST one chat completion. `structured=False` is for cheap probes only."""
+          temperature: float = 0.2,
+          max_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
+    """POST one chat completion, always in strict JSON-schema mode.
+
+    Every call this module makes wants structured output, the probe included -
+    a model that chats but won't take the schema is no use here.
+    """
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
         "max_tokens": max_tokens,
-    }
-    if structured:
-        body["response_format"] = {
+        "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": schema_name,
                 "schema": schema if schema is not None else _response_schema(),
                 "strict": True,
             },
-        }
-    resp = requests.post(MISTRAL_ENDPOINT,
+        },
+    }
+    resp = requests.post(GROQ_ENDPOINT,
                          headers={
                              "Authorization": f"Bearer {api_key}",
                              "Content-Type": "application/json",
@@ -250,7 +280,7 @@ def _post(model: str, api_key: str, prompt: str, timeout: int = 180,
 
 
 def _extract_text(payload: dict) -> str:
-    """Pull the text out of a Mistral chat-completions response, defensively.
+    """Pull the text out of a chat-completions response, defensively.
 
     The API can return a 200 with no usable assistant content, for example an
     empty choices list or a choice that only carries a finish reason. Each of
@@ -258,7 +288,7 @@ def _extract_text(payload: dict) -> str:
     """
     choices = payload.get("choices") or []
     if not choices:
-        raise AIError("Mistral returned no choices: " + json.dumps(payload)[:300])
+        raise AIError("Groq returned no choices: " + json.dumps(payload)[:300])
     choice = choices[0] or {}
     message = choice.get("message") or {}
     content = message.get("content") or ""
@@ -271,7 +301,7 @@ def _extract_text(payload: dict) -> str:
         text = str(content)
     if not text:
         reason = choice.get("finish_reason") or "no assistant content"
-        raise AIError(f"Mistral returned an empty response (finish_reason: {reason})")
+        raise AIError(f"Groq returned an empty response (finish_reason: {reason})")
     return text
 
 
@@ -375,9 +405,9 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                 break
 
     raise AIError(
-        "No Mistral model completed the request. Tried %s; the last one %s. "
-        "If none of them is included in your plan, add one at "
-        "console.mistral.ai or set MISTRAL_MODEL in .env to a model it allows."
+        "No Groq model completed the request. Tried %s; the last one %s. "
+        "Check the key at console.groq.com/keys, or set GROQ_MODEL in .env to "
+        "a model your account allows."
         % (", ".join(tried) or model, last_reason or "failed"))
 
 
@@ -464,28 +494,30 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
                         if reason == "length" else "")
                 raise AIError(f"{model} returned invalid JSON: {e}{hint}") from e
 
-        # A model outside the workspace's plan answers 403 'tier_not_allowed';
-        # the key itself is fine, so this is not an auth failure.
-        if resp.status_code == 403 and _RE_TIER_REFUSAL.search(resp.text or ""):
-            raise _ModelUnavailable(model, "isn't included in your Mistral plan")
+        # A model this account may not call, or one that won't take the schema,
+        # answers 400/404. The key is fine, so this is not an auth failure -
+        # it means "not this model".
+        if resp.status_code in (400, 404):
+            raise _ModelUnavailable(
+                model, f"wouldn't take the request ({resp.text[:120]})")
 
         if resp.status_code in (401, 403):
             raise AIError(
-                "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
+                "Groq auth failed (HTTP %d). Your GROQ_API_KEY is invalid, "
                 "expired, or lacks access." % resp.status_code)
 
         # A Learning Plan is several calls in a row and a Session Plan is one
-        # more each, so Mistral's per-minute limit is met routinely - and it
+        # more each, so the per-minute token limit is met routinely - and it
         # clears in seconds. Failing the whole generation on it threw away
         # every batch already produced.
         if resp.status_code == 429:
-            # Mistral also gates a model by allowing the workspace ZERO
-            # requests a minute for it, which arrives as a rate limit rather
-            # than a refusal. Waiting for an allowance that will never come
-            # cost a minute and then failed anyway.
-            if _has_no_allowance(resp):
-                raise _ModelUnavailable(model,
-                                        "isn't included in your Mistral plan")
+            # The free tier also caps requests per DAY, per model. That reset
+            # is hours away, so sitting through the backoff wastes a minute and
+            # fails anyway; another model has its own daily allowance.
+            if _is_exhausted(resp):
+                raise _ModelUnavailable(
+                    model, f"has used up its free allowance "
+                           f"(resets in {_wait_wanted(resp) / 60:.0f} min)")
             if waited < len(_RATE_LIMIT_BACKOFF):
                 pause = _retry_after(resp) or _RATE_LIMIT_BACKOFF[waited]
                 waited += 1
@@ -502,7 +534,7 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
         raise AIError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
 
 
-def call_mistral(prompt: str, api_key: str, model: str,
+def call_model(prompt: str, api_key: str, model: str,
                  progress_cb=None) -> List[dict]:
     """The Learning-Plan call: returns the JSON array of session rows."""
     data = _chat_json(prompt, api_key, model, _response_schema(),
@@ -767,34 +799,32 @@ def _format_curriculum_keypoints(points: List[str]) -> List[str]:
 # Public orchestration
 # --------------------------------------------------------------------------- #
 def list_chat_models(api_key: str) -> List[str]:
-    """Every chat model this key can see, one name per model.
+    """Every model this key can see, one name per model.
 
-    Mistral lists each model several times over - `mistral-medium-latest` and
-    eight aliases of it - so the family is collapsed to a single name, and the
-    '-latest' one is preferred because it survives a version bump.
+    Groq's listing is flat - an id, and `active` saying whether it can be
+    called at all. Retired models are dropped here so the model search never
+    spends a probe on one.
     """
     try:
-        resp = requests.get(MISTRAL_MODELS_ENDPOINT,
+        resp = requests.get(GROQ_MODELS_ENDPOINT,
                             headers={"Authorization": f"Bearer {api_key}"},
                             timeout=LIST_MODELS_TIMEOUT)
     except requests.RequestException as e:
-        raise AIError(f"Couldn't list the Mistral models: {e}") from None
+        raise AIError(f"Couldn't list the Groq models: {e}") from None
     if resp.status_code != 200:
-        raise AIError(f"Couldn't list the Mistral models (HTTP "
+        raise AIError(f"Couldn't list the Groq models (HTTP "
                       f"{resp.status_code}). {resp.text[:200]}")
 
     names: List[str] = []
     seen: set = set()
     for entry in resp.json().get("data", []):
-        if not (entry.get("capabilities") or {}).get("completion_chat"):
+        name = entry.get("id", "")
+        if not name or name in seen:
             continue
-        family = frozenset([entry.get("id", "")]
-                           + list(entry.get("aliases") or []))
-        if not family or family in seen:
+        if entry.get("active") is False:          # absent means callable
             continue
-        seen.add(family)
-        names.append(sorted(family,
-                            key=lambda n: (not n.endswith("-latest"), len(n)))[0])
+        seen.add(name)
+        names.append(name)
     return names
 
 
@@ -832,9 +862,10 @@ def _candidate_models(model: str, api_key: str) -> List[str]:
 def _answers(model: str, api_key: str) -> bool:
     """Whether `model` will take a structured request from this workspace.
 
-    The probe uses JSON-schema mode because every real call does: a model that
-    chats happily but rejects the schema is no use here, and finding that out
-    on the first batch would waste a full eight-session prompt.
+    The probe uses JSON-schema mode because every real call does: only some of
+    Groq's models do strict constrained decoding, and finding that out on the
+    first batch would waste a full prompt. A model that can't take the schema
+    answers 400 here and rules itself out.
     """
     schema = {"type": "object", "properties": {"ok": {"type": "string"}},
               "required": ["ok"], "additionalProperties": False}
@@ -845,8 +876,8 @@ def _answers(model: str, api_key: str) -> bool:
         return True                   # a network blip proves nothing; let it try
     if resp.status_code == 200:
         return True
-    if resp.status_code == 429 and not _has_no_allowance(resp):
-        return True                   # a busy minute, not a plan boundary
+    if resp.status_code == 429 and not _is_exhausted(resp):
+        return True                   # a busy minute, not an exhausted allowance
     _UNAVAILABLE_MODELS.add(model)
     return False
 
@@ -855,10 +886,11 @@ def resolve_model(api_key: str, model: Optional[str] = None,
                   progress_cb=None) -> str:
     """The model to generate with: the configured one, or the best that answers.
 
-    Mistral gates a model the workspace's plan excludes by allowing it zero
-    requests a minute, so 'configured' and 'usable' are different questions.
-    Rather than carry a hard-coded list of second choices, ask the API what
-    exists and try them in order until one answers. Settled once per process.
+    Not every model an account can see will take a strict JSON schema, and a
+    model's free allowance can be used up for the day, so 'configured' and
+    'usable' are different questions. Rather than carry a hard-coded list of
+    second choices, ask the API what exists and try them in order until one
+    answers. Settled once per process.
     """
     global _RESOLVED_MODEL
     model = model or load_model_name()
@@ -870,7 +902,7 @@ def resolve_model(api_key: str, model: Optional[str] = None,
         if not _answers(candidate, api_key):
             continue
         if candidate != model:
-            message = (f"AI: {model} isn't available on your Mistral plan; "
+            message = (f"AI: {model} isn't usable on this Groq account; "
                        f"generating with {candidate}")
             _emit_progress(progress_cb, message)
             runlog.log(message)
@@ -878,20 +910,19 @@ def resolve_model(api_key: str, model: Optional[str] = None,
         return candidate
 
     raise AIError(
-        "No Mistral model your key can call will take a Learning Plan request. "
-        "Tried %s. Add a paid plan at console.mistral.ai, or set MISTRAL_MODEL "
-        "in .env to a model your plan allows."
+        "No Groq model your key can call will take a Learning Plan request. "
+        "Tried %s. Check the key at console.groq.com/keys, or set GROQ_MODEL "
+        "in .env to a model your account allows."
         % (", ".join(candidates) or model))
 
 
 def batch_size_for(model: str) -> int:
-    """How many sessions to ask for at once, given the model's size."""
-    size = _RE_MODEL_SIZE.search((model or "").lower())
-    if size and int(size.group(1)) < SMALL_MODEL_PARAMS:
-        return SMALL_MODEL_CHUNK
-    # 'nemo' and the small-family models carry no size in their name
-    if _model_rank(model)[0] >= _MODEL_FAMILIES.index("open-mistral-nemo"):
-        return SMALL_MODEL_CHUNK
+    """How many sessions to ask for at once.
+
+    Flat, because on Groq the ceiling is the account's tokens-per-minute rather
+    than anything about the model: a bigger model does not buy a bigger batch.
+    Kept as a function so the batching code has one place to ask.
+    """
     return LP_SESSION_CHUNK
 
 
@@ -906,7 +937,7 @@ def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
     didn't), and anything still missing is padded so the deterministic backfill
     lands on the right row.
     """
-    rows = call_mistral(build_prompt(unit, chunk), api_key, model,
+    rows = call_model(build_prompt(unit, chunk), api_key, model,
                         progress_cb=progress_cb)
     if len(rows) >= len(chunk):
         return rows[:len(chunk)]
@@ -929,15 +960,14 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
                       model: Optional[str] = None, progress_cb=None) -> List[Session]:
     """Run the grounded AI calls and merge the result into the skeleton.
 
-    The model is `model` or `MISTRAL_MODEL` where the workspace's plan allows
-    it, and otherwise the most capable model that does answer - see
-    `resolve_model`.
+    The model is `model` or `GROQ_MODEL` where the account can call it, and
+    otherwise the most capable model that does answer - see `resolve_model`.
     """
     # Key semantics: api_key=None  -> use the configured (.env / hard-coded) key
     if api_key is None:
         api_key = load_api_key()
     if not api_key:
-        raise AIError("No Mistral API key available.")
+        raise AIError("No Groq API key available.")
 
     model = resolve_model(api_key, model, progress_cb)
     runlog.log(f"AI: model = {model}")
@@ -982,7 +1012,7 @@ def regenerate_learning_plan_session(unit: Unit, sessions: List[Session], idx: i
     if api_key is None:
         api_key = load_api_key()
     if not api_key:
-        raise AIError("No Mistral API key available.")
+        raise AIError("No Groq API key available.")
     model = resolve_model(api_key, model, progress_cb)
 
     prompt = build_prompt(unit, [session])
@@ -1351,15 +1381,15 @@ def _config(name: str) -> str:
 
 
 def load_api_key() -> str:
-    """The Mistral key, read from MISTRAL_API_KEY (env / .env, then st.secrets).
+    """The Groq key, read from GROQ_API_KEY (env / .env, then st.secrets).
 
     Returns '' when unset; callers treat an empty key as an error. No key is
     hard-coded in source.
     """
-    return _config("MISTRAL_API_KEY")
+    return _config("GROQ_API_KEY")
 
 
 def load_model_name() -> str:
-    """Primary model, overridable via `.env`."""
-    primary = _config("MISTRAL_MODEL")
+    """Preferred model, overridable via `.env`."""
+    primary = _config("GROQ_MODEL")
     return primary or DEFAULT_MODEL

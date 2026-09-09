@@ -10,10 +10,10 @@ Flow:
      per document, to be paired by hand. A unit that appears in only one file,
      or that the two files word differently, therefore stays visible.
   3. Generate Learning Plan -> the selected units are extracted automatically
-     (deterministic, no AI) -> preview + plan details -> grounded Mistral
+     (deterministic, no AI) -> preview + plan details -> grounded Groq
      calls -> .docx
 
-The Mistral key + model are configured in ai_client.py (not entered in the UI);
+The Groq key + model are configured in ai_client.py (not entered in the UI);
 the Drive library needs GOOGLE_API_KEY and is read-only.
 Kenya CBET terminology throughout (trainee/trainer, assessment, CAT, competency).
 """
@@ -488,7 +488,7 @@ def render_learning_plan_preview(os_unit: Unit, inputs: PlanInputs) -> None:
         mime=DOCX_MIME, key="lp_dl")
 
     if not ai_client.load_api_key():
-        st.info("Set MISTRAL_API_KEY to enable per-session regeneration.")
+        st.info("Set GROQ_API_KEY to enable per-session regeneration.")
 
     for i, s in enumerate(sessions):
         c1, c2 = st.columns([0.8, 0.2])
@@ -530,8 +530,8 @@ def render_session_plans(os_unit: Unit, inputs: PlanInputs,
                "the document for you to fill in.")
 
     if not ai_client.load_api_key():
-        st.error("Session plans are generated with AI, but no Mistral API key is "
-                 "configured. Set MISTRAL_API_KEY and reload.")
+        st.error("Session plans are generated with AI, but no Groq API key is "
+                 "configured. Set GROQ_API_KEY and reload.")
         return
 
     # ----- one session at a time ------------------------------------------- #

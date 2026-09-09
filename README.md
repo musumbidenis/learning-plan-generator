@@ -17,10 +17,10 @@ session content uses AI, in grounded, schema-constrained API calls.**
    ├─(B) DETERMINISTIC PLANNER  ─ planner.py                            [no AI]
    │      └ one session per curriculum sub-topic, PCs mapped 1:1, CATs placed
    │
-   ├─(C) GROUNDED MISTRAL CALLS ─ ai_client.py                          [the only AI]
+   ├─(C) GROUNDED GROQ CALLS    ─ ai_client.py                          [the only AI]
    │      └ fills learning_outcomes / activities / resources / assessments,
    │        grounded in parsed data; JSON schema mode forces valid JSON.
-   │        Sessions go in batches of LP_SESSION_CHUNK (8); a Session Plan and
+   │        Sessions go in batches of LP_SESSION_CHUNK (4); a Session Plan and
    │        a single-session regenerate are one call each.
    │
    └─(D) DOC BUILDER            ─ doc_builder.py                        [no AI]
@@ -33,41 +33,46 @@ Stages A, B and D are pure Python and unit-tested with **zero API calls**.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env        # then add your MISTRAL_API_KEY
+cp .env.example .env        # then add your GROQ_API_KEY
 streamlit run app.py
 ```
 
-The API key is sent as a Bearer token to Mistral's chat completions API.
-`MISTRAL_MODEL` (default `mistral-small-latest`) says which model to *prefer* —
-which model actually generates is settled at run time, because a workspace can
-be allowed to call a model or not.
+The API key is sent as a Bearer token to Groq's OpenAI-compatible chat
+completions API. `GROQ_MODEL` (default `openai/gpt-oss-120b`) says which model to
+*prefer* — which model actually generates is settled at run time.
 
-**How the model is chosen.** Mistral excludes a model from a plan by
-provisioning the workspace *zero requests a minute* for it — that arrives as
-HTTP 429, so waiting never clears it — or, for some models, a 403
-`tier_not_allowed`. So rather than carry a list of second choices, the app asks
-`/v1/models` what this key can see, orders the candidates most-capable-first,
-and tries them until one answers a real request. The preferred model leads;
-after that it is Mistral's own list, so a model released tomorrow is tried on
-its merits. Code, audio and OCR models are skipped — they would answer, they
-just write poor lesson prose. The choice is settled once per process and named
-in the run log.
+**Why Groq.** The free tier allows **1,000 requests a day per model** with no card, and
+`openai/gpt-oss-120b`, `openai/gpt-oss-20b` and `qwen/qwen3.8-27b` honour
+`response_format: json_schema` with `strict: true` by *constrained decoding* — the
+guarantee everything downstream is built on. What was measured before choosing it:
 
-A model that answers a probe and then can't complete a real batch is not a model
-that works: two timeouts running, or three dropped connections, and the next
-candidate takes over mid-generation rather than the plan failing. One timeout is
-usually the API being busy, so it is retried on the same model first. A genuine
-rate limit — an allowance you have simply used up this minute — is waited out
-(3s, 8s, 15s, 30s, honouring the server's `Retry-After`) instead of discarding
-the batches already generated. 401, and any 403 that isn't about the plan, still
-surface as a clear "key invalid/expired" message.
+| | Free tier | Per day | Per minute | Strict JSON schema |
+|---|---|---|---|---|
+| **Groq** | Yes, no card | **1,000** | 30 | **Yes** — constrained decoding |
+| OpenRouter | Yes | **50** (1,000 after a one-off $10) | 20 | Varies by routed endpoint |
+| Google Gemini | Yes | shown in AI Studio | ~15 | Yes, but a different request shape |
+| Cerebras | $5 trial credit only | — | — | — |
+| Mistral (was here) | Yes | — | 0 for the capable models on a free plan | Yes |
 
-Batches are sized for whichever model answers: eight sessions per call for
-`mistral-small` and up, three for a smaller model, which neither fits eight in
-one answer nor finishes them inside the timeout. Output quality does follow the
-model, so add a plan at [console.mistral.ai](https://console.mistral.ai) when you
-can; the verdict is remembered for the life of the process, so restart the app
-after upgrading.
+**How the model is chosen.** Not every model an account can see will take a strict
+schema, and a model's daily allowance can run out — so rather than carry a list of second
+choices, the app asks `/v1/models` what this key can see, orders the candidates
+most-capable-first, and tries them until one answers a real request. The preferred model
+leads; after that it is Groq's own list, so a model released tomorrow is tried on its
+merits. Speech, safety and embedding models are skipped — they would answer, they just
+write poor lesson prose. The choice is settled once per process and named in the run log.
+
+A model that answers a probe and then can't complete a real batch is not a model that
+works: two timeouts running, or three dropped connections, and the next candidate takes
+over mid-generation rather than the plan failing. One timeout is usually the API being
+busy, so it is retried on the same model first. A 429 is read against its reset: a busy
+minute is waited out (3s, 8s, 15s, 30s, honouring `Retry-After`), while a reset hours away
+is the day's allowance and moves to a model with its own. 401, and any 403, still surface
+as a clear "key invalid/expired" message.
+
+Sessions go out in batches of **four**, capped at 6,000 output tokens. The binding limit is
+not the 1,000 requests a day but **8,000 tokens a minute** on the gpt-oss models — eight
+sessions would spend a whole minute's allowance in one request.
 
 ## The Drive document library (optional)
 
@@ -141,7 +146,7 @@ automatically, and an unchanged one is downloaded only once.
 | `os_parser.py` | A1 | parse OS units: title, codes, level, description, elements + PCs, evidence-guide methods |
 | `curriculum_parser.py` | A2 | parse curriculum LOs → sub-topics (sessions) + key points + suggested methods |
 | `planner.py` | B | build the session skeleton, map PCs, place CATs, stamp the schedule |
-| `ai_client.py` | C | the single grounded Mistral call + coercion/re-stamp/backfill safety nets |
+| `ai_client.py` | C | the grounded Groq calls + model discovery + coercion/re-stamp/backfill safety nets |
 | `doc_builder.py` | D | render the `.docx` (header table + 9-column session table) |
 | `app.py` | – | Streamlit UI wiring all stages |
 
