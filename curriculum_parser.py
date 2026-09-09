@@ -29,9 +29,15 @@ from pdf_utils import (
     find_tvet_code,
     is_noise_line,
     load_document,
+    norm,
+    norm_code_loose,
     unit_start_pages,
     unit_title_above_code,
 )
+
+# `norm` / `norm_code_loose` live in pdf_utils so unit_index can share them
+# without importing a parser; they are re-exported here because this is where
+# they were first defined and `unit_match` imports them from here.
 
 # Column boundaries (tuned to CDACC curriculum layout).
 LO_MAX_X = 150.0
@@ -297,29 +303,6 @@ def _outcomes_from_layout(lo_lines, content_lines,
                 target = sub
         target.key_points.append(text)
     return outcomes
-
-
-def norm(s: str) -> str:
-    """Comparison form of a code or title: lowercase, alphanumerics only."""
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-
-def norm_code_loose(s: str) -> str:
-    """Normalised code with the 'OS' vs 'CU' discriminator dropped.
-
-    IT/OS/ICTA/CC/02/5/MA (Occupational Standard) and IT/CU/ICTA/CC/02/5/MA
-    (Curriculum) name the same unit, so removing that one segment makes the two
-    code families compare equal.
-    """
-    parts = [p for p in re.split(r"[/\\]", s or "") if p.strip()]
-    if len(parts) >= 2 and parts[1].strip().upper() in ("OS", "CU"):
-        return norm("/".join([parts[0]] + parts[2:]))
-    n = norm(s)
-    if n.startswith("itos"):
-        return n.replace("os", "", 1)
-    if n.startswith("itcu"):
-        return n.replace("cu", "", 1)
-    return n
 
 
 def find_unit(units: List[CurriculumUnit], isced_code: str = "",

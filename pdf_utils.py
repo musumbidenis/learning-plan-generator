@@ -45,6 +45,29 @@ def is_noise_line(text: str) -> bool:
     return False
 
 
+def norm(s: str) -> str:
+    """Comparison form of a code or title: lowercase, alphanumerics only."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def norm_code_loose(s: str) -> str:
+    """Normalised code with the 'OS' vs 'CU' discriminator dropped.
+
+    IT/OS/ICTA/CC/02/5/MA (Occupational Standard) and IT/CU/ICTA/CC/02/5/MA
+    (Curriculum) name the same unit, so removing that one segment makes the two
+    code families compare equal.
+    """
+    parts = [p for p in re.split(r"[/\\]", s or "") if p.strip()]
+    if len(parts) >= 2 and parts[1].strip().upper() in ("OS", "CU"):
+        return norm("/".join([parts[0]] + parts[2:]))
+    n = norm(s)
+    if n.startswith("itos"):
+        return n.replace("os", "", 1)
+    if n.startswith("itcu"):
+        return n.replace("cu", "", 1)
+    return n
+
+
 def clean_text(text: str) -> str:
     """Normalise whitespace and repair the mangled copyright glyph."""
     if not text:

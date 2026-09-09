@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unit_index
+from models import UnitRef
 from pdf_utils import Page
 
 
@@ -185,3 +186,98 @@ def test_a_multi_unit_docx_yields_one_page_per_unit(tmp_path):
     pages = load_document(path)
     assert len(pages) >= 3
     assert [r.title for r in unit_index.index_units(pages, "OS").refs] == titles
+
+
+# --------------------------------------------------------------------------- #
+# A unit that starts under its module's units table, on the same page
+# --------------------------------------------------------------------------- #
+def module_table_then_unit_page(index):
+    """The real shape of a CDACC curriculum: 'MODULE 6', the table of the two
+    units in it, then the first of those units starting below."""
+    return page(index, [
+        ("MODULE 6", 80, 20),
+        ("UNIT UNIT CATEGORY ISCED UNIT CODE TVET CDACC UNIT CODE "
+         "UNIT NAME DURATION (HOURS)", 80, 34),
+        ("CORE 0612 551 IT/CU/ICTA/CR/02/6/MA ICT Security 150", 80, 48),
+        ("CORE 0613 551 IT/CU/ICTA/CR/03/6/MA Desktop Application 280", 80, 62),
+        ("Total Hours 430", 80, 76),
+        ("ICT SECURITY", 80, 100),
+        ("ISCED UNIT CODE: 0612 551 16A", 80, 114),
+        ("TVET CDACC UNIT CODE: IT/CU/ICTA/CR/02/6/MA", 80, 128),
+        ("Unit Description", 80, 142),
+        ("This unit covers the competencies required to manage ICT security.",
+         80, 156),
+        ("Learning Outcomes", 80, 170), ("Content", 300, 170),
+        ("1. Assess security needs", 80, 184),
+        ("1.1 Security threats", 300, 184)])
+
+
+def test_a_unit_under_its_module_table_is_named_after_itself():
+    """This shipped a unit called 'MODULE 6'.
+
+    The title search anchored on the first code-shaped line, which is a row of
+    the table above; the unit's own code line is the one carrying a label.
+    """
+    refs = unit_index.index_units([module_table_then_unit_page(0)], "CU").refs
+    assert [r.title for r in refs] == ["ICT SECURITY"]
+
+
+def test_the_unit_takes_its_own_code_not_the_tables_clipped_one():
+    refs = unit_index.index_units([module_table_then_unit_page(0)], "CU").refs
+    assert refs[0].code == "IT/CU/ICTA/CR/02/6/MA"
+    assert refs[0].isced_code == "0612 551 16A"
+
+
+def test_a_units_own_code_header_is_not_read_as_a_table_row():
+    """A unit page carries both code families, which made it 'a roster page'
+    listing a unit named 'TVET CDACC UNIT CODE:'."""
+    roster = unit_index.read_roster([module_table_then_unit_page(0)])
+    assert all("CODE" not in e.title.upper() for e in roster)
+    assert [e.title for e in roster] == ["ICT Security", "Desktop Application"]
+
+
+# --------------------------------------------------------------------------- #
+# Reconciling the roster against what was found
+# --------------------------------------------------------------------------- #
+def test_a_roster_row_carrying_the_other_code_family_is_not_reported_missing():
+    """The two code columns land in one cell: code '0612 451 07A', title
+    'IT/CU/ICTA/CR/02/5/MA Network Design and'. The document quotes the TVET
+    code, so comparing only the ISCED one cried wolf on a located unit."""
+    entry = unit_index.RosterEntry(
+        code="0612 451 07A",
+        title="IT/CU/ICTA/CR/02/5/MA Network Design and")
+    refs = [UnitRef(title="NETWORK DESIGN AND MANAGEMENT",
+                    code="IT/CU/ICTA/CR/02/5/MA")]
+    assert unit_index._entry_was_found(entry, refs)
+
+
+def test_a_clipped_roster_code_still_matches_the_unit():
+    """Table cells wrap: 'IT/CU/ICTA/CC/01/6/M' is '...MA' with the last
+    character on the next line."""
+    entry = unit_index.RosterEntry(code="IT/CU/ICTA/CC/01/6/M", title="Discrete")
+    refs = [UnitRef(title="DISCRETE MATHEMATICAL CONCEPTS",
+                    code="IT/CU/ICTA/CC/01/6/MA")]
+    assert unit_index._entry_was_found(entry, refs)
+
+
+def test_a_clipped_roster_title_still_matches_the_unit():
+    entry = unit_index.RosterEntry(code="0714 351 04A",
+                                   title="Computer Repair and")
+    refs = [UnitRef(title="COMPUTER REPAIR AND MAINTENANCE",
+                    isced_code="0714 351 09A")]
+    assert unit_index._entry_was_found(entry, refs)
+
+
+def test_a_unit_the_document_really_lacks_is_still_reported():
+    entry = unit_index.RosterEntry(code="0322 551 11A",
+                                   title="Manage Organization Records")
+    refs = [UnitRef(title="CONDUCT INDEXING AND ABSTRACTING",
+                    isced_code="0322 551 10A")]
+    assert not unit_index._entry_was_found(entry, refs)
+
+
+def test_a_short_shared_prefix_is_not_taken_as_a_match():
+    """'Com' opens half the units in an ICT curriculum."""
+    entry = unit_index.RosterEntry(code="0611 351 09A", title="Com")
+    refs = [UnitRef(title="COMPUTER ESSENTIALS", isced_code="0611 351 01A")]
+    assert not unit_index._entry_was_found(entry, refs)

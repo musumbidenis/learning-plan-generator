@@ -46,17 +46,11 @@ from pdf_utils import (
     clean_text,
     column_lines,
     is_noise_line,
+    norm,
+    norm_code_loose,
     unit_start_pages,
     unit_title_above_code,
 )
-
-def norm(s: str) -> str:
-    """Comparison form of a code or title: lowercase, alphanumerics only.
-
-    Defined here rather than imported from `curriculum_parser` so this module
-    stays free of the parsers - they may import it, not the other way round.
-    """
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 # How far into a page's header block a unit title or marker may sit.
@@ -152,8 +146,14 @@ def _roster_row(text: str) -> Optional[tuple]:
     for candidate in (line[m.end():], line[:m.start()]):
         title = _RE_TRAILING_NUMBERS.sub("", clean_text(candidate)).strip(" -|–")
         title = _RE_ROW_CATEGORY.sub("", title).strip()
-        if len(title) >= 4 and not _RE_ROW_NOISE.match(title):
-            return code, title
+        if len(title) < 4 or _RE_ROW_NOISE.match(title):
+            continue
+        # 'TVET CDACC UNIT CODE: IT/CU/ICTA/CR/01/4/MA' is a unit page's own
+        # header, not a table row. Without this every unit page counted as a
+        # roster page and contributed a unit named 'TVET CDACC UNIT CODE:'.
+        if _RE_CODE_LABEL.search(title):
+            continue
+        return code, title
     return None
 
 
@@ -252,6 +252,39 @@ def _roster_refs(pages: Sequence[Page], roster: List[RosterEntry],
 # --------------------------------------------------------------------------- #
 # Shape-based fallbacks
 # --------------------------------------------------------------------------- #
+# 'ISCED UNIT CODE: 0541 541 01A' - a unit states its code under a label; a row
+# of a units table never does.
+_RE_CODE_FIELD = re.compile(r"\bCODE\s*:", re.I)
+
+
+def _code_anchor(lines: Sequence) -> Optional[int]:
+    """Index of the line bearing this unit's OWN code.
+
+    A curriculum prints each module's units table immediately above the first
+    unit of that module, on the same page:
+
+        MODULE 6
+        CORE 0612 551 IT/CU/ICTA/CR/02/6/MA ICT Security 150
+        ...
+        ICT SECURITY                             <- the unit really starts here
+        ISCED UNIT CODE: 0612 551 16A
+
+    Anchoring on the first code-shaped line lands inside that table, and the
+    title search then reports the unit as 'MODULE 6'. The labelled line is the
+    unit's own; documents that use no label are unaffected, since the first
+    code-shaped line is then still the anchor.
+    """
+    for i, ln in enumerate(lines):
+        text = ln.text
+        if _RE_CODE_FIELD.search(text) and (RE_ISCED_CODE_SHAPE.search(text)
+                                            or RE_TVET_CODE_SHAPE.search(text)):
+            return i
+    for i, ln in enumerate(lines):
+        if RE_ISCED_CODE_SHAPE.search(ln.text) or RE_TVET_CODE_SHAPE.search(ln.text):
+            return i
+    return None
+
+
 def _title_near_code(page: Page) -> str:
     """The unit title around the code line, whichever family the code is.
 
@@ -261,9 +294,7 @@ def _title_near_code(page: Page) -> str:
     that print the code first.
     """
     lines = column_lines(page.words, 0, 10_000)
-    idx = next((i for i, ln in enumerate(lines)
-                if RE_ISCED_CODE_SHAPE.search(ln.text)
-                or RE_TVET_CODE_SHAPE.search(ln.text)), None)
+    idx = _code_anchor(lines)
     if idx is None:
         return ""
 
@@ -349,9 +380,7 @@ def _title_from_description(page: Page) -> str:
 def _best_title(page: Page) -> str:
     """The line above the code that best reads as this unit's title."""
     lines = column_lines(page.words, 0, 10_000)
-    idx = next((i for i, ln in enumerate(lines)
-                if RE_ISCED_CODE_SHAPE.search(ln.text)
-                or RE_TVET_CODE_SHAPE.search(ln.text)), None)
+    idx = _code_anchor(lines)
     if idx is None:
         return ""
 
@@ -407,6 +436,28 @@ def _structural_starts(pages: Sequence[Page]) -> List[int]:
     return out
 
 
+def _unit_codes(page: Page) -> tuple:
+    """(ISCED, TVET) as the unit itself states them, not as a table lists them.
+
+    Read from the top of the page, a module's units table answers first - and
+    its cells wrap, so the code comes back clipped ('IT/CU/ICTA/CC/01/6/M').
+    Reading from the unit's own code line gets the whole thing.
+    """
+    lines = column_lines(page.words, 0, 10_000)
+    anchor = _code_anchor(lines)
+    texts = ["\n".join(ln.text for ln in lines[anchor:])] if anchor is not None else []
+    texts.append(page.text)
+    isced = tvet = ""
+    for text in texts:
+        if not isced:
+            m = RE_ISCED_CODE_SHAPE.search(text)
+            isced = clean_text(m.group(1)) if m else ""
+        if not tvet:
+            m = RE_TVET_CODE_SHAPE.search(text)
+            tvet = m.group(1) if m else ""
+    return isced, tvet
+
+
 def _refs_from_starts(pages: Sequence[Page], starts: Sequence[int],
                       source: str) -> List[UnitRef]:
     by_index = {p.index: p for p in pages}
@@ -421,14 +472,72 @@ def _refs_from_starts(pages: Sequence[Page], starts: Sequence[int],
             or _title_near_code(page)
         if not title:
             continue
-        isced = RE_ISCED_CODE_SHAPE.search(page.text)
-        tvet = RE_TVET_CODE_SHAPE.search(page.text)
+        isced_code, tvet_code = _unit_codes(page)
         refs.append(UnitRef(
             title=title,
-            isced_code=clean_text(isced.group(1)) if isced else "",
-            code=tvet.group(1) if tvet else "",
+            isced_code=isced_code, code=tvet_code,
             source=source, start_page=start, end_page=end))
     return refs
+
+
+# --------------------------------------------------------------------------- #
+# Reconciling the roster against what was found
+# --------------------------------------------------------------------------- #
+# Below this a shared prefix says nothing - 'com' prefixes half the units in an
+# ICT curriculum.
+_MIN_PREFIX = 6
+
+
+def _shares_a_start(a: str, b: str) -> bool:
+    """Whether two normalised strings agree as far as the shorter one goes.
+
+    Both roster codes and roster titles arrive clipped, because the cell they
+    sit in wraps and only its first line is read: 'IT/CU/ICTA/CC/01/6/M' for
+    ...MA, 'Network Design and' for 'Network Design and Management'.
+    """
+    if not a or not b:
+        return False
+    short, long = sorted((a, b), key=len)
+    return len(short) >= _MIN_PREFIX and long.startswith(short)
+
+
+def _entry_codes(entry: RosterEntry) -> set:
+    """Every code the roster row carries, its own and any inside its title.
+
+    A units table often prints the two code families in adjacent columns, which
+    the reader joins into one cell: code '0612 451 07A', title
+    'IT/CU/ICTA/CR/02/5/MA Network Design and'. Comparing only the first of
+    those against a document that quotes the other reported a located unit as
+    missing.
+    """
+    codes = {entry.code}
+    text = entry.title or ""
+    codes |= set(RE_ISCED_CODE_SHAPE.findall(text))
+    codes |= set(RE_TVET_CODE_SHAPE.findall(text))
+    return {norm_code_loose(c) for c in codes if c}
+
+
+def _entry_title(entry: RosterEntry) -> str:
+    """The roster row's title with any code taken back out of it."""
+    text = RE_ISCED_CODE_SHAPE.sub(" ", entry.title or "")
+    text = RE_TVET_CODE_SHAPE.sub(" ", text)
+    return norm(text)
+
+
+def _entry_was_found(entry: RosterEntry, refs: Sequence[UnitRef]) -> bool:
+    """Whether a unit the roster names is among the units actually located."""
+    codes = _entry_codes(entry)
+    title = _entry_title(entry)
+    for ref in refs:
+        ref_codes = {norm_code_loose(c) for c in (ref.code, ref.isced_code) if c}
+        if codes & ref_codes:
+            return True
+        if any(_shares_a_start(a, b) for a in codes for b in ref_codes):
+            return True
+        ref_title = norm(ref.title)
+        if title and (title == ref_title or _shares_a_start(title, ref_title)):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -474,11 +583,7 @@ def index_units(pages: Sequence[Page], source: str) -> IndexResult:
         candidates, key=lambda c: (len(c[0]), -order.get(c[1], 9)))
 
     if strategy != "roster" and roster:
-        # Report anything the roster named that the winning strategy didn't find.
-        found = {norm(r.title) for r in refs} | {norm(r.isced_code) for r in refs} \
-            | {norm(r.code) for r in refs}
-        missing = [e for e in roster
-                   if norm(e.title) not in found and norm(e.code) not in found]
+        missing = [e for e in roster if not _entry_was_found(e, refs)]
 
     return IndexResult(refs=refs, roster=roster, missing=missing,
                        strategy=strategy)

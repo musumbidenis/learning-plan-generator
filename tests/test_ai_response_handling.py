@@ -122,6 +122,77 @@ def test_call_mistral_retries_connection_reset(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Rate limiting (HTTP 429)
+# --------------------------------------------------------------------------- #
+def test_a_rate_limit_is_waited_out_rather_than_failing_the_generation(monkeypatch):
+    """A Learning Plan is several calls in a row, so Mistral's per-minute limit
+    is met routinely - and it clears in seconds. Failing threw away every batch
+    already generated."""
+    attempts = []
+    slept = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        attempts.append(model)
+        if len(attempts) < 3:
+            return FakeResp(429, text='{"message": "Rate limit exceeded"}')
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", slept.append)
+
+    assert call_mistral("p", "k", "m1") == []
+    assert len(attempts) == 3
+    assert slept == list(ai_client._RATE_LIMIT_BACKOFF[:2])
+
+
+def test_the_servers_own_retry_after_wins_over_our_backoff(monkeypatch):
+    slept = []
+    calls = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            resp = FakeResp(429, text="slow down")
+            resp.headers = {"Retry-After": "7"}
+            return resp
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", slept.append)
+
+    assert call_mistral("p", "k", "m1") == []
+    assert slept == [7.0]
+
+
+def test_an_absurd_retry_after_is_capped(monkeypatch):
+    resp = FakeResp(429, text="")
+    resp.headers = {"Retry-After": "86400"}
+    assert ai_client._retry_after(resp) == ai_client._MAX_RETRY_AFTER
+
+
+def test_a_retry_after_date_falls_back_to_our_own_backoff():
+    resp = FakeResp(429, text="")
+    resp.headers = {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+    assert ai_client._retry_after(resp) == 0.0
+
+
+def test_a_response_without_headers_does_not_break_the_retry():
+    assert ai_client._retry_after(FakeResp(429, text="")) == 0.0
+
+
+def test_a_persistent_rate_limit_gives_up_with_something_actionable(monkeypatch):
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: FakeResp(429, text="Rate limit exceeded"))
+    monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
+
+    with pytest.raises(AIError) as excinfo:
+        call_mistral("p", "k", "m1")
+    message = str(excinfo.value)
+    assert "429" in message
+    assert "minute" in message.lower()
+
+
+# --------------------------------------------------------------------------- #
 # Truncated-response salvage (the token-limit / unterminated-JSON case)
 # --------------------------------------------------------------------------- #
 def test_salvage_recovers_complete_objects_from_truncated_array():

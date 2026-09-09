@@ -118,6 +118,23 @@ TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONL
 # --------------------------------------------------------------------------- #
 # HTTP call
 # --------------------------------------------------------------------------- #
+# How long to wait after each HTTP 429, in order. Mistral's limit is per
+# minute, so these are generous enough to clear it and bounded enough that a
+# real quota exhaustion still reports back inside a minute.
+_RATE_LIMIT_BACKOFF = (3.0, 8.0, 15.0, 30.0)
+# Never sit on a server-supplied Retry-After longer than this.
+_MAX_RETRY_AFTER = 60.0
+
+
+def _retry_after(resp) -> float:
+    """The server's own Retry-After in seconds, or 0.0 when it didn't say."""
+    raw = (getattr(resp, "headers", None) or {}).get("Retry-After", "")
+    try:
+        return max(0.0, min(float(str(raw).strip()), _MAX_RETRY_AFTER))
+    except (TypeError, ValueError):
+        return 0.0                       # an HTTP-date form; use our own backoff
+
+
 def _post(model: str, api_key: str, prompt: str, timeout: int = 120,
           schema: Optional[dict] = None,
           schema_name: str = "learning_plan_sessions",
@@ -227,23 +244,25 @@ def _emit_progress(progress_cb, message: str) -> None:
 
 def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                schema_name: str, progress_cb=None, temperature: float = 0.2):
-    """One grounded request (short retry on transient network errors).
+    """One grounded request, retrying transient network errors and rate limits.
 
     Returns the parsed JSON exactly as the model produced it (a list or a dict);
     callers coerce it to the shape they expect.
     """
     _emit_progress(progress_cb, f"AI: trying model {model}")
-    last_error: Optional[Exception] = None
-    for attempt in range(1, 4):
+    net_attempt = 0
+    waited = 0
+    while True:
         try:
             resp = _post(model, api_key, prompt, schema=schema,
                          schema_name=schema_name, temperature=temperature)
         except (requests.Timeout, requests.ConnectionError) as e:
-            last_error = e
-            if attempt < 3:
+            net_attempt += 1
+            if net_attempt < 3:
                 _emit_progress(progress_cb,
-                               f"AI: transient network issue for {model}, retrying ({attempt}/3)")
-                time.sleep(attempt * 0.5)
+                               f"AI: transient network issue for {model}, "
+                               f"retrying ({net_attempt}/3)")
+                time.sleep(net_attempt * 0.5)
                 continue
             raise AIError(f"{model}: network error: {e}") from e
         except requests.RequestException as e:
@@ -277,14 +296,25 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                 "Mistral auth failed (HTTP %d). Your MISTRAL_API_KEY is invalid, "
                 "expired, or lacks access." % resp.status_code)
 
+        # A Learning Plan is several calls in a row and a Session Plan is one
+        # more each, so Mistral's per-minute limit is met routinely - and it
+        # clears in seconds. Failing the whole generation on it threw away
+        # every batch already produced.
         if resp.status_code == 429:
-            raise AIError(f"{model}: rate/quota limited (HTTP 429){resp.text[:160]}")
+            if waited < len(_RATE_LIMIT_BACKOFF):
+                pause = _retry_after(resp) or _RATE_LIMIT_BACKOFF[waited]
+                waited += 1
+                _emit_progress(progress_cb,
+                               f"AI: {model} is rate limited; waiting {pause:.0f}s "
+                               f"before retry {waited}/{len(_RATE_LIMIT_BACKOFF)}")
+                time.sleep(pause)
+                continue
+            raise AIError(
+                f"{model}: still rate limited after {len(_RATE_LIMIT_BACKOFF)} "
+                f"retries over {int(sum(_RATE_LIMIT_BACKOFF))}s (HTTP 429). Give "
+                f"it a minute, then generate again. {resp.text[:160]}")
 
         raise AIError(f"{model}: HTTP {resp.status_code} {resp.text[:200]}")
-
-    if last_error is not None:
-        raise AIError(f"{model}: network error: {last_error}") from last_error
-    raise AIError(f"{model}: request failed")
 
 
 def call_mistral(prompt: str, api_key: str, model: str,
