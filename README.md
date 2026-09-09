@@ -38,8 +38,23 @@ streamlit run app.py
 ```
 
 The API key is sent as a Bearer token to Mistral's chat completions API. Default
-model: `mistral-small-latest` (override with `MISTRAL_MODEL`); 401/403 surfaces a
-clear "key invalid/expired" message and 429 is reported as a Mistral API error.
+model: `mistral-small-latest`, overridable with `MISTRAL_MODEL`.
+
+**If your Mistral workspace has no paid plan**, `mistral-small-latest` is not
+included in it. Mistral doesn't refuse it outright — it provisions the workspace
+*zero requests a minute* for that model, which arrives as HTTP 429, so waiting
+never clears it. The app recognises a zero allowance (and a 403
+`tier_not_allowed`), and falls back to a model every workspace can call —
+`open-mistral-nemo`, then `ministral-8b-latest` — rather than failing the
+generation. The run log names whichever model answered. Output quality is
+noticeably better on `mistral-small-latest`, so add a plan at
+[console.mistral.ai](https://console.mistral.ai) when you can; a refusal is
+remembered for the life of the process, so restart the app after upgrading.
+
+A genuine rate limit (an allowance you have simply used up this minute) is waited
+out — 3s, 8s, 15s, 30s, honouring the server's `Retry-After` — instead of
+discarding the batches already generated. 401, and any 403 that isn't about the
+plan, still surface as a clear "key invalid/expired" message.
 
 ## The Drive document library (optional)
 

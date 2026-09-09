@@ -30,6 +30,21 @@ def _ok_payload(text):
     return {"choices": [{"message": {"content": text}}]}
 
 
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """Nothing in this module may touch the API - the plan probe included.
+
+    `generate_sessions` asks Mistral once, cheaply, which model the workspace
+    is allowed to use. Tests that stub only `call_mistral` would otherwise have
+    let that probe out onto the network.
+    """
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: FakeResp(200, _ok_payload("[]")))
+    # what one test learns about the workspace's plan must not leak into another
+    monkeypatch.setattr(ai_client, "_UNAVAILABLE_MODELS", set())
+    monkeypatch.setattr(ai_client, "_PROBED_MODELS", set())
+
+
 # --------------------------------------------------------------------------- #
 # _extract_text
 # --------------------------------------------------------------------------- #
@@ -193,6 +208,103 @@ def test_a_persistent_rate_limit_gives_up_with_something_actionable(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
+# A model the workspace's plan doesn't include
+# --------------------------------------------------------------------------- #
+def _no_allowance_resp():
+    """What Mistral sends for a model a free workspace may not call: a rate
+    limit whose allowance is zero, which no amount of waiting will clear."""
+    resp = FakeResp(429, text='{"message": "Rate limit exceeded"}')
+    resp.headers = {"x-ratelimit-limit-req-minute": "0",
+                    "x-ratelimit-remaining-req-minute": "0"}
+    return resp
+
+
+def test_a_zero_allowance_is_told_apart_from_a_busy_minute():
+    assert ai_client._has_no_allowance(_no_allowance_resp())
+    busy = FakeResp(429, text="")
+    busy.headers = {"x-ratelimit-limit-req-minute": "188",
+                    "x-ratelimit-remaining-req-minute": "0"}
+    assert not ai_client._has_no_allowance(busy)
+    assert not ai_client._has_no_allowance(FakeResp(429, text=""))
+
+
+def test_a_model_outside_the_plan_falls_back_instead_of_waiting(monkeypatch):
+    """Waiting out an allowance that will never come cost a minute and then
+    failed anyway, throwing away the batches already generated."""
+    tried = []
+    slept = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        tried.append(model)
+        if model == "mistral-small-latest":
+            return _no_allowance_resp()
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client.time, "sleep", slept.append)
+
+    assert call_mistral("p", "k", "mistral-small-latest") == []
+    assert tried == ["mistral-small-latest", ai_client.FALLBACK_MODELS[0]]
+    assert slept == []                       # nothing to wait for
+
+
+def test_a_refused_model_is_not_tried_again(monkeypatch):
+    """A Learning Plan is many calls; re-discovering the same refusal on each
+    one wasted a round trip every time."""
+    tried = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        tried.append(model)
+        if model == "mistral-small-latest":
+            return _no_allowance_resp()
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    call_mistral("p", "k", "mistral-small-latest")
+    call_mistral("p", "k", "mistral-small-latest")
+    assert tried.count("mistral-small-latest") == 1
+
+
+def test_a_tier_refusal_falls_back_too(monkeypatch):
+    tried = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        tried.append(model)
+        if model == "mistral-large-latest":
+            return FakeResp(403, text='{"message": "This model is not available '
+                                      'in your subscription tier", '
+                                      '"type": "tier_not_allowed"}')
+        return FakeResp(200, _ok_payload("[]"))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    assert call_mistral("p", "k", "mistral-large-latest") == []
+    assert tried[0] == "mistral-large-latest"
+    assert len(tried) == 2
+
+
+def test_a_real_auth_failure_is_still_reported_as_one(monkeypatch):
+    """A 403 that isn't about the tier must not be read as a missing model."""
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: FakeResp(403, text="Unauthorized"))
+    with pytest.raises(AIError, match="auth failed"):
+        call_mistral("p", "k", "m1")
+
+
+def test_when_no_model_is_allowed_the_error_says_what_to_do(monkeypatch):
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: _no_allowance_resp())
+    monkeypatch.setattr(ai_client.time, "sleep", lambda *_: None)
+
+    with pytest.raises(AIError) as excinfo:
+        call_mistral("p", "k", "mistral-small-latest")
+    message = str(excinfo.value)
+    assert "console.mistral.ai" in message
+    assert "MISTRAL_MODEL" in message
+    for model in ai_client.FALLBACK_MODELS:
+        assert model in message
+
+
+# --------------------------------------------------------------------------- #
 # Truncated-response salvage (the token-limit / unterminated-JSON case)
 # --------------------------------------------------------------------------- #
 def test_salvage_recovers_complete_objects_from_truncated_array():
@@ -203,6 +315,13 @@ def test_salvage_recovers_complete_objects_from_truncated_array():
 def test_salvage_ignores_braces_and_brackets_inside_strings():
     text = '[{"x": "a } b", "y": [1, 2]}, {"z": "trunc'
     assert ai_client._salvage_json_array(text) == [{"x": "a } b", "y": [1, 2]}]
+
+
+def test_salvage_keeps_the_rows_in_front_of_a_broken_one():
+    """A smaller model breaks JSON mid-array - an unescaped quote inside a
+    string - and taking only the longest prefix threw away the good rows."""
+    text = '[{"a": 1}, {"b": 2}, {"c": "he said "no" loudly"}, {"d": 4}]'
+    assert ai_client._salvage_json_array(text) == [{"a": 1}, {"b": 2}]
 
 
 def test_salvage_returns_none_when_no_complete_object():
@@ -331,6 +450,96 @@ def test_generate_sessions_batches_long_terms(monkeypatch):
     out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
     assert len(calls) == 3                 # 3 batches for 20 sessions at chunk 8
     assert len(out) == 20                  # every session still present (backfilled)
+
+
+def test_a_short_batch_is_retried_smaller_and_never_slides_the_rest(monkeypatch):
+    """Rows are positional, so a truncated batch used to shift every later
+    session's content onto the wrong row."""
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do the thing"],
+                        key_points=["KEY POINT"]) for i in range(16)]
+    sizes = []
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        # the model manages at most 3 rows before it runs out of room
+        asked = prompt.count('"session_title"')
+        sizes.append(asked)
+        return [{"session_title": f"row {i}"} for i in range(min(asked, 3))]
+
+    monkeypatch.setattr(ai_client, "call_mistral", fake_call)
+    out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
+
+    assert len(out) == 16
+    assert min(sizes) <= 3                  # it did split down to a size that fits
+    # every session got a generated title, none left on the skeleton's
+    assert all(s.session_title.startswith("row ") for s in out)
+
+
+def test_a_batch_that_returns_nothing_is_not_split(monkeypatch):
+    """No rows is a different failure from a truncated answer, and halving it
+    only multiplies the wasted calls."""
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do it"],
+                        key_points=["KEY POINT"]) for i in range(8)]
+    calls = []
+    monkeypatch.setattr(
+        ai_client, "call_mistral",
+        lambda prompt, api_key, model, progress_cb=None: (calls.append(1) or []))
+    out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
+    assert len(calls) == 1
+    assert len(out) == 8
+
+
+def test_the_plan_is_probed_once_and_the_batches_sized_for_the_real_model(monkeypatch):
+    """Discovering the refusal on the first real batch wasted a full
+    eight-session prompt, and sized that batch for a model that never ran."""
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do it"],
+                        key_points=["KEY POINT"]) for i in range(9)]
+    probes = []
+    batch_sizes = []
+
+    def fake_post(model, api_key, prompt, timeout=180, **kwargs):
+        probes.append((model, kwargs.get("max_tokens"), kwargs.get("structured")))
+        return _no_allowance_resp()
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        asked = prompt.count('"session_title"')
+        batch_sizes.append(asked)
+        return [{"session_title": f"row {i}"} for i in range(asked)]
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+    monkeypatch.setattr(ai_client, "call_mistral", fake_call)
+    ai_client.generate_sessions(unit, sessions, api_key="k",
+                                model="mistral-small-latest")
+
+    assert probes == [("mistral-small-latest", 1, False)]   # one throwaway token
+    assert batch_sizes == [3, 3, 3]        # not [8, 1]
+
+
+def test_a_usable_model_keeps_the_full_batch_size(monkeypatch):
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do it"],
+                        key_points=["KEY POINT"]) for i in range(9)]
+    sizes = []
+
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: FakeResp(200, _ok_payload("[]")))
+    monkeypatch.setattr(
+        ai_client, "call_mistral",
+        lambda prompt, api_key, model, progress_cb=None:
+            (sizes.append(prompt.count('"session_title"')) or []))
+    ai_client.generate_sessions(unit, sessions, api_key="k",
+                                model="mistral-small-latest")
+    assert sizes == [8, 1]
 
 
 def test_default_model_prefers_smaller_variant():

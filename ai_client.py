@@ -29,10 +29,19 @@ MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
 DEFAULT_MODEL = "mistral-small-latest"
 
+# Models a Mistral workspace can call without a paid plan, best first. Used
+# only when the configured model turns out not to be included in the plan -
+# a Learning Plan from a smaller model beats no Learning Plan at all.
+FALLBACK_MODELS = ("open-mistral-nemo", "ministral-8b-latest")
+
 # Sessions per grounded Learning-Plan call. A full term (e.g. 24 sessions) does
 # not fit in one JSON response - it gets truncated to invalid JSON - so we
 # generate in batches and concatenate the rows in order.
 LP_SESSION_CHUNK = 8
+
+# A fallback model is both slower and shorter-winded than the default: eight
+# sessions neither fit in one answer nor finish inside the request timeout.
+FALLBACK_SESSION_CHUNK = 3
 
 
 class AIError(RuntimeError):
@@ -126,6 +135,34 @@ _RATE_LIMIT_BACKOFF = (3.0, 8.0, 15.0, 30.0)
 _MAX_RETRY_AFTER = 60.0
 
 
+class _ModelUnavailable(Exception):
+    """The workspace's plan doesn't include this model. Internal to this module."""
+
+
+# 'This model is not available in your subscription tier'
+_RE_TIER_REFUSAL = re.compile(r"tier_not_allowed|not available in your subscription",
+                              re.I)
+
+
+def _has_no_allowance(resp) -> bool:
+    """Whether the workspace is allowed ZERO requests a minute for this model.
+
+    Mistral gates some models by refusing them outright (403) and others by
+    provisioning no allowance at all, which surfaces as a rate limit that no
+    amount of waiting will clear. The headers tell the two apart:
+    'x-ratelimit-limit-req-minute: 0' is a plan boundary, not a busy minute.
+    """
+    headers = getattr(resp, "headers", None) or {}
+    limits = [v for k, v in headers.items()
+              if "ratelimit-limit" in k.lower() and "req" in k.lower()]
+    if not limits:
+        return False
+    try:
+        return all(float(v) == 0 for v in limits)
+    except (TypeError, ValueError):
+        return False
+
+
 def _retry_after(resp) -> float:
     """The server's own Retry-After in seconds, or 0.0 when it didn't say."""
     raw = (getattr(resp, "headers", None) or {}).get("Retry-After", "")
@@ -135,24 +172,27 @@ def _retry_after(resp) -> float:
         return 0.0                       # an HTTP-date form; use our own backoff
 
 
-def _post(model: str, api_key: str, prompt: str, timeout: int = 120,
+def _post(model: str, api_key: str, prompt: str, timeout: int = 180,
           schema: Optional[dict] = None,
           schema_name: str = "learning_plan_sessions",
-          temperature: float = 0.2) -> dict:
+          temperature: float = 0.2, max_tokens: int = 14000,
+          structured: bool = True) -> dict:
+    """POST one chat completion. `structured=False` is for cheap probes only."""
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
-        "max_tokens": 14000,
-        "response_format": {
+        "max_tokens": max_tokens,
+    }
+    if structured:
+        body["response_format"] = {
             "type": "json_schema",
             "json_schema": {
                 "name": schema_name,
                 "schema": schema if schema is not None else _response_schema(),
                 "strict": True,
             },
-        },
-    }
+        }
     resp = requests.post(MISTRAL_ENDPOINT,
                          headers={
                              "Authorization": f"Bearer {api_key}",
@@ -197,6 +237,11 @@ def _salvage_json_array(text: str):
     learning-plan response still yields usable rows (the deterministic merge
     backfills any sessions the model never reached). Returns a list, or None if
     nothing salvageable is present.
+
+    A smaller model also breaks JSON in the middle of an otherwise complete
+    array - an unescaped quote inside a string, say. Taking only the longest
+    prefix threw away the good rows in front of the bad one, so each object
+    boundary is tried in turn, longest first.
     """
     start = text.find("[")
     if start == -1:
@@ -204,7 +249,7 @@ def _salvage_json_array(text: str):
     depth = 0
     in_str = False
     esc = False
-    last_complete = None            # index of the last '}' that closed a top-level object
+    closes = []                     # every '}' that closed a top-level object
     for i in range(start, len(text)):
         ch = text[i]
         if in_str:
@@ -222,15 +267,16 @@ def _salvage_json_array(text: str):
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                last_complete = i
-    if last_complete is None:
-        return None
-    candidate = text[start:last_complete + 1].rstrip().rstrip(",") + "]"
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, list) else None
+                closes.append(i)
+    for close in reversed(closes):
+        candidate = text[start:close + 1].rstrip().rstrip(",") + "]"
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue                # this object is the broken one; try the previous
+        if isinstance(data, list):
+            return data
+    return None
 
 
 def _emit_progress(progress_cb, message: str) -> None:
@@ -242,12 +288,56 @@ def _emit_progress(progress_cb, message: str) -> None:
             pass
 
 
+# Models this workspace has already been refused, so a Learning Plan of eight
+# batches plus a Session Plan each doesn't re-discover the same refusal every
+# call. Process-lived: upgrade the plan and restart the app to try again.
+_UNAVAILABLE_MODELS: set = set()
+
+
+def _model_chain(model: str) -> List[str]:
+    """The model to use, then the ones to fall back to if the plan forbids it."""
+    chain = [model] + [m for m in FALLBACK_MODELS if m != model]
+    return [m for m in chain if m not in _UNAVAILABLE_MODELS] or chain
+
+
 def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                schema_name: str, progress_cb=None, temperature: float = 0.2):
-    """One grounded request, retrying transient network errors and rate limits.
+    """One grounded request, on the best model this workspace is allowed to use.
+
+    A free Mistral workspace is provisioned zero requests a minute for the
+    paid models, so the configured one can be unusable through no fault of the
+    key. Falling back keeps the generation running; the run log names whichever
+    model actually answered.
+    """
+    chain = _model_chain(model)
+    for i, candidate in enumerate(chain):
+        try:
+            return _chat_json_once(prompt, api_key, candidate, schema,
+                                   schema_name, progress_cb=progress_cb,
+                                   temperature=temperature)
+        except _ModelUnavailable:
+            _UNAVAILABLE_MODELS.add(candidate)
+            if i + 1 >= len(chain):
+                break
+            message = (f"AI: {candidate} isn't included in your Mistral plan; "
+                       f"falling back to {chain[i + 1]}")
+            _emit_progress(progress_cb, message)
+            runlog.log(message)
+
+    raise AIError(
+        "Your Mistral plan doesn't include any of the models tried (%s). Add a "
+        "paid plan at console.mistral.ai to use %s, or set MISTRAL_MODEL in "
+        ".env to a model your plan allows." % (", ".join(chain), model))
+
+
+def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
+                    schema_name: str, progress_cb=None, temperature: float = 0.2):
+    """One grounded request to ONE model, retrying network errors and rate limits.
 
     Returns the parsed JSON exactly as the model produced it (a list or a dict);
-    callers coerce it to the shape they expect.
+    callers coerce it to the shape they expect. Raises `_ModelUnavailable` when
+    the workspace's plan doesn't include this model, so the caller can move on
+    to one it does.
     """
     _emit_progress(progress_cb, f"AI: trying model {model}")
     net_attempt = 0
@@ -269,6 +359,7 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
             raise AIError(f"{model}: network error: {e}") from e
 
         if resp.status_code == 200:
+            _emit_progress(progress_cb, f"AI: {model} answered")
             payload = resp.json()
             try:
                 text = _extract_text(payload)
@@ -283,13 +374,18 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
                 salvaged = _salvage_json_array(text)
                 if salvaged is not None:
                     _emit_progress(progress_cb,
-                                   f"AI: {model} response was truncated; "
+                                   f"AI: {model} returned unusable JSON; "
                                    f"salvaged {len(salvaged)} complete rows")
                     return salvaged
                 reason = (payload.get("choices") or [{}])[0].get("finish_reason")
                 hint = (" (the response hit the length limit)"
                         if reason == "length" else "")
                 raise AIError(f"{model} returned invalid JSON: {e}{hint}") from e
+
+        # A model outside the workspace's plan answers 403 'tier_not_allowed';
+        # the key itself is fine, so this is not an auth failure.
+        if resp.status_code == 403 and _RE_TIER_REFUSAL.search(resp.text or ""):
+            raise _ModelUnavailable(model)
 
         if resp.status_code in (401, 403):
             raise AIError(
@@ -301,6 +397,12 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
         # clears in seconds. Failing the whole generation on it threw away
         # every batch already produced.
         if resp.status_code == 429:
+            # Mistral also gates a model by allowing the workspace ZERO
+            # requests a minute for it, which arrives as a rate limit rather
+            # than a refusal. Waiting for an allowance that will never come
+            # cost a minute and then failed anyway.
+            if _has_no_allowance(resp):
+                raise _ModelUnavailable(model)
             if waited < len(_RATE_LIMIT_BACKOFF):
                 pause = _retry_after(resp) or _RATE_LIMIT_BACKOFF[waited]
                 waited += 1
@@ -326,7 +428,9 @@ def call_mistral(prompt: str, api_key: str, model: str,
         data = data.get("sessions") or data.get("data") or [data]
     if not isinstance(data, list):
         raise AIError(f"{model} did not return a JSON array")
-    _emit_progress(progress_cb, f"AI: {model} succeeded ({len(data)} session rows)")
+    # Not "{model} succeeded" - a fallback may have answered instead, and the
+    # log claiming the model that refused had produced the rows was misleading.
+    _emit_progress(progress_cb, f"AI: {len(data)} session rows returned")
     return data
 
 
@@ -579,6 +683,67 @@ def _format_curriculum_keypoints(points: List[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Public orchestration
 # --------------------------------------------------------------------------- #
+# Models already probed this process, available or not.
+_PROBED_MODELS: set = set()
+
+
+def _probe_model(model: str, api_key: str, progress_cb=None) -> None:
+    """Find out cheaply whether the plan includes `model`, before batching.
+
+    Discovering it on the first real batch is expensive: that request carries a
+    full eight-session prompt, and if the fallback then answers it, the batch
+    was sized for a model that never ran. One throwaway token settles it.
+    """
+    if model in _PROBED_MODELS or model in _UNAVAILABLE_MODELS:
+        return
+    _PROBED_MODELS.add(model)
+    try:
+        resp = _post(model, api_key, "ok", timeout=30, max_tokens=1,
+                     structured=False)
+    except requests.RequestException:
+        return                        # a network blip proves nothing about the plan
+    if resp.status_code == 429 and _has_no_allowance(resp):
+        pass
+    elif resp.status_code == 403 and _RE_TIER_REFUSAL.search(resp.text or ""):
+        pass
+    else:
+        return
+    _UNAVAILABLE_MODELS.add(model)
+    message = f"AI: {model} isn't included in your Mistral plan"
+    _emit_progress(progress_cb, message)
+    runlog.log(message)
+
+
+def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
+                    model: str, progress_cb=None) -> List[dict]:
+    """Exactly one row per session in `chunk`, whatever the model returns.
+
+    Rows are positional - `merge_ai_into_sessions` pairs row *i* with session
+    *i* - so a model that runs out of room mid-array must never simply return a
+    short list: every following batch would then slide onto the wrong sessions.
+    A short answer is retried in halves (a smaller batch fits where a big one
+    didn't), and anything still missing is padded so the deterministic backfill
+    lands on the right row.
+    """
+    rows = call_mistral(build_prompt(unit, chunk), api_key, model,
+                        progress_cb=progress_cb)
+    if len(rows) >= len(chunk):
+        return rows[:len(chunk)]
+
+    # Some rows but not all means the answer ran out of room, and a smaller
+    # batch fits where a big one didn't. NO rows is a different failure - the
+    # model gave nothing - and splitting only multiplies it.
+    if rows and len(chunk) > 1:
+        _emit_progress(progress_cb,
+                       f"AI: {len(rows)} of {len(chunk)} sessions came back; "
+                       f"retrying them in smaller batches")
+        half = len(chunk) // 2
+        return (_generate_batch(unit, chunk[:half], api_key, model, progress_cb)
+                + _generate_batch(unit, chunk[half:], api_key, model, progress_cb))
+
+    return rows + [{}] * (len(chunk) - len(rows))
+
+
 def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
                       model: Optional[str] = None, progress_cb=None) -> List[Session]:
     """Run the single grounded AI call and merge the result into the skeleton.
@@ -600,16 +765,19 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     # Generate in batches so a long term's JSON never overflows the token limit
     # (a single 24-session response gets truncated -> invalid JSON). Rows are
     # concatenated in order, preserving alignment with the deterministic skeleton.
-    chunks = [sessions[i:i + LP_SESSION_CHUNK]
-              for i in range(0, len(sessions), LP_SESSION_CHUNK)]
+    # Size the batches for the model that will actually answer them.
+    _probe_model(model, api_key, progress_cb)
+    answering = _model_chain(model)[0]
+    size = FALLBACK_SESSION_CHUNK if answering in FALLBACK_MODELS         else LP_SESSION_CHUNK
+
+    chunks = [sessions[i:i + size] for i in range(0, len(sessions), size)]
     ai_rows: List[dict] = []
     for ci, chunk in enumerate(chunks, start=1):
         first, last = len(ai_rows) + 1, len(ai_rows) + len(chunk)
         _emit_progress(progress_cb,
                        f"AI: generating sessions {first}-{last} of {len(sessions)} "
                        f"(batch {ci}/{len(chunks)})")
-        prompt = build_prompt(unit, chunk)
-        ai_rows.extend(call_mistral(prompt, api_key, model, progress_cb=progress_cb))
+        ai_rows.extend(_generate_batch(unit, chunk, api_key, model, progress_cb))
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
