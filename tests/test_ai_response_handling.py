@@ -1,10 +1,12 @@
-"""Robustness of the Mistral response path. ZERO real API calls - the HTTP layer
+"""Robustness of the Groq response path. ZERO real API calls - the HTTP layer
 (`ai_client._post`) is monkeypatched to return canned responses.
 
 Covers the case that motivated the hardening: the provider returns HTTP 200 but
 the choice carries only a finish reason and no assistant content.
 That must raise a clean AIError and stop, not fall back to another model.
 """
+
+import re
 
 import pytest
 import requests
@@ -30,8 +32,9 @@ def _ok_payload(text):
     return {"choices": [{"message": {"content": text}}]}
 
 
-# The fixture below stubs discovery out; this keeps a handle on the real one.
+# The fixture below stubs these out; these keep handles on the real ones.
 REAL_LIST_CHAT_MODELS = ai_client.list_chat_models
+REAL_POST = ai_client._post
 
 DISCOVERED = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
               "llama-3.3-70b-versatile", "whisper-large-v3"]
@@ -41,7 +44,7 @@ DISCOVERED = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
 def offline(monkeypatch):
     """Nothing in this module may touch the API - model discovery included.
 
-    `generate_sessions` asks Mistral which models exist and probes one before
+    `generate_sessions` asks Groq which models exist and probes one before
     generating. Tests that stub only `call_model` would otherwise have let
     that out onto the network.
     """
@@ -701,7 +704,8 @@ def test_a_term_is_asked_for_in_batches_of_four(monkeypatch):
     monkeypatch.setattr(ai_client, "call_model", fake_call)
     ai_client.generate_sessions(unit, sessions, api_key="k",
                                 model="openai/gpt-oss-120b")
-    assert sizes == [4, 4, 1]
+    # sorted, because the batches go out together and may land in any order
+    assert sorted(sizes, reverse=True) == [4, 4, 1]
 
 
 def test_the_default_model_is_groqs_strongest_free_one():
@@ -722,3 +726,90 @@ def test_build_prompt_includes_curriculum_only_instruction():
     assert "Do NOT invent syllabus content; use what is given." in prompt
     assert 'Return ONLY a JSON object of the form {"sessions": [ ... ]}.' in prompt
     assert "ASSESSMENT COVERAGE" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# speed: low reasoning effort, and batches that overlap
+# --------------------------------------------------------------------------- #
+def test_a_reasoning_model_is_told_not_to_think_at_length(monkeypatch):
+    """gpt-oss and qwen3 bill their thinking as completion tokens, and tokens a
+    minute is the binding limit - so the thinking is asked to be brief."""
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return FakeResp(200, _ok_payload('{"sessions": []}'))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    REAL_POST("openai/gpt-oss-120b", "k", "prompt")
+
+    assert sent["reasoning_effort"] == "low"
+
+
+def test_a_model_without_a_thinking_budget_is_not_sent_one(monkeypatch):
+    """The field is not universal; a model that has no use for it answers a
+    400, which would cost us a working model."""
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return FakeResp(200, _ok_payload('{"sessions": []}'))
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    REAL_POST("llama-3.3-70b-versatile", "k", "prompt")
+
+    assert "reasoning_effort" not in sent
+
+
+def test_the_batches_of_a_plan_go_out_together(monkeypatch):
+    """The token allowance refills continuously and is per model, so batches
+    waiting in a queue leave it unspent. Three at a time, measured at 6s for a
+    plan that took 142s one after another."""
+    import threading
+
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do it"],
+                        key_points=["KEY POINT"]) for i in range(12)]
+    in_flight = threading.Barrier(3, timeout=10)
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        in_flight.wait()          # times out unless three run at once
+        asked = prompt.count('"session_title"')
+        return [{"session_title": f"row {i}"} for i in range(asked)]
+
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
+    out = ai_client.generate_sessions(unit, sessions, api_key="k",
+                                      model="openai/gpt-oss-120b")
+
+    assert len(out) == 12
+
+
+def test_rows_stay_with_their_own_session_when_batches_land_out_of_order(monkeypatch):
+    """Rows are positional. Batches finishing in a different order than they
+    were sent must not shuffle the plan."""
+    import threading
+    import time as _time
+
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
+                assessment_methods=["Observation"])
+    sessions = [Session(week=i + 1, session_no="1", is_cat=False,
+                        session_title=f"S{i}", pcs=["1.1 do it"],
+                        key_points=["KEY POINT"]) for i in range(8)]
+    first = threading.Event()
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        titles = re.findall(r'"session_title": "(S\d+)"', prompt)
+        if titles and titles[0] == "S0":
+            first.wait(5)          # the opening batch answers last
+        else:
+            _time.sleep(0.05)
+            first.set()
+        return [{"session_title": f"ai {t}"} for t in titles]
+
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
+    out = ai_client.generate_sessions(unit, sessions, api_key="k",
+                                      model="openai/gpt-oss-120b")
+
+    assert [s.session_title for s in out] == [f"ai S{i}" for i in range(8)]

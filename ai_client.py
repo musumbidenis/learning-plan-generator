@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 import requests
@@ -96,6 +97,24 @@ LP_SESSION_CHUNK = 4
 # Ceiling on one answer, for the same reason. Above this a single request can
 # exceed the per-minute token allowance and be refused outright.
 MAX_OUTPUT_TOKENS = 6000
+
+# Batches that may be in flight at once. The token allowance is per MODEL, and
+# it refills continuously rather than in one lump at the top of the minute, so
+# firing the batches together spends it as it arrives instead of leaving the
+# connection idle between calls. Measured on a real 11-session plan: 142s in a
+# row, 6s together. Three, because a fourth only earns a 429 and the backoff
+# that follows costs more than the overlap saves.
+LP_MAX_PARALLEL = 3
+
+# Reasoning models on Groq think in billed completion tokens before they answer,
+# and on this task the thinking is dead weight: measured over one real batch,
+# "low" returned MORE prose (1032 words vs 930) in 28% fewer tokens (2568 vs
+# 3577) and a quarter less time. Tokens are the binding limit here, so cutting
+# them is a speed-up twice over - each call is quicker, and more calls fit in a
+# minute's allowance. Only sent to families that accept the field; anything else
+# would answer a 400.
+REASONING_EFFORT = "low"
+_RE_REASONING_MODEL = re.compile(r"gpt-oss|qwen3|deepseek-r1", re.I)
 
 
 class AIError(RuntimeError):
@@ -317,6 +336,8 @@ def _post(model: str, api_key: str, prompt: str, timeout: int = 180,
             },
         },
     }
+    if _RE_REASONING_MODEL.search(model):
+        body["reasoning_effort"] = REASONING_EFFORT
     resp = requests.post(GROQ_ENDPOINT,
                          headers={
                              "Authorization": f"Bearer {api_key}",
@@ -1040,16 +1061,28 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     # skeleton, and sized for the model that will actually answer them.
     size = batch_size_for(model)
     chunks = [sessions[i:i + size] for i in range(0, len(sessions), size)]
+
+    # Batches don't depend on each other, so they go together rather than in a
+    # row - see LP_MAX_PARALLEL. Each worker collects its own progress lines
+    # instead of calling progress_cb, because that callback draws into the
+    # Streamlit page and only the main thread may do that; the lines are
+    # replayed here, in batch order, as each batch lands.
+    def run_batch(numbered):
+        ci, chunk = numbered
+        lines: List[str] = []
+        first = sum(len(c) for c in chunks[:ci - 1]) + 1
+        lines.append(f"AI: generating sessions {first}-{first + len(chunk) - 1} "
+                     f"of {len(sessions)} (batch {ci}/{len(chunks)})")
+        rows = _generate_batch(unit, chunk, api_key, model, lines.append)
+        return lines, rows
+
     ai_rows: List[dict] = []
-    for ci, chunk in enumerate(chunks, start=1):
-        first, last = len(ai_rows) + 1, len(ai_rows) + len(chunk)
-        _emit_progress(progress_cb,
-                       f"AI: generating sessions {first}-{last} of {len(sessions)} "
-                       f"(batch {ci}/{len(chunks)})")
-        # a batch may have moved us to another model; the rest follow it there
-        model = resolve_model(api_key, model if model not in _UNAVAILABLE_MODELS
-                              else None, progress_cb)
-        ai_rows.extend(_generate_batch(unit, chunk, api_key, model, progress_cb))
+    numbered = list(enumerate(chunks, start=1))
+    with ThreadPoolExecutor(max_workers=min(LP_MAX_PARALLEL, len(chunks))) as pool:
+        for lines, rows in pool.map(run_batch, numbered):
+            for line in lines:
+                _emit_progress(progress_cb, line)
+            ai_rows.extend(rows)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 

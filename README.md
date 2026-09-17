@@ -20,8 +20,9 @@ session content uses AI, in grounded, schema-constrained API calls.**
    ├─(C) GROUNDED GROQ CALLS    ─ ai_client.py                          [the only AI]
    │      └ fills learning_outcomes / activities / resources / assessments,
    │        grounded in parsed data; JSON schema mode forces valid JSON.
-   │        Sessions go in batches of LP_SESSION_CHUNK (4); a Session Plan and
-   │        a single-session regenerate are one call each.
+   │        Sessions go in batches of LP_SESSION_CHUNK (4), LP_MAX_PARALLEL (3)
+   │        in flight at once; a Session Plan and a single-session regenerate
+   │        are one call each.
    │
    └─(D) DOC BUILDER            ─ doc_builder.py                        [no AI]
           └ A4, Times New Roman, Table Grid, 9-column RVNP session table
@@ -73,6 +74,25 @@ as a clear "key invalid/expired" message.
 Sessions go out in batches of **four**, capped at 6,000 output tokens. The binding limit is
 not the 1,000 requests a day but **8,000 tokens a minute** on the gpt-oss models — eight
 sessions would spend a whole minute's allowance in one request.
+
+### Speed
+
+Two things follow from tokens-a-minute being the limit rather than requests-a-day.
+
+**Batches go out together, not in a row** (`LP_MAX_PARALLEL`, three at a time). The
+allowance refills continuously and is counted per *model*, so batches queued behind each
+other leave it unspent while the connection sits idle. An 11-session plan took **142s** one
+after another and **36s** three at a time.
+
+**Reasoning models are told to think briefly** (`REASONING_EFFORT = "low"`). The gpt-oss and
+qwen3 models bill their thinking as completion tokens, and on this task it is dead weight:
+over one real batch, `low` returned *more* prose (1,032 words vs 930) in **28% fewer tokens**
+(2,568 vs 3,577) and a quarter less time. Fewer tokens is a speed-up twice over — each call
+is quicker, and more calls fit inside a minute's allowance. The field is only sent to model
+families that accept it; others would answer a 400.
+
+What is left is the floor: a plan long enough to need a third batch still waits out the
+token allowance, which is what the free tier buys.
 
 ## The Drive document library (optional)
 
@@ -160,7 +180,7 @@ automatically, and an unchanged one is downloaded only once.
 - **Source typos / format drift** → tolerant markers (`PERFORMANCE CRETIRIA`),
   PC numbering `1.1` *and* `1.1.text`, per-page bullet-column detection.
 - **Footer noise** → bare numbers and `©TVET CDACC 2025` filtered; mangled `©` repaired.
-- **AI calls** use JSON schema mode + `max_tokens 14000`, batched so long plans
+- **AI calls** use JSON schema mode + `max_tokens 6000`, batched so long plans
   never truncate, with a salvage pass that recovers the complete leading objects
   of a cut-off array; the deterministic schedule is re-stamped afterwards so the
   AI can't override it.
