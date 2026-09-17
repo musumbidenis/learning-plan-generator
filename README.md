@@ -20,7 +20,7 @@ session content uses AI, in grounded, schema-constrained API calls.**
    ├─(C) GROUNDED GROQ CALLS    ─ ai_client.py                          [the only AI]
    │      └ fills learning_outcomes / activities / resources / assessments,
    │        grounded in parsed data; JSON schema mode forces valid JSON.
-   │        Sessions go in batches of LP_SESSION_CHUNK (4), LP_MAX_PARALLEL (3)
+   │        Sessions go in batches of LP_SESSION_CHUNK (8), LP_MAX_PARALLEL (3)
    │        in flight at once; a Session Plan and a single-session regenerate
    │        are one call each.
    │
@@ -71,9 +71,8 @@ minute is waited out (3s, 8s, 15s, 30s, honouring `Retry-After`), while a reset 
 is the day's allowance and moves to a model with its own. 401, and any 403, still surface
 as a clear "key invalid/expired" message.
 
-Sessions go out in batches of **four**, capped at 6,000 output tokens. The binding limit is
-not the 1,000 requests a day but **8,000 tokens a minute** on the gpt-oss models — eight
-sessions would spend a whole minute's allowance in one request.
+Sessions go out in batches of **eight**, capped at 8,000 output tokens. The binding limit is
+not the 1,000 requests a day but **8,000 tokens a minute** on the gpt-oss models.
 
 ### Speed
 
@@ -91,8 +90,34 @@ over one real batch, `low` returned *more* prose (1,032 words vs 930) in **28% f
 is quicker, and more calls fit inside a minute's allowance. The field is only sent to model
 families that accept it; others would answer a 400.
 
-What is left is the floor: a plan long enough to need a third batch still waits out the
-token allowance, which is what the free tier buys.
+**Batches are as large as the answer allows** (`LP_SESSION_CHUNK = 8`). Measured against the
+live API, the cost of a batch is mostly its *instructions*: the fixed block of the prompt is
+**~1,336 tokens** and each session adds only **~94**. Every extra batch therefore resends
+1,336 tokens for nothing. Eight only became possible once the model stopped thinking at
+length — that halved output per session to ~456 — and a batch that still overflows is split
+and retried as before.
+
+**A refused generation is recovered rather than discarded.** Groq validates the *finished*
+answer against the schema instead of constraining every token, so a model can write a
+complete, correct plan and still be refused over one invented field — and it hands the whole
+generation back in `failed_generation`. This used to cost the batch *and* the model, because
+a 400 otherwise rules a model out. The rows are now recovered and stray keys put back where
+they belong. The underlying cause is fixed too: the "Follow up Activity:" instruction now
+says plainly that the line is another string in `trainee_activities`, not a field of its own.
+
+### What this measures
+
+| | 11-session plan |
+|---|---|
+| Sequential batches of 4 | 142s |
+| Parallel batches of 4 | 36.4s |
+| **Parallel batches of 8** | **11.9s** |
+
+That 11.9s assumes a rested token allowance. An 11-session plan costs about **8,700 tokens**,
+which is roughly one minute's worth, so generating two plans back to back throttles the
+second (measured 20.7s) and a third waits longer still. That is the free tier's real
+throughput — about a plan a minute — and no amount of batching changes it; the fixes above
+lower the bill (from ~11,300 tokens to ~8,700) rather than raise the ceiling.
 
 ## The Drive document library (optional)
 
@@ -180,7 +205,7 @@ automatically, and an unchanged one is downloaded only once.
 - **Source typos / format drift** → tolerant markers (`PERFORMANCE CRETIRIA`),
   PC numbering `1.1` *and* `1.1.text`, per-page bullet-column detection.
 - **Footer noise** → bare numbers and `©TVET CDACC 2025` filtered; mangled `©` repaired.
-- **AI calls** use JSON schema mode + `max_tokens 6000`, batched so long plans
+- **AI calls** use JSON schema mode + `max_tokens 8000`, batched so long plans
   never truncate, with a salvage pass that recovers the complete leading objects
   of a cut-off array; the deterministic schedule is re-stamped afterwards so the
   AI can't override it.

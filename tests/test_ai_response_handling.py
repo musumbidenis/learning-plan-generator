@@ -491,8 +491,8 @@ def test_the_batch_is_sized_for_the_token_allowance_not_the_model():
     """8,000 tokens a minute is the ceiling, and a bigger model doesn't raise it."""
     for model in ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"):
         assert ai_client.batch_size_for(model) == ai_client.LP_SESSION_CHUNK
-    assert ai_client.LP_SESSION_CHUNK == 4
-    assert ai_client.MAX_OUTPUT_TOKENS == 6000
+    assert ai_client.LP_SESSION_CHUNK == 8
+    assert ai_client.MAX_OUTPUT_TOKENS == 8000
 
 
 # --------------------------------------------------------------------------- #
@@ -628,7 +628,7 @@ def test_cat_content_is_scoped_to_sessions_since_previous_cat():
 
 
 def test_generate_sessions_batches_long_terms(monkeypatch):
-    """A 20-session term must be split into ceil(20/4)=5 grounded calls."""
+    """A 20-session term must be split into ceil(20/8)=3 grounded calls."""
     unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
@@ -639,7 +639,7 @@ def test_generate_sessions_batches_long_terms(monkeypatch):
         ai_client, "call_model",
         lambda prompt, api_key, model, progress_cb=None: (calls.append(1) or []))
     out = ai_client.generate_sessions(unit, sessions, api_key="k", model="m")
-    assert len(calls) == 5                 # 5 batches for 20 sessions at chunk 4
+    assert len(calls) == 3                 # 3 batches for 20 sessions at chunk 8
     assert len(out) == 20                  # every session still present (backfilled)
 
 
@@ -686,14 +686,14 @@ def test_a_batch_that_returns_nothing_is_not_split(monkeypatch):
     assert len(out) == ai_client.LP_SESSION_CHUNK
 
 
-def test_a_term_is_asked_for_in_batches_of_four(monkeypatch):
-    """Nine sessions go out as 4 + 4 + 1, never as one prompt: Groq's ceiling is
-    8,000 tokens a minute and one big batch spends it all at once."""
+def test_a_term_is_asked_for_in_batches(monkeypatch):
+    """Twenty sessions go out as 8 + 8 + 4, never as one prompt: Groq's ceiling
+    is 8,000 tokens a minute and one big batch spends it all at once."""
     unit = Unit(unit_title="U", os_code="X/OS/1", level="5",
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
                         session_title=f"S{i}", pcs=["1.1 do it"],
-                        key_points=["KEY POINT"]) for i in range(9)]
+                        key_points=["KEY POINT"]) for i in range(20)]
     sizes = []
 
     def fake_call(prompt, api_key, model, progress_cb=None):
@@ -705,7 +705,7 @@ def test_a_term_is_asked_for_in_batches_of_four(monkeypatch):
     ai_client.generate_sessions(unit, sessions, api_key="k",
                                 model="openai/gpt-oss-120b")
     # sorted, because the batches go out together and may land in any order
-    assert sorted(sizes, reverse=True) == [4, 4, 1]
+    assert sorted(sizes, reverse=True) == [8, 8, 4]
 
 
 def test_the_default_model_is_groqs_strongest_free_one():
@@ -771,7 +771,7 @@ def test_the_batches_of_a_plan_go_out_together(monkeypatch):
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
                         session_title=f"S{i}", pcs=["1.1 do it"],
-                        key_points=["KEY POINT"]) for i in range(12)]
+                        key_points=["KEY POINT"]) for i in range(24)]
     in_flight = threading.Barrier(3, timeout=10)
 
     def fake_call(prompt, api_key, model, progress_cb=None):
@@ -783,7 +783,7 @@ def test_the_batches_of_a_plan_go_out_together(monkeypatch):
     out = ai_client.generate_sessions(unit, sessions, api_key="k",
                                       model="openai/gpt-oss-120b")
 
-    assert len(out) == 12
+    assert len(out) == 24
 
 
 def test_rows_stay_with_their_own_session_when_batches_land_out_of_order(monkeypatch):
@@ -796,7 +796,7 @@ def test_rows_stay_with_their_own_session_when_batches_land_out_of_order(monkeyp
                 assessment_methods=["Observation"])
     sessions = [Session(week=i + 1, session_no="1", is_cat=False,
                         session_title=f"S{i}", pcs=["1.1 do it"],
-                        key_points=["KEY POINT"]) for i in range(8)]
+                        key_points=["KEY POINT"]) for i in range(16)]
     first = threading.Event()
 
     def fake_call(prompt, api_key, model, progress_cb=None):
@@ -812,4 +812,95 @@ def test_rows_stay_with_their_own_session_when_batches_land_out_of_order(monkeyp
     out = ai_client.generate_sessions(unit, sessions, api_key="k",
                                       model="openai/gpt-oss-120b")
 
-    assert [s.session_title for s in out] == [f"ai S{i}" for i in range(8)]
+    assert [s.session_title for s in out] == [f"ai S{i}" for i in range(16)]
+
+
+# --------------------------------------------------------------------------- #
+# A generation the validator refused, but which is perfectly good content
+# --------------------------------------------------------------------------- #
+def _rejected(generation):
+    """Groq's shape for 'you generated it, but it broke the schema'."""
+    return FakeResp(400, {"error": {
+        "code": "json_validate_failed",
+        "message": "Generated JSON does not match the expected schema.",
+        "failed_generation": generation}})
+
+
+def test_a_generation_refused_over_one_stray_key_is_not_thrown_away(monkeypatch):
+    """Groq validates the FINISHED answer, so a complete plan can be refused for
+    a single invented field - and it returns the whole generation with the 400.
+    Discarding it would cost the batch and, worse, rule the model out."""
+    generation = json.dumps({"sessions": [
+        {"session_title": "Threats", "trainee_activities": ["- Group Discussion: name threats."],
+         "follow_up_activity": "1. Scan the lab workstation and report."},
+        {"session_title": "Controls", "trainee_activities": ["- Case Study: pick a control."]}]})
+    monkeypatch.setattr(ai_client, "_post", lambda *a, **k: _rejected(generation))
+
+    rows = call_model("prompt", "k", "openai/gpt-oss-120b")
+
+    assert [r["session_title"] for r in rows] == ["Threats", "Controls"]
+
+
+def test_content_filed_under_an_invented_key_is_put_back_where_it_belongs():
+    """The model was asked for a 'Follow up Activity:' LINE and answered with a
+    FIELD. The writing is good; only its address is wrong."""
+    row = ai_client._rehome_stray_keys(
+        {"session_title": "Threats",
+         "trainee_activities": ["- Group Discussion: name threats."],
+         "follow_up_activity": "1. Scan the lab workstation and report."})
+
+    assert row["trainee_activities"] == [
+        "- Group Discussion: name threats.",
+        "Follow Up Activity:",
+        "1. Scan the lab workstation and report."]
+    assert "follow_up_activity" not in row
+
+
+def test_a_known_field_under_another_spelling_is_merged_not_appended():
+    row = ai_client._rehome_stray_keys(
+        {"resources": ["Textbook"], "Resources ": ["Lab manual"]})
+
+    assert row["resources"] == ["Textbook", "Lab manual"]
+    assert list(row) == ["resources"]
+
+
+def test_a_400_with_nothing_to_recover_still_rules_the_model_out(monkeypatch):
+    """A model that won't take the schema at all has no generation attached;
+    that must still move us to one that will."""
+    refusals = []
+
+    def fake_post(model, api_key, prompt, **kw):
+        refusals.append(model)
+        if model == "openai/gpt-oss-120b":
+            return FakeResp(400, {"error": {"code": "invalid_request_error",
+                                            "message": "unsupported response_format"}})
+        return FakeResp(200, _ok_payload('{"sessions": [{"session_title": "ok"}]}'))
+
+    monkeypatch.setattr(ai_client, "_post", fake_post)
+
+    rows = call_model("prompt", "k", "openai/gpt-oss-120b")
+
+    assert rows == [{"session_title": "ok"}]
+    assert refusals[0] == "openai/gpt-oss-120b" and len(refusals) > 1
+
+
+def test_a_refused_generation_that_is_not_json_falls_through(monkeypatch):
+    """Nothing to salvage means the ordinary 'not this model' path."""
+    monkeypatch.setattr(ai_client, "_post",
+                        lambda *a, **k: _rejected("{not json at all"))
+
+    with pytest.raises(AIError):
+        call_model("prompt", "k", "openai/gpt-oss-120b")
+
+
+def test_the_prompt_says_the_follow_up_line_is_not_its_own_field():
+    """The salvage above is the net; this is the fix - the instruction that
+    produced the stray key in the first place."""
+    unit = Unit(unit_title="U", os_code="X/OS/1", level="6",
+                assessment_methods=["Observation"])
+    session = Session(week=1, session_no="1", is_cat=False, session_title="S",
+                      pcs=["1.1 do it"], key_points=["KEY POINT"])
+
+    prompt = ai_client.build_prompt(unit, [session])
+
+    assert "There is no separate follow-up field" in prompt

@@ -89,14 +89,24 @@ _RESOLVED_MODEL = ""
 # not fit in one JSON response - it gets truncated to invalid JSON - so we
 # generate in batches and concatenate the rows in order.
 #
-# Four, not eight, because Groq's binding limit is not its 1,000 requests a day
-# but 8,000 TOKENS a minute on the gpt-oss models: eight sessions (~2k in, ~6k
-# out) spend a whole minute's allowance in one request.
-LP_SESSION_CHUNK = 4
+# Eight, because the cost of a batch is mostly the INSTRUCTIONS, not the
+# sessions: measured against the live API, the fixed block of this module's
+# prompt is ~1,336 tokens and each session adds only ~94. Every extra batch
+# therefore resends 1,336 tokens for nothing, and Groq's binding limit is not
+# its 1,000 requests a day but 8,000 TOKENS a minute. Halving the batch count
+# of an 11-session plan gives a whole minute's allowance back.
+#
+# It was four while the model still wrote ~900 output tokens a session; asking
+# it to think briefly (see REASONING_EFFORT) roughly halved that, which is what
+# makes eight fit. A batch that still overflows is split and retried.
+LP_SESSION_CHUNK = 8
 
-# Ceiling on one answer, for the same reason. Above this a single request can
-# exceed the per-minute token allowance and be refused outright.
-MAX_OUTPUT_TOKENS = 6000
+# Ceiling on one answer. Headroom for a full batch of eight (measured at ~456
+# output tokens a session, so ~3,650 plus the model's brief reasoning); a unit
+# with unusually rich key points can run longer, and being cut off mid-JSON is
+# dearer than a cap that is never reached. Groq bills what is generated rather
+# than reserving this, so a generous ceiling costs no allowance.
+MAX_OUTPUT_TOKENS = 8000
 
 # Batches that may be in flight at once. The token allowance is per MODEL, and
 # it refills continuously rather than in one lump at the top of the minute, so
@@ -206,7 +216,7 @@ For EACH session output:
 - session_title: the supplied title, cleaned per SOURCE DATA QUALITY (fix casing, typos, and fragments into a complete, readable title; keep the same meaning and topic - do not rename).
 - learning_outcomes: an array of 3 strings labelled "a.", "b.", "c.", trainee-centred, the list should always be introduced as follows: "By the end of the session, the trainee should be able to; {{The labeled list starts below}}...", rewritten from the session's PCs. Use level-appropriate verbs ({verbs}).
 - key_points: present the supplied Curriculum content, repaired per SOURCE DATA QUALITY below. Format as 2-3 CAPITALISED headings, each followed by ~3 short bullet sub-points drawn from the supplied content. Do NOT invent new topics. If a session's supplied key_points only restate the performance criterion (i.e. no curriculum content was available for this unit), you MAY draw concrete, relevant sub-points from the OS REQUIRED KNOWLEDGE topics listed above.
-- trainee_activities: EXACTLY 3 bullets. Each bullet starts "- ", NAMES an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then describes in 1-2 full sentences exactly what the trainee does - referencing this session's specific key points and learning outcomes (the actual topic, task, tool, sample, or scenario), never generic filler. Order the three so they progress from understanding to hands-on application. Then add a line "Follow up Activity:" and "1. <a specific assignment grounded in this session's content>."
+- trainee_activities: EXACTLY 3 bullets. Each bullet starts "- ", NAMES an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then describes in 1-2 full sentences exactly what the trainee does - referencing this session's specific key points and learning outcomes (the actual topic, task, tool, sample, or scenario), never generic filler. Order the three so they progress from understanding to hands-on application. Then add, as two MORE strings in this same array, "Follow up Activity:" and "1. <a specific assignment grounded in this session's content>." There is no separate follow-up field: every line lives inside trainee_activities.
 - resources: at least 2 bullets - real textbooks, presentations, tools, or online docs relevant to the topic.
 - assessments: derived from the Evidence-Guide methods, grouped under "Knowledge Checks:", "Skills:" and "Attitudes:" with numbered items.
 
@@ -371,6 +381,63 @@ def _extract_text(payload: dict) -> str:
         reason = choice.get("finish_reason") or "no assistant content"
         raise AIError(f"Groq returned an empty response (finish_reason: {reason})")
     return text
+
+
+# The fields a session row may carry. Anything else a model invents is stray.
+_ROW_FIELDS = ("week", "session_no", "is_cat", "session_title",
+               "learning_outcomes", "key_points", "trainee_activities",
+               "resources", "assessments")
+_ROW_FIELD_BY_SHAPE = {re.sub(r"[^a-z0-9]", "", f): f for f in _ROW_FIELDS}
+
+
+def _rehome_stray_keys(row: dict) -> dict:
+    """Put content a model filed under its own invented key back in the row.
+
+    Models sometimes answer the "add a Follow up Activity line" instruction with
+    a `follow_up_activity` FIELD rather than another string in the array. The
+    writing is good - only its address is wrong - so a key that is a known field
+    under another spelling is merged into that field, and anything else is
+    appended to trainee_activities under its own heading, which is where the
+    only instruction that invites extra lines puts them.
+    """
+    if not isinstance(row, dict):
+        return row
+    kept = {k: v for k, v in row.items() if k in _ROW_FIELDS}
+    for key, value in row.items():
+        if key in _ROW_FIELDS:
+            continue
+        target = _ROW_FIELD_BY_SHAPE.get(re.sub(r"[^a-z0-9]", "", str(key).lower()))
+        if target:
+            kept.setdefault(target, [])
+            kept[target] = _as_list(kept[target]) + _as_list(value)
+            continue
+        heading = str(key).replace("_", " ").strip().title() + ":"
+        kept["trainee_activities"] = (_as_list(kept.get("trainee_activities", []))
+                                      + [heading] + _as_list(value))
+    return kept
+
+
+def _salvage_rejected_generation(resp):
+    """Rows from a 400 that refused an otherwise complete answer, or None.
+
+    Only `json_validate_failed` carries a generation; every other 400 (a model
+    that won't take the schema at all, a malformed request) genuinely has
+    nothing to recover and must fall through to the caller's handling.
+    """
+    try:
+        error = (resp.json() or {}).get("error") or {}
+    except ValueError:
+        return None
+    if error.get("code") != "json_validate_failed":
+        return None
+    try:
+        data = json.loads(error.get("failed_generation") or "")
+    except (ValueError, TypeError):
+        return None
+    rows = data.get("sessions") if isinstance(data, dict) else data
+    if not isinstance(rows, list) or not rows:
+        return None
+    return [_rehome_stray_keys(row) for row in rows]
 
 
 def _salvage_json_array(text: str):
@@ -561,6 +628,21 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
                 hint = (" (the response hit the length limit)"
                         if reason == "length" else "")
                 raise AIError(f"{model} returned invalid JSON: {e}{hint}") from e
+
+        # Groq validates the finished answer against the schema rather than
+        # constraining every token, so a model can generate a perfectly good
+        # plan and still be refused for one stray key - and it hands the whole
+        # generation back in `failed_generation`. Throwing that away would cost
+        # the batch AND the model (a 400 otherwise rules a model out), so the
+        # rows are recovered and the stray keys put back where they belong.
+        if resp.status_code == 400:
+            salvaged = _salvage_rejected_generation(resp)
+            if salvaged is not None:
+                _PROVEN_MODELS.add(model)
+                _emit_progress(progress_cb,
+                               f"AI: {model} answered but named a field the "
+                               f"schema doesn't have; recovered its content")
+                return salvaged
 
         # A model this account may not call, or one that won't take the schema,
         # answers 400/404. The key is fine, so this is not an auth failure -
