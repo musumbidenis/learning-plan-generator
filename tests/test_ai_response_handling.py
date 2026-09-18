@@ -14,7 +14,9 @@ import requests
 import json
 
 import ai_client
-from ai_client import AIError, _extract_text, call_model
+import doc_builder
+from ai_client import (AIError, _extract_text, _response_schema,
+                       call_model)
 from models import Session, Unit
 
 
@@ -35,6 +37,7 @@ def _ok_payload(text):
 # The fixture below stubs these out; these keep handles on the real ones.
 REAL_LIST_CHAT_MODELS = ai_client.list_chat_models
 REAL_POST = ai_client._post
+REAL_REPAIR_ROWS = ai_client._repair_rows
 
 DISCOVERED = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
               "llama-3.3-70b-versatile", "whisper-large-v3"]
@@ -51,6 +54,12 @@ def offline(monkeypatch):
     monkeypatch.setattr(ai_client, "_post",
                         lambda *a, **k: FakeResp(200, _ok_payload("[]")))
     monkeypatch.setattr(ai_client, "list_chat_models", lambda key: list(DISCOVERED))
+    # The corrective round is an extra call_model, which would otherwise show up
+    # in every batching test's call count. It is exercised directly instead, in
+    # the validation section below; `validate_rows` itself stays real.
+    monkeypatch.setattr(ai_client, "_repair_rows",
+                        lambda unit, sessions, rows, api_key, model,
+                               progress_cb=None: rows)
     # what one test learns about the workspace's plan must not leak into another
     monkeypatch.setattr(ai_client, "_UNAVAILABLE_MODELS", set())
     monkeypatch.setattr(ai_client, "_PROVEN_MODELS", set())
@@ -712,7 +721,15 @@ def test_the_default_model_is_groqs_strongest_free_one():
     assert ai_client.DEFAULT_MODEL == "openai/gpt-oss-120b"
 
 
-def test_build_prompt_includes_curriculum_only_instruction():
+def test_the_standing_instructions_forbid_inventing_syllabus_content():
+    assert "You do NOT invent syllabus content" in ai_client.LP_SYSTEM
+    assert "Return ONE JSON object and nothing else." in ai_client.LP_SYSTEM
+
+
+def test_the_data_half_carries_data_and_no_instructions():
+    """The split only pays off if nothing static leaks into the per-unit half:
+    one interpolated value ahead of the rules would break the cacheable prefix,
+    and it is the reason the two halves are readable apart."""
     unit = Unit(unit_title="Install and Configure Software", os_code="IT/OS/123",
                 level="5", assessment_methods=["Observation"],
                 required_knowledge=["Troubleshooting basics"])
@@ -723,9 +740,16 @@ def test_build_prompt_includes_curriculum_only_instruction():
 
     prompt = ai_client.build_prompt(unit, [session])
 
-    assert "Do NOT invent syllabus content; use what is given." in prompt
-    assert 'Return ONLY a JSON object of the form {"sessions": [ ... ]}.' in prompt
-    assert "ASSESSMENT COVERAGE" in prompt
+    assert "Install and Configure Software" in prompt
+    assert "1.1 Install software" in prompt
+    assert "Troubleshooting basics" in prompt
+    assert "W1-S1" in prompt                       # the id the model echoes back
+    # level 5 drops the two highest verbs
+    assert "Evaluate" not in prompt
+    # none of the standing rules are duplicated here
+    for rule in ("SOURCES OF TRUTH", "TERMINOLOGY", "FIELD RULES",
+                 "Method vocabulary"):
+        assert rule not in prompt
 
 
 # --------------------------------------------------------------------------- #
@@ -894,13 +918,353 @@ def test_a_refused_generation_that_is_not_json_falls_through(monkeypatch):
 
 
 def test_the_prompt_says_the_follow_up_line_is_not_its_own_field():
-    """The salvage above is the net; this is the fix - the instruction that
-    produced the stray key in the first place."""
-    unit = Unit(unit_title="U", os_code="X/OS/1", level="6",
-                assessment_methods=["Observation"])
-    session = Session(week=1, session_no="1", is_cat=False, session_title="S",
-                      pcs=["1.1 do it"], key_points=["KEY POINT"])
+    """The salvage is the net; this is the fix - the instruction that produced
+    the stray key, and the schema that leaves nowhere else to put it."""
+    assert "The literal string \"Follow up Activity:\"" in ai_client.LP_SYSTEM
+    # and there is no longer anywhere to put it but the array: the schema gives
+    # trainee_activities as a flat list of strings
+    acts = (_response_schema()["properties"]["sessions"]["items"]
+            ["properties"]["trainee_activities"])
+    assert acts == {"type": "array", "items": {"type": "string"}}
 
-    prompt = ai_client.build_prompt(unit, [session])
 
-    assert "There is no separate follow-up field" in prompt
+# --------------------------------------------------------------------------- #
+# Structured answers, flattened for the document
+# --------------------------------------------------------------------------- #
+def _good_row(session_id="W1-S1", opener="Group Discussion"):
+    """A row that breaks none of the field rules."""
+    return {
+        "session_id": session_id,
+        "session_title": "ICT Security Threats",
+        "learning_outcomes": {
+            "stem": "By the end of the session, the trainee should be able to;",
+            "items": ["a. Identify common ICT security threats.",
+                      "b. Explain how a threat exploits a vulnerability.",
+                      "c. Apply controls that reduce exposure."]},
+        "key_points": [
+            {"heading": "THREAT CATEGORIES",
+             "points": ["Malware spreads through infected files.",
+                        "Phishing targets people rather than systems."]},
+            {"heading": "VULNERABILITY AND IMPACT",
+             "points": ["Outdated software widens the attack surface.",
+                        "Weak passwords enable account takeover."]}],
+        "trainee_activities": [
+            f"- {opener}: trainees name three threats seen locally and rank them.",
+            "- Think-Pair-Share: each trainee matches a threat to a control, "
+            "compares with a partner, then reports one agreed pair.",
+            "- Guided Practice: each trainee inspects a sample phishing email "
+            "and records the indicators found.",
+            "Follow up Activity:",
+            "1. Prepare a one-page threat profile for a chosen organisation."],
+        "resources": ["TVET CDACC curriculum and trainer guide for this unit",
+                      "NIST Cybersecurity Framework documentation"],
+        "assessments": {
+            "knowledge_checks": ["1. Oral questioning on threat categories."],
+            "skills": ["1. Observation of the trainee identifying indicators."],
+            "attitudes": ["1. Observation of accuracy when recording findings."]},
+    }
+
+
+def test_a_key_point_heading_is_capitalised_by_us_not_by_the_model():
+    """doc_builder bolds a line only if it is >=85% uppercase. That used to
+    depend on the model remembering; now the heading arrives as its own field
+    and we capitalise it, so the bolding cannot drift."""
+    lines = ai_client._flatten_key_points(
+        [{"heading": "threat categories",
+          "points": ["Malware spreads through infected files."]}])
+
+    assert lines == ["THREAT CATEGORIES", "- Malware spreads through infected files."]
+    assert doc_builder._keypoint_bold(lines[0])
+    assert not doc_builder._keypoint_bold(lines[1])
+
+
+def test_assessments_are_grouped_under_the_headings_the_document_bolds():
+    lines = ai_client._flatten_assessments(
+        {"knowledge_checks": ["1. Oral questioning."],
+         "skills": ["1. Observation."],
+         "attitudes": ["1. Punctuality observed."]})
+
+    assert lines[0] == "Knowledge Checks:"
+    assert all(doc_builder._assessment_bold(h)
+               for h in ("Knowledge Checks:", "Skills:", "Attitudes:"))
+
+
+def test_an_empty_assessment_group_leaves_out_its_heading():
+    lines = ai_client._flatten_assessments(
+        {"knowledge_checks": ["1. Oral questioning."], "skills": [], "attitudes": []})
+
+    assert lines == ["Knowledge Checks:", "1. Oral questioning."]
+
+
+def test_the_outcome_stem_gets_its_own_line_above_the_items():
+    lines = ai_client._flatten_learning_outcomes(
+        {"stem": "By the end of the session, the trainee should be able to;",
+         "items": ["a. Identify threats.", "b. Explain impact."]})
+
+    assert lines[0].startswith("By the end of the session")
+    assert lines[1:] == ["a. Identify threats.", "b. Explain impact."]
+
+
+def test_a_model_that_answers_in_the_old_flat_shape_still_merges():
+    """Belt and braces: the adapters fall back to plain list coercion, so an
+    answer in the previous shape is not lost."""
+    assert ai_client._flatten_key_points(["THREATS", "- Malware."]) == \
+        ["THREATS", "- Malware."]
+    assert ai_client._flatten_assessments(["Knowledge Checks:", "1. Oral."]) == \
+        ["Knowledge Checks:", "1. Oral."]
+
+
+# --------------------------------------------------------------------------- #
+# Rows find their own session, and CATs never leave the building
+# --------------------------------------------------------------------------- #
+def _sessions(n, cats=()):
+    out = []
+    for i in range(n):
+        out.append(Session(week=i + 1, session_no="1", is_cat=(i in cats),
+                           session_title=f"S{i}", pcs=["1.1 do it"],
+                           key_points=["KEY POINT"]))
+    return out
+
+
+def test_rows_are_matched_by_identity_not_by_arrival_order():
+    """The safety net that used to need padding: rows can come back in any
+    order, and each still lands on its own session."""
+    sessions = _sessions(3)
+    rows = [{"session_id": "W3-S1", "session_title": "third"},
+            {"session_id": "W1-S1", "session_title": "first"},
+            {"session_id": "W2-S1", "session_title": "second"}]
+
+    out = ai_client.merge_ai_into_sessions(sessions, rows, Unit())
+
+    assert [s.session_title for s in out] == ["first", "second", "third"]
+
+
+def test_a_row_for_a_session_that_was_never_sent_is_ignored():
+    sessions = _sessions(2)
+    rows = [{"session_id": "W1-S1", "session_title": "mine"},
+            {"session_id": "W9-S9", "session_title": "not from this plan"}]
+
+    out = ai_client.merge_ai_into_sessions(sessions, rows, Unit())
+
+    assert out[0].session_title == "mine"
+    assert "not from this plan" not in [s.session_title for s in out]
+
+
+def test_rows_without_ids_still_pair_in_order():
+    """An older or sloppier model that drops session_id must not lose the plan."""
+    sessions = _sessions(2)
+    rows = [{"session_title": "first"}, {"session_title": "second"}]
+
+    out = ai_client.merge_ai_into_sessions(sessions, rows, Unit())
+
+    assert [s.session_title for s in out] == ["first", "second"]
+
+
+def test_cat_sessions_are_never_sent_to_the_model(monkeypatch):
+    """Their content is rebuilt deterministically, so generating it would be
+    paying for output that goes straight in the bin."""
+    sessions = _sessions(6, cats=(2, 5))
+    sent = []
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        sent.extend(re.findall(r'"session_id": "(W\d+-S\d+)"', prompt))
+        return []
+
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
+    ai_client.generate_sessions(sessions[0].__class__ and Unit(), sessions,
+                                api_key="k", model="openai/gpt-oss-120b")
+
+    assert "W3-S1" not in sent and "W6-S1" not in sent    # the two CATs
+    assert sorted(sent) == ["W1-S1", "W2-S1", "W4-S1", "W5-S1"]
+
+
+def test_a_plan_of_nothing_but_cats_makes_no_call_at_all(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ai_client, "call_model",
+                        lambda *a, **k: calls.append(1) or [])
+    sessions = _sessions(2, cats=(0, 1))
+
+    out = ai_client.generate_sessions(Unit(), sessions, api_key="k", model="m")
+
+    assert calls == []
+    assert len(out) == 2
+
+
+# --------------------------------------------------------------------------- #
+# The self-check (v2 section 7), as code
+# --------------------------------------------------------------------------- #
+def test_a_row_that_follows_the_rules_reports_nothing():
+    assert ai_client.validate_rows([_good_row()]) == {}
+
+
+@pytest.mark.parametrize("mutate, expected", [
+    (lambda r: r["learning_outcomes"]["items"].append("d. One too many."),
+     "exactly 3"),
+    (lambda r: r["learning_outcomes"].__setitem__(
+        "items", ["a. Understand threats.", "b. Explain them.", "c. Apply them."]),
+     "cannot be assessed"),
+    (lambda r: r["key_points"].pop(),
+     "it must have 2 or 3"),
+    (lambda r: r["trainee_activities"].__setitem__(3, "Follow-up:"),
+     "must be exactly 'Follow up Activity:'"),
+    (lambda r: r["trainee_activities"].__setitem__(
+        0, "- Trainees talk about it a bit."),
+     "names no active-learning method"),
+    (lambda r: r["resources"].clear(),
+     "it must have 2 to 4"),
+    (lambda r: r["assessments"].__setitem__("skills", []),
+     "assessments.skills has 0 items"),
+    (lambda r: r.__setitem__("session_title", "Students Learn About Threats"),
+     "Kenya CBET register forbids"),
+    (lambda r: r["key_points"][0]["points"].__setitem__(0, "Malware is ..."),
+     "ellipsis, a placeholder"),
+])
+def test_the_self_check_catches_what_the_model_is_asked_not_to_do(mutate, expected):
+    row = _good_row()
+    mutate(row)
+
+    problems = ai_client.validate_rows([row])
+
+    assert problems, f"expected a complaint containing {expected!r}"
+    assert any(expected in p for p in problems["W1-S1"]), problems["W1-S1"]
+
+
+def test_the_same_method_opening_every_session_is_flagged():
+    """A plan where every session opens with a Group Discussion is a worse plan,
+    and no per-row check can see it."""
+    rows = [_good_row(f"W{i}-S1", opener="Group Discussion") for i in range(1, 7)]
+
+    problems = ai_client.validate_rows(rows)
+
+    assert problems, "repetition across the batch went unnoticed"
+    assert any("opens" in p for v in problems.values() for p in v)
+
+
+def test_varied_openings_across_a_batch_pass():
+    methods = ["Group Discussion", "Case Study", "Jigsaw",
+               "Role Play", "Fishbowl", "Gallery Walk"]
+    rows = [_good_row(f"W{i + 1}-S1", opener=m) for i, m in enumerate(methods)]
+
+    assert ai_client.validate_rows(rows) == {}
+
+
+# --------------------------------------------------------------------------- #
+# The corrective round
+# --------------------------------------------------------------------------- #
+def test_only_the_failing_sessions_are_sent_back(monkeypatch):
+    sessions = _sessions(3)
+    # distinct openers, or the variety check would fault all three
+    rows = [_good_row("W1-S1", opener="Case Study"),
+            _good_row("W2-S1", opener="Jigsaw"),
+            _good_row("W3-S1", opener="Role Play")]
+    rows[1]["resources"] = ["only one"]                 # W2-S1 alone is wrong
+    prompts = []
+
+    def fake_call(prompt, api_key, model, progress_cb=None):
+        prompts.append(prompt)
+        return [_good_row("W2-S1", opener="Jigsaw")]
+
+    monkeypatch.setattr(ai_client, "call_model", fake_call)
+    out = REAL_REPAIR_ROWS(Unit(), sessions, rows, "k", "m")
+
+    assert len(prompts) == 1
+    assert "W2-S1" in prompts[0]
+    assert "W1-S1" not in prompts[0] and "W3-S1" not in prompts[0]
+    assert "resources has 1" in prompts[0]              # it is told what was wrong
+    assert ai_client.validate_rows(out) == {}
+
+
+def test_a_clean_batch_costs_no_extra_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ai_client, "call_model",
+                        lambda *a, **k: calls.append(1) or [])
+
+    out = REAL_REPAIR_ROWS(Unit(), _sessions(1), [_good_row()], "k", "m")
+
+    assert calls == []
+    assert out == [_good_row()]
+
+
+def test_a_failed_repair_keeps_the_rows_we_already_have(monkeypatch):
+    """A corrective round that errors must not cost us the batch."""
+    rows = [_good_row()]
+    rows[0]["resources"] = ["only one"]
+
+    def boom(*a, **k):
+        raise AIError("no model answered")
+
+    monkeypatch.setattr(ai_client, "call_model", boom)
+    out = REAL_REPAIR_ROWS(Unit(), _sessions(1), rows, "k", "m")
+
+    assert out == rows
+
+
+def test_the_repair_round_is_not_repeated(monkeypatch):
+    """Bounded at one: a second round costs another batch for diminishing
+    returns, and the deterministic backfill makes an imperfect row usable."""
+    rows = [_good_row()]
+    rows[0]["resources"] = ["only one"]
+    calls = []
+
+    def still_wrong(prompt, api_key, model, progress_cb=None):
+        calls.append(1)
+        bad = _good_row()
+        bad["resources"] = ["still only one"]
+        return [bad]
+
+    monkeypatch.setattr(ai_client, "call_model", still_wrong)
+    out = REAL_REPAIR_ROWS(Unit(), _sessions(1), rows, "k", "m")
+
+    assert len(calls) == 1
+    assert out[0]["resources"] == ["still only one"]     # kept, and logged
+
+
+def test_assessment_items_are_numbered_by_us_not_asked_for():
+    """Measured against real output, every row came back unnumbered. Numbering
+    is presentation, like the CAPITALISED heading, so it is applied here."""
+    lines = ai_client._flatten_assessments(
+        {"knowledge_checks": ["Oral questioning on threat types.",
+                              "Written short-answer items."],
+         "skills": ["Observation at the workstation."], "attitudes": []})
+
+    assert lines == ["Knowledge Checks:",
+                     "1. Oral questioning on threat types.",
+                     "2. Written short-answer items.",
+                     "Skills:",
+                     "1. Observation at the workstation."]
+
+
+def test_a_model_that_numbers_them_itself_is_renumbered_not_doubled():
+    lines = ai_client._flatten_assessments(
+        {"knowledge_checks": ["3. Out of order.", "1. Second."],
+         "skills": [], "attitudes": []})
+
+    assert lines == ["Knowledge Checks:", "1. Out of order.", "2. Second."]
+
+
+def test_a_one_word_key_point_heading_is_allowed():
+    """VULNERABILITIES is a good heading; the rule that banned it was wrong."""
+    row = _good_row()
+    row["key_points"][0]["heading"] = "VULNERABILITIES"
+
+    assert ai_client.validate_rows([row]) == {}
+
+
+def test_a_rambling_key_point_heading_is_still_caught():
+    row = _good_row()
+    row["key_points"][0]["heading"] = "A Very Long Heading That Rambles On Somewhat"
+
+    problems = ai_client.validate_rows([row])["W1-S1"]
+
+    assert any("the limit is 5" in p for p in problems)
+
+
+def test_a_method_written_with_a_fancy_hyphen_still_counts():
+    """Models write Think-Pair-Share with a non-breaking hyphen as often as a
+    plain one; reporting that as 'no method named' is a false alarm."""
+    row = _good_row()
+    row["trainee_activities"][0] = (
+        "- Think‑Pair‑Share: each trainee lists two threats, compares "
+        "with a partner, then the pair reports one to the room.")
+
+    assert ai_client.validate_rows([row]) == {}

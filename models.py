@@ -130,12 +130,20 @@ class Session:
     resources: List[str] = field(default_factory=list)
     assessments: List[str] = field(default_factory=list)
 
+    @property
+    def session_id(self) -> str:
+        """Stable identity for one row, e.g. 'W3-S1'.
+
+        The AI echoes this back so rows are matched to sessions by identity
+        rather than by position in the response. Unique within a plan: the
+        planner numbers sessions within each week.
+        """
+        return f"W{self.week}-S{self.session_no}"
+
     def to_skeleton_dict(self) -> dict:
         """The minimal grounded payload handed to the AI for this session."""
         return {
-            "week": self.week,
-            "session_no": self.session_no,
-            "is_cat": self.is_cat,
+            "session_id": self.session_id,
             "session_title": self.session_title,
             "pcs": self.pcs,
             "key_points": self.key_points,

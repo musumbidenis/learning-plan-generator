@@ -160,6 +160,17 @@ def _response_schema() -> dict:
     The rows are an array, but a strict schema's ROOT must be an object - so
     they travel under a `sessions` key, which `call_model` unwraps. Groq
     rejects a top-level array outright.
+
+    The generative fields are STRUCTURED rather than pre-formatted strings.
+    Asking the model for "a CAPITALISED heading then bullets" and then having
+    doc_builder re-detect that formatting by predicate (`_keypoint_bold` bolds
+    a line only if it is >=85% uppercase) means a heading the model
+    under-capitalised renders silently unbolded. With {heading, points} the
+    formatting is ours to apply and cannot drift - see `_flatten_key_points`.
+
+    week / session_no / is_cat are absent on purpose: the deterministic
+    skeleton always wins on those, `session_id` carries the identity, and every
+    field dropped is tokens saved and one less key the model can get wrong.
     """
     str_array = {"type": "array", "items": {"type": "string"}}
     return _strict({
@@ -170,15 +181,35 @@ def _response_schema() -> dict:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "week": {"type": "integer"},
-                        "session_no": {"type": "string"},
-                        "is_cat": {"type": "boolean"},
+                        "session_id": {"type": "string"},
                         "session_title": {"type": "string"},
-                        "learning_outcomes": str_array,
-                        "key_points": str_array,
+                        "learning_outcomes": {
+                            "type": "object",
+                            "properties": {
+                                "stem": {"type": "string"},
+                                "items": str_array,
+                            },
+                        },
+                        "key_points": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "heading": {"type": "string"},
+                                    "points": str_array,
+                                },
+                            },
+                        },
                         "trainee_activities": str_array,
                         "resources": str_array,
-                        "assessments": str_array,
+                        "assessments": {
+                            "type": "object",
+                            "properties": {
+                                "knowledge_checks": str_array,
+                                "skills": str_array,
+                                "attitudes": str_array,
+                            },
+                        },
                     },
                 },
             },
@@ -186,10 +217,148 @@ def _response_schema() -> dict:
     })
 
 
+# The three assessment groups, in the order the document renders them, paired
+# with the heading `_assessment_bold` in doc_builder looks for.
+_ASSESSMENT_GROUPS = (("knowledge_checks", "Knowledge Checks:"),
+                      ("skills", "Skills:"),
+                      ("attitudes", "Attitudes:"))
+
+
+def _flatten_learning_outcomes(value) -> List[str]:
+    """{stem, items} -> the stem on its own line, then a./b./c."""
+    if not isinstance(value, dict):
+        return _as_list(value)
+    stem = str(value.get("stem") or "").strip()
+    items = _as_list(value.get("items"))
+    return ([stem] if stem else []) + items
+
+
+def _flatten_key_points(value) -> List[str]:
+    """[{heading, points}] -> a CAPITALISED heading, then '- ' bullets.
+
+    The upper() here is what guarantees doc_builder bolds the heading; before
+    this the model had to remember to capitalise, and sometimes did not.
+    """
+    if not isinstance(value, list) or not any(isinstance(b, dict) for b in value):
+        return _as_list(value)
+    out: List[str] = []
+    for block in value:
+        if not isinstance(block, dict):
+            out.extend(_as_list(block))
+            continue
+        heading = str(block.get("heading") or "").strip()
+        if heading:
+            out.append(heading.upper())
+        for point in _as_list(block.get("points")):
+            out.append(point if point.startswith("- ") else "- " + point)
+    return out
+
+
+# A leading "1. " / "2) " the model may or may not have supplied.
+_RE_ITEM_NUMBER = re.compile(r"^\s*\d+\s*[.)]\s*")
+
+
+def _flatten_assessments(value) -> List[str]:
+    """{knowledge_checks, skills, attitudes} -> grouped, headed, numbered lines.
+
+    The numbering is applied here rather than asked for. Whether an item says
+    "1. " is presentation, like the CAPITALISED key-point heading, and leaving
+    presentation to the model means checking up on it afterwards - measured
+    against real output, every single row came back unnumbered.
+    """
+    if not isinstance(value, dict):
+        return _as_list(value)
+    if not any(key in value for key, _ in _ASSESSMENT_GROUPS):
+        return _as_list(value)
+    out: List[str] = []
+    for key, heading in _ASSESSMENT_GROUPS:
+        items = _as_list(value.get(key))
+        if not items:
+            continue
+        out.append(heading)
+        for n, item in enumerate(items, start=1):
+            out.append(f"{n}. {_RE_ITEM_NUMBER.sub('', str(item)).strip()}")
+    return out
+
+
+
 # --------------------------------------------------------------------------- #
 # Prompt
 # --------------------------------------------------------------------------- #
+# The standing instructions. Identical on every Learning-Plan call, so they live
+# in their own message ahead of anything that varies. Groq's prefix cache can
+# then recognise them, and cached tokens do not count against the 8,000
+# tokens-a-minute limit - but measured on this account the cache hits about one
+# warm call in five and tops out near 768 tokens, so treat that as a small
+# bonus. The reason for the split is that instructions and data are different
+# things and separating them keeps both readable.
+#
+# CAT sessions are deliberately NOT described here: they never reach the model.
+# `merge_ai_into_sessions` rebuilds every CAT row deterministically from the
+# sessions it assesses, so asking for one would be paying for discarded output.
+LP_SYSTEM = """You are a senior TVET trainer and industry expert in Kenya, producing Learning Plans for units of competency under the TVET CDACC framework.
+
+You are GIVEN the unit, the term schedule, and - for each session - the official Curriculum Learning Key Points. You do NOT invent syllabus content. You repair, organise and expand ONLY from the sources supplied in the user message.
+
+SOURCES OF TRUTH, in priority order
+1. The session's supplied key_points (authoritative - preserve their meaning).
+2. The unit's Performance Criteria.
+3. The unit's Required Knowledge.
+4. The unit's Evidence-Guide assessment methods.
+Nothing else. If a fact, tool or topic is not present in or clearly implied by sources 1-4, it does not appear in your output. If one of these sources arrives empty, work from the ones that are present and write less, rather than filling the gap from general knowledge.
+
+SOURCE DATA QUALITY - REPAIR RULES
+The supplied titles and key points are auto-extracted and may be messy: fragments, truncated phrases, bad casing, duplicates, shallow stubs.
+- Repair form, preserve meaning. Fix grammar, spelling, capitalisation and spacing, and complete an obviously truncated sentence - but ONLY when the intended meaning is clear from the fragment itself, the session's other key points, the Performance Criteria, or the Required Knowledge. This is editing, not authoring: never add a topic, tool or fact not already implied by those sources.
+- Thin points: where a point is too shallow to facilitate from, add concrete sub-points drawn ONLY from the supplied Performance Criteria and Required Knowledge.
+- Restated criteria: if a session's supplied key points only restate the performance criterion, draw concrete sub-points from the Required Knowledge topics for this unit.
+- Unrecoverable items: if a fragment cannot be reconstructed from the supplied sources, omit it. Never output a dangling phrase, an incomplete sentence, an ellipsis, or a placeholder.
+- Duplicates: merge near-identical supplied points into one.
+- Every line you output is a complete, coherent sentence traceable to sources 1-4.
+
+TERMINOLOGY (Kenya CBET) - MANDATORY
+Use: trainee, trainer, session, facilitate, unit of competency, learning outcome, performance criteria, competency, assessment, Continuous Assessment Test (CAT).
+Never use: student, pupil, learner, teacher, lecturer, instructor, lesson, lecture, class (as a synonym for session), teach, deliver a lecture, exam, quiz, or test as a noun for the final assessment.
+Spelling: British / Kenyan English - organise, practise (as a verb), programme (a course of study), labelled, capitalised, centred.
+
+FIELD RULES
+session_id: echo the supplied value VERBATIM. Never alter, renumber or omit it, and never return a session that was not supplied.
+
+session_title: the supplied title, repaired per SOURCE DATA QUALITY. Same meaning, same topic - never renamed. Title Case, no trailing punctuation, at most 12 words.
+
+learning_outcomes.stem: exactly "By the end of the session, the trainee should be able to;"
+learning_outcomes.items: exactly three strings, prefixed "a. ", "b. ", "c. ". Each is trainee-centred and rewritten from the performance criteria this session addresses. Open each with a DIFFERENT verb from the level-appropriate list supplied in the user message. Banned openers, because they cannot be assessed: understand, know, learn, appreciate, be aware of, be familiar with, grasp. At most 20 words each.
+
+key_points: two or three blocks. Each heading is at most 5 words, drawn from the supplied content. Each block holds 2-4 points; each point is one complete sentence of at most 20 words, traceable to sources 1-4. Do not introduce a topic that is not in the supplied content.
+
+trainee_activities: EXACTLY five strings, in this order.
+1. An understanding-level activity.
+2. An analysis or discussion activity.
+3. A hands-on application activity.
+4. The literal string "Follow up Activity:"
+5. One assignment, prefixed "1. ".
+Each of the first three starts "- ", NAMES an active-learning method, then describes in 1-2 sentences exactly what the trainee does - referencing this session's specific key points: the actual topic, task, tool, sample or scenario. Never generic filler. At most 40 words each.
+Method vocabulary: Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstration with Participation, KWL Chart, Concept Mapping, Brainstorming, Gallery Walk, Role Play, Guided Practice, Problem-Based Learning, Fishbowl, Practical Exercise.
+Vary the methods across the sessions in one response: no method in more than a third of them, and no two consecutive sessions opening with the same method.
+Weak: "- Group Discussion: Trainees discuss the topic in groups and present findings."
+Strong: "- Think-Pair-Share: Each trainee lists three differences between a compiler and an interpreter, compares the list with a partner, then the pair reports one agreed difference to the room."
+
+resources: two to four real, locatable items relevant to THIS session - textbooks, official documentation, standards, tools or presentations, including the TVET CDACC curriculum and trainer's guide for the unit. Prefer what a Kenyan polytechnic would realistically have. Never invent ISBNs, page numbers, edition years or URLs; if you are unsure of a URL, name the resource without one.
+
+assessments: one to three items per group, derived from the supplied Evidence-Guide methods. Write each as a plain sentence; do not number them.
+- knowledge_checks: what the trainee is asked about this session's key points.
+- skills: what the trainee is observed doing.
+- attitudes: observable professional behaviours shown during this session's own activities - accuracy, safety, teamwork, timeliness, adherence to procedure. Observable, never internal states.
+
+Return ONE JSON object and nothing else."""
+
+
 def build_prompt(unit: Unit, sessions: List[Session]) -> str:
+    """The per-unit half of the request: data only, no instructions.
+
+    Everything standing lives in LP_SYSTEM. Keeping this half free of
+    instructions is what makes separating the two worth doing.
+    """
     pcs = "\n".join(f"{pc.number} {pc.text}" for pc in unit.all_pcs)
     methods = "; ".join(unit.assessment_methods) or "Observation; Oral assessment; " \
         "Written assessment; Practical assessment; Portfolio of evidence"
@@ -201,37 +370,24 @@ def build_prompt(unit: Unit, sessions: List[Session]) -> str:
     verbs = "Identify, Explain, Apply, Demonstrate, Evaluate, Implement" \
         if str(level) >= "6" else "Identify, Explain, Apply, Demonstrate"
 
-    return f"""You are a senior TVET trainer and industry expert, creating a Learning Plan. You are GIVEN the unit, the term schedule, and - for each session - the official Curriculum Learning Key Points. Do NOT invent syllabus content; use what is given.
+    return f"""UNIT: {unit.unit_title}
+CODE: {unit.os_code}
+LEVEL: {level}
 
-UNIT: {unit.unit_title} | CODE: {unit.os_code} | LEVEL: {level}
+LEVEL-APPROPRIATE VERBS:
+{verbs}
+
 OS PERFORMANCE CRITERIA:
 {pcs}
-OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
-OS REQUIRED KNOWLEDGE (underpinning topics for this unit): {knowledge or "(none listed)"}
 
-SESSIONS (fill each; key_points are AUTHORITATIVE, keep them):
+OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
+
+OS REQUIRED KNOWLEDGE: {knowledge or "(none listed)"}
+
+SESSIONS (key_points are AUTHORITATIVE - preserve their meaning):
 {skeleton_json}
 
-For EACH session output:
-- session_title: the supplied title, cleaned per SOURCE DATA QUALITY (fix casing, typos, and fragments into a complete, readable title; keep the same meaning and topic - do not rename).
-- learning_outcomes: an array of 3 strings labelled "a.", "b.", "c.", trainee-centred, the list should always be introduced as follows: "By the end of the session, the trainee should be able to; {{The labeled list starts below}}...", rewritten from the session's PCs. Use level-appropriate verbs ({verbs}).
-- key_points: present the supplied Curriculum content, repaired per SOURCE DATA QUALITY below. Format as 2-3 CAPITALISED headings, each followed by ~3 short bullet sub-points drawn from the supplied content. Do NOT invent new topics. If a session's supplied key_points only restate the performance criterion (i.e. no curriculum content was available for this unit), you MAY draw concrete, relevant sub-points from the OS REQUIRED KNOWLEDGE topics listed above.
-- trainee_activities: EXACTLY 3 bullets. Each bullet starts "- ", NAMES an active-learning method (e.g Group Discussion, Think-Pair-Share, Case Study, Jigsaw, Peer Teaching, Round Robin, Demonstrations with Participation, KWL, Concept Mapping, Brainstorming e.t.c), then describes in 1-2 full sentences exactly what the trainee does - referencing this session's specific key points and learning outcomes (the actual topic, task, tool, sample, or scenario), never generic filler. Order the three so they progress from understanding to hands-on application. Then add, as two MORE strings in this same array, "Follow up Activity:" and "1. <a specific assignment grounded in this session's content>." There is no separate follow-up field: every line lives inside trainee_activities.
-- resources: at least 2 bullets - real textbooks, presentations, tools, or online docs relevant to the topic.
-- assessments: derived from the Evidence-Guide methods, grouped under "Knowledge Checks:", "Skills:" and "Attitudes:" with numbered items.
-
-SOURCE DATA QUALITY
-The supplied session titles and Curriculum Learning Key Points are auto-extracted and may be messy: fragments, incomplete sentences, truncated phrases, duplicates, or shallow stubs.
-- Repair form, preserve meaning. You MAY fix grammar, spelling, capitalisation, spacing, and complete an obviously truncated sentence into a coherent one - ONLY when the intended meaning is clear from the fragment itself, the session's other key points, the Performance Criteria, or the Required Knowledge. This is editing, not authoring: never add a topic, tool, or fact not already implied by those supplied sources.
-- Thin or missing points: where a point is too shallow to teach from, you MAY add concrete sub-points, but ONLY drawn from the supplied Performance Criteria and Required Knowledge for this unit. Never draw on outside knowledge.
-- Unrecoverable items: if a fragment is unintelligible and cannot be reconstructed from the supplied sources, OMIT it. Never output a fragment, a dangling phrase, an incomplete sentence, or a placeholder.
-- Every key point you output must be a complete, coherent sentence traceable to the supplied curriculum, Performance Criteria, or Required Knowledge.
-- Apply the same repairs to each session_title: return a clean, complete, correctly-capitalised title with the same meaning; never output a truncated or fragmentary title.
-
-CAT sessions (is_cat true): learning_outcomes about demonstrating competence; key_point heading ASSESSMENT COVERAGE; trainee_activities = "- Complete the Continous Assessment Test(CAT)." ; resources = Assessment Tool(s) and/or Observation Checklist, Assessor Guide; assessments = "-Graded Knowledge.".
-
-TERMINOLOGY - use Kenya Competency-Based Education and Training (CBET) terms ONLY: "trainee" (never student/pupil/learner), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment" / "Continuous Assessment Test (CAT)" (never "exam" or "test" as a noun for the final). NEVER output placeholders like "Key concept 1". Return ONLY a JSON object of the form {{"sessions": [ ... ]}}.
-"""
+Return the JSON object now."""
 
 
 # --------------------------------------------------------------------------- #
@@ -326,15 +482,24 @@ def _post(model: str, api_key: str, prompt: str, timeout: int = 180,
           schema: Optional[dict] = None,
           schema_name: str = "learning_plan_sessions",
           temperature: float = 0.2,
-          max_tokens: int = MAX_OUTPUT_TOKENS) -> dict:
+          max_tokens: int = MAX_OUTPUT_TOKENS,
+          system: str = "") -> dict:
     """POST one chat completion, always in strict JSON-schema mode.
 
     Every call this module makes wants structured output, the probe included -
     a model that chats but won't take the schema is no use here.
+
+    `system` carries the standing instructions, which are identical on every
+    call. Keeping them in their own message, ahead of anything that varies,
+    is what lets Groq's prefix cache recognise them - see the note on
+    LP_SYSTEM for how much that is actually worth.
     """
+    messages = [{"role": "user", "content": prompt}]
+    if system:
+        messages.insert(0, {"role": "system", "content": system})
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "response_format": {
@@ -384,9 +549,8 @@ def _extract_text(payload: dict) -> str:
 
 
 # The fields a session row may carry. Anything else a model invents is stray.
-_ROW_FIELDS = ("week", "session_no", "is_cat", "session_title",
-               "learning_outcomes", "key_points", "trainee_activities",
-               "resources", "assessments")
+_ROW_FIELDS = ("session_id", "session_title", "learning_outcomes",
+               "key_points", "trainee_activities", "resources", "assessments")
 _ROW_FIELD_BY_SHAPE = {re.sub(r"[^a-z0-9]", "", f): f for f in _ROW_FIELDS}
 
 
@@ -507,7 +671,8 @@ _UNAVAILABLE_MODELS: set = set()
 
 
 def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
-               schema_name: str, progress_cb=None, temperature: float = 0.2):
+               schema_name: str, progress_cb=None, temperature: float = 0.2,
+               system: str = ""):
     """One grounded request, on a model this workspace can actually call.
 
     The model is settled before any of this by `resolve_model`. If it stops
@@ -526,7 +691,7 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
         try:
             return _chat_json_once(prompt, api_key, model, schema,
                                    schema_name, progress_cb=progress_cb,
-                                   temperature=temperature)
+                                   temperature=temperature, system=system)
         except _ModelUnavailable as e:
             _UNAVAILABLE_MODELS.add(e.model)
             tried.append(e.model)
@@ -547,7 +712,8 @@ def _chat_json(prompt: str, api_key: str, model: str, schema: dict,
 
 
 def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
-                    schema_name: str, progress_cb=None, temperature: float = 0.2):
+                    schema_name: str, progress_cb=None, temperature: float = 0.2,
+                    system: str = ""):
     """One grounded request to ONE model, retrying network errors and rate limits.
 
     Returns the parsed JSON exactly as the model produced it (a list or a dict);
@@ -562,7 +728,7 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
     proven = model in _PROVEN_MODELS
     while True:
         try:
-            resp = _post(model, api_key, prompt, schema=schema,
+            resp = _post(model, api_key, prompt, schema=schema, system=system,
                          schema_name=schema_name, temperature=temperature,
                          timeout=REQUEST_TIMEOUT if proven else UNPROVEN_TIMEOUT)
         except requests.Timeout as e:
@@ -688,7 +854,8 @@ def call_model(prompt: str, api_key: str, model: str,
                  progress_cb=None) -> List[dict]:
     """The Learning-Plan call: returns the JSON array of session rows."""
     data = _chat_json(prompt, api_key, model, _response_schema(),
-                      "learning_plan_sessions", progress_cb=progress_cb)
+                      "learning_plan_sessions", progress_cb=progress_cb,
+                      system=LP_SYSTEM)
     if isinstance(data, dict):
         data = data.get("sessions") or data.get("data") or [data]
     if not isinstance(data, list):
@@ -784,6 +951,268 @@ def _default_resources(s: Session) -> List[str]:
             "- Relevant online documentation"]
 
 
+# --------------------------------------------------------------------------- #
+# The self-check
+#
+# The prompt could ask the model to verify its own work, but it is run at
+# REASONING_EFFORT "low" precisely so it does not spend tokens thinking - so a
+# request to self-check is a request it is configured not to honour. Every rule
+# worth checking is mechanical, so it is checked here instead: free, repeatable,
+# and able to say exactly what is wrong. What fails goes back to the model once,
+# named, rather than being silently patched or silently shipped.
+# --------------------------------------------------------------------------- #
+
+# Openers that cannot be assessed, so cannot begin a learning outcome.
+_BANNED_OPENERS = ("understand", "know", "learn", "appreciate", "be aware of",
+                   "be familiar with", "grasp")
+
+# Words the Kenya CBET register does not use. Matched whole-word, case
+# insensitively. "test" is deliberately absent: "Think-Pair-Share" and "testing
+# a program" are legitimate, and the noun sense is not separable by regex.
+_BANNED_TERMS = ("student", "students", "pupil", "pupils", "learner", "learners",
+                 "teacher", "teachers", "lecturer", "lecturers", "instructor",
+                 "instructors", "lesson", "lessons", "lecture", "lectures",
+                 "exam", "exams", "quiz", "quizzes")
+_RE_BANNED_TERM = re.compile(r"\b(?:%s)\b" % "|".join(_BANNED_TERMS), re.I)
+
+# The active-learning methods the prompt offers; an activity should name one.
+_METHODS = ("Group Discussion", "Think-Pair-Share", "Case Study", "Jigsaw",
+            "Peer Teaching", "Round Robin", "Demonstration with Participation",
+            "Demonstrations with Participation", "KWL Chart", "KWL",
+            "Concept Mapping", "Brainstorming", "Gallery Walk", "Role Play",
+            "Guided Practice", "Problem-Based Learning", "Fishbowl",
+            "Practical Exercise")
+
+_FOLLOW_UP_LINE = "Follow up Activity:"
+_OUTCOME_LABELS = ("a.", "b.", "c.")
+_RE_PLACEHOLDER = re.compile(r"\.\.\.|\u2026|<[^>]+>|\bTBD\b|\bN/?A\b|"
+                             r"\bkey concept \d|\blorem\b", re.I)
+
+
+# Models write "Think\u2011Pair\u2011Share" with a non-breaking hyphen as often as
+# a plain one, and a naive match then reports a named method as missing.
+_TYPOGRAPHY = {"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+               "\u2014": "-", "\u2212": "-", "\u00ad": "-", "\u00a0": " ",
+               "\u2019": "'"}
+
+
+def _plain(text: str) -> str:
+    """Lower-cased, with fancy dashes and spaces flattened, for matching."""
+    out = str(text)
+    for fancy, plain in _TYPOGRAPHY.items():
+        out = out.replace(fancy, plain)
+    return out.lower()
+
+
+def _words(text: str) -> int:
+    return len(str(text).split())
+
+
+def _check_row(row: dict) -> List[str]:
+    """Everything wrong with one generated session, in plain words."""
+    problems: List[str] = []
+
+    title = str(row.get("session_title") or "").strip()
+    if not title:
+        problems.append("session_title is empty")
+    elif _words(title) > 12:
+        problems.append(f"session_title is {_words(title)} words; the limit is 12")
+
+    lo = row.get("learning_outcomes")
+    items = _as_list(lo.get("items")) if isinstance(lo, dict) else _as_list(lo)
+    if len(items) != 3:
+        problems.append(f"learning_outcomes.items has {len(items)} entries; "
+                        f"it must have exactly 3")
+    for n, item in enumerate(items[:3]):
+        text = str(item).strip()
+        if not text.lower().startswith(_OUTCOME_LABELS[n]):
+            problems.append(f"learning outcome {n + 1} must start "
+                            f"'{_OUTCOME_LABELS[n]} '")
+        body = text[2:].strip().lower()
+        opener = next((b for b in _BANNED_OPENERS if body.startswith(b)), "")
+        if opener:
+            problems.append(f"learning outcome {n + 1} opens with '{opener}', "
+                            f"which cannot be assessed")
+        if _words(text) > 20:
+            problems.append(f"learning outcome {n + 1} is {_words(text)} words; "
+                            f"the limit is 20")
+    verbs = [str(i)[2:].strip().split(" ")[0].lower() for i in items[:3]
+             if len(str(i)) > 2]
+    if len(set(verbs)) < len(verbs):
+        problems.append("two learning outcomes open with the same verb")
+
+    blocks = row.get("key_points")
+    blocks = blocks if isinstance(blocks, list) else []
+    if not 2 <= len(blocks) <= 3:
+        problems.append(f"key_points has {len(blocks)} block(s); "
+                        f"it must have 2 or 3")
+    for block in blocks:
+        if not isinstance(block, dict):
+            problems.append("a key_points block is not an object")
+            continue
+        heading = str(block.get("heading") or "").strip()
+        if not heading:
+            problems.append("a key_points block has no heading")
+        elif _words(heading) > 5:
+            # One strong noun - VULNERABILITIES - is a perfectly good heading,
+            # and the model produces them; only rambling ones are a problem.
+            problems.append(f"key_points heading '{heading}' is {_words(heading)} "
+                            f"words; the limit is 5")
+        points = _as_list(block.get("points"))
+        if not 2 <= len(points) <= 4:
+            problems.append(f"key_points block '{heading}' has {len(points)} "
+                            f"points; it must have 2 to 4")
+        for point in points:
+            if _words(point) > 20:
+                problems.append(f"a point under '{heading}' is {_words(point)} "
+                                f"words; the limit is 20")
+
+    acts = _as_list(row.get("trainee_activities"))
+    if len(acts) != 5:
+        problems.append(f"trainee_activities has {len(acts)} entries; it must "
+                        f"have exactly 5 (3 activities, the follow-up line, "
+                        f"the assignment)")
+    else:
+        if acts[3].strip() != _FOLLOW_UP_LINE:
+            problems.append(f"trainee_activities[3] must be exactly "
+                            f"'{_FOLLOW_UP_LINE}'")
+        if not acts[4].strip().startswith("1. "):
+            problems.append("trainee_activities[4], the assignment, must start '1. '")
+    for n, act in enumerate(acts[:3]):
+        if not any(_plain(m) in _plain(act) for m in _METHODS):
+            problems.append(f"trainee activity {n + 1} names no active-learning "
+                            f"method from the list")
+        if _words(act) > 40:
+            problems.append(f"trainee activity {n + 1} is {_words(act)} words; "
+                            f"the limit is 40")
+
+    res = _as_list(row.get("resources"))
+    if not 2 <= len(res) <= 4:
+        problems.append(f"resources has {len(res)} entries; it must have 2 to 4")
+
+    assess = row.get("assessments")
+    if not isinstance(assess, dict):
+        problems.append("assessments must be grouped into knowledge_checks, "
+                        "skills and attitudes")
+    else:
+        for key, _heading in _ASSESSMENT_GROUPS:
+            group = _as_list(assess.get(key))
+            if not 1 <= len(group) <= 3:
+                problems.append(f"assessments.{key} has {len(group)} items; "
+                                f"it must have 1 to 3")
+
+    blob = json.dumps(row, ensure_ascii=False)
+    banned = sorted({m.group(0).lower() for m in _RE_BANNED_TERM.finditer(blob)})
+    if banned:
+        problems.append("uses words the Kenya CBET register forbids: "
+                        + ", ".join(banned))
+    if _RE_PLACEHOLDER.search(blob):
+        problems.append("contains an ellipsis, a placeholder or an unfilled slot")
+
+    return problems
+
+
+def _check_variety(rows: List[dict]) -> dict:
+    """Method repetition across a batch, reported against the offending rows."""
+    openers = []
+    for row in rows:
+        acts = _as_list(row.get("trainee_activities"))
+        first = acts[0] if acts else ""
+        openers.append(next((m for m in _METHODS
+                             if _plain(m) in _plain(first)), ""))
+
+    problems: dict = {}
+    allowed = max(1, len(rows) // 3)
+    counts: dict = {}
+    for method in openers:
+        if method:
+            counts[method] = counts.get(method, 0) + 1
+
+    for i, row in enumerate(rows):
+        found = []
+        method = openers[i]
+        if method and counts.get(method, 0) > allowed:
+            found.append(f"opens with '{method}', which opens "
+                         f"{counts[method]} of {len(rows)} sessions in this "
+                         f"batch; at most {allowed} may")
+        if i and method and method == openers[i - 1]:
+            found.append(f"opens with '{method}', the same method as the "
+                         f"previous session")
+        if found:
+            problems.setdefault(_row_id(row, i), []).extend(found)
+    return problems
+
+
+def _row_id(row: dict, index: int) -> str:
+    return str(row.get("session_id") or "").strip() or f"row {index + 1}"
+
+
+def validate_rows(rows: List[dict]) -> dict:
+    """{session_id: [what is wrong]} for every row that breaks a rule."""
+    problems: dict = {}
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict) or not row:
+            continue                       # an absent row is the merge's problem
+        found = _check_row(row)
+        if found:
+            problems[_row_id(row, i)] = found
+    for key, extra in _check_variety(
+            [r for r in rows if isinstance(r, dict) and r]).items():
+        problems.setdefault(key, []).extend(extra)
+    return problems
+
+
+def _repair_prompt(unit: Unit, sessions: List[Session], rows: List[dict],
+                   problems: dict) -> str:
+    """Ask for the failing sessions again, naming what was wrong with each."""
+    wanted = {_row_id(r, i) for i, r in enumerate(rows)} & set(problems)
+    failing = [s for s in sessions if s.session_id in wanted]
+    faults = "\n".join(
+        f"{sid}:\n" + "\n".join(f"  - {p}" for p in problems[sid])
+        for sid in sorted(problems) if sid in wanted)
+    return (build_prompt(unit, failing)
+            + "\n\nYour previous answer for these sessions broke the field rules "
+              "below. Return them again, corrected. Change only what is named; "
+              "keep everything else as it was.\n\n" + faults)
+
+
+def _repair_rows(unit: Unit, sessions: List[Session], rows: List[dict],
+                 api_key: str, model: str, progress_cb=None) -> List[dict]:
+    """One corrective round. Whatever is still wrong afterwards is logged.
+
+    Bounded at a single retry on purpose: a second one costs another batch's
+    tokens for diminishing returns, and the deterministic backfill downstream
+    means a row that stays imperfect is still a usable row.
+    """
+    problems = validate_rows(rows)
+    if not problems:
+        return rows
+
+    _emit_progress(progress_cb,
+                   f"AI: {len(problems)} session(s) broke a field rule; "
+                   f"asking for them again")
+    runlog.log(f"AI: validation found {len(problems)} session(s) to repair: "
+               + "; ".join(f"{k} ({len(v)})" for k, v in problems.items()))
+    try:
+        fixed = call_model(_repair_prompt(unit, sessions, rows, problems),
+                           api_key, model, progress_cb=progress_cb)
+    except AIError as e:
+        runlog.error(f"AI: repair round failed, keeping the original rows: {e}")
+        return rows
+
+    by_id = {_row_id(r, i): r for i, r in enumerate(fixed) if isinstance(r, dict)}
+    out = []
+    for i, row in enumerate(rows):
+        replacement = by_id.get(_row_id(row, i))
+        out.append(replacement if replacement else row)
+
+    left = validate_rows(out)
+    if left:
+        runlog.log("AI: still imperfect after one repair round: "
+                   + "; ".join(f"{k}: {', '.join(v)}" for k, v in left.items()))
+    return out
+
+
 def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
                            unit: Unit) -> List[Session]:
     """Apply AI output onto the deterministic skeleton, with full safety nets.
@@ -792,15 +1221,29 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
     the AI only contributes the generative text columns. Missing fields are
     backfilled so no cell is ever blank.
     """
-    for i, s in enumerate(sessions):
-        row = ai_rows[i] if i < len(ai_rows) else {}
+    # Rows are matched to sessions by the session_id the model echoes back, so a
+    # short, reordered or duplicated answer can no longer slide content onto the
+    # wrong session - the failure this used to guard against with padding. If a
+    # model returns no usable ids at all, pair in order as before.
+    rows_by_id = {str(r.get("session_id") or "").strip(): r
+                  for r in ai_rows if isinstance(r, dict)}
+    rows_by_id.pop("", None)
+    generated = [i for i, sess in enumerate(sessions) if not sess.is_cat]
+    by_position = {}
+    if not rows_by_id:
+        by_position = {i: ai_rows[pos] for pos, i in enumerate(generated)
+                       if pos < len(ai_rows) and isinstance(ai_rows[pos], dict)}
 
+    for i, s in enumerate(sessions):
         # CAT rows are deterministic - never the AI's output - but CONTEXTUAL:
         # they summarise the content sessions this CAT assesses (those since the
         # previous CAT), which are already filled earlier in this in-order pass.
+        # They are never sent to the model at all; see `generate_sessions`.
         if s.is_cat:
             _apply_cat_content(sessions, i)
             continue
+
+        row = rows_by_id.get(s.session_id) or by_position.get(i) or {}
 
         # session_title: accept the AI's data-quality-repaired title if given,
         # otherwise keep the deterministic skeleton title. Set before the
@@ -809,11 +1252,11 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
         if ai_title:
             s.session_title = ai_title
 
-        lo = _as_list(row.get("learning_outcomes"))
-        ai_kp = _as_list(row.get("key_points"))
+        lo = _flatten_learning_outcomes(row.get("learning_outcomes"))
+        ai_kp = _flatten_key_points(row.get("key_points"))
         acts = _as_list(row.get("trainee_activities"))
         res = _as_list(row.get("resources"))
-        assess = _as_list(row.get("assessments"))
+        assess = _flatten_assessments(row.get("assessments"))
 
         s.learning_outcomes = lo or _default_learning_outcomes(s)
         if ai_kp:
@@ -1141,8 +1584,15 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     # (a single 24-session response gets truncated -> invalid JSON). Rows are
     # concatenated in order, preserving alignment with the deterministic
     # skeleton, and sized for the model that will actually answer them.
+    # CAT rows are rebuilt deterministically by `merge_ai_into_sessions`, so
+    # generating them would be paying for output that is thrown away - roughly a
+    # fifth of a term's tokens. Only content sessions are sent.
+    to_generate = [s for s in sessions if not s.is_cat]
+    if not to_generate:
+        return merge_ai_into_sessions(sessions, [], unit)
+
     size = batch_size_for(model)
-    chunks = [sessions[i:i + size] for i in range(0, len(sessions), size)]
+    chunks = [to_generate[i:i + size] for i in range(0, len(to_generate), size)]
 
     # Batches don't depend on each other, so they go together rather than in a
     # row - see LP_MAX_PARALLEL. Each worker collects its own progress lines
@@ -1154,7 +1604,7 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
         lines: List[str] = []
         first = sum(len(c) for c in chunks[:ci - 1]) + 1
         lines.append(f"AI: generating sessions {first}-{first + len(chunk) - 1} "
-                     f"of {len(sessions)} (batch {ci}/{len(chunks)})")
+                     f"of {len(to_generate)} (batch {ci}/{len(chunks)})")
         rows = _generate_batch(unit, chunk, api_key, model, lines.append)
         return lines, rows
 
@@ -1165,6 +1615,11 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
             for line in lines:
                 _emit_progress(progress_cb, line)
             ai_rows.extend(rows)
+
+    # Checked across the whole plan rather than per batch, because method
+    # variety is a property of the plan a trainee sits through, not of however
+    # the work happened to be divided.
+    ai_rows = _repair_rows(unit, to_generate, ai_rows, api_key, model, progress_cb)
     return merge_ai_into_sessions(sessions, ai_rows, unit)
 
 
@@ -1196,7 +1651,7 @@ def regenerate_learning_plan_session(unit: Unit, sessions: List[Session], idx: i
     _emit_progress(progress_cb, f"Regenerating session {session.session_no}")
     data = _chat_json(prompt, api_key, model, _response_schema(),
                       "learning_plan_sessions", progress_cb=progress_cb,
-                      temperature=0.6)
+                      temperature=0.6, system=LP_SYSTEM)
     if isinstance(data, dict):
         data = data.get("sessions") or data.get("data") or [data]
     if not isinstance(data, list) or not data:
@@ -1247,8 +1702,49 @@ def _session_plan_schema() -> dict:
     })
 
 
+# The Session Plan's standing instructions, split from its data for the same
+# reasons as LP_SYSTEM.
+SP_SYSTEM = """You are a senior TVET trainer and industry expert in Kenya, writing ONE detailed SESSION PLAN (a single lesson) for a session taken from an approved Learning Plan. Ground everything in the supplied content; do NOT invent new topics.
+
+Write every activity line in the imperative present tense (base verb form): "Take roll call", "Lead a group discussion", "Demonstrate the tool" - NOT "Takes roll call", "Leads", "Demonstrates".
+
+TERMINOLOGY (Kenya CBET) - MANDATORY
+Use: trainee, trainer, session, facilitate, unit of competency, learning outcome, performance criteria, competency, assessment, Continuous Assessment Test (CAT).
+Never use: student, pupil, learner, teacher, lecturer, instructor, lesson, lecture, class (as a synonym for session), teach, deliver a lecture, exam, quiz, or test as a noun for the final assessment.
+Spelling: British / Kenyan English - organise, practise (as a verb), programme (a course of study), labelled, capitalised, centred.
+
+FIELD RULES
+
+introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does - take roll call; review the previous session; state this session's title and expected learning outcomes.
+
+delivery_steps: 3-4 steps that together fill EXACTLY the delivery minutes given in the user message. Every step and sub-step "minutes" must sum to that figure.
+- step_label: "Step 1", "Step 2", "Step 3", in order. If one step is involving enough to need its own breakdown, split it into consecutive sub-steps labelled "Step 1(a)", "Step 1(b)", "Step 1(c)" - each a full step object with its own minutes, trainer_activity, trainee_activity and learning_check. Only break a step down when it genuinely warrants it; otherwise keep one row per step.
+- minutes: integer. The longest step is the hands-on or practice step.
+- trainer_activity: 1-3 short lines describing what the TRAINER does this step. Name the CBET active-learning method - Group Discussion, Think-Pair-Share, Demonstration, Guided Practice, Case Study and the like - and reference THIS session's specific key points, tools or tasks. Concrete, never generic. Facilitate the session; never lecture.
+- trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.
+- learning_check: grouped assessment lines for this step - a CAPITALISED group word ("Knowledge", "Skills" or "Attitudes") followed by numbered items such as "1. Oral questioning", "2. Observation of developed work", drawn from the session's assessments and the evidence-guide methods. Early steps lean on Knowledge; hands-on steps add Skills.
+Order the steps so they progress from understanding, to guided practice, to independent application.
+
+review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" - summarise key points; answer questions; preview the next session.
+
+assignment: ONE concrete take-home task grounded in this session's content, written as a full sentence.
+
+lln_requirements: one sentence on how trainees with Language, Literacy and Numeracy or other special needs are catered for in THIS session - simplified handouts, a sign-language interpreter, extra time and so on.
+
+safety_requirements: one sentence on the workplace SOPs and safety precautions relevant to THIS session's topic.
+
+Return ONE JSON object and nothing else."""
+
+
 def build_session_plan_prompt(unit: Unit, session: Session,
                               duration_minutes: int) -> str:
+    """The per-session half: this session's content, no instructions.
+
+    The Learning Plan has already been generated and approved by the time this
+    runs, so its outcomes, key points, activities and assessments are handed
+    over as source material - the Session Plan elaborates them into a delivery
+    breakdown rather than deriving the content afresh.
+    """
     delivery = max(10, int(duration_minutes) - 10)   # 5' intro + 5' review fixed
     los = "\n".join(session.learning_outcomes) or "(derive from the title)"
     kps = "\n".join(session.key_points) or "(none supplied)"
@@ -1258,15 +1754,16 @@ def build_session_plan_prompt(unit: Unit, session: Session,
     methods = "; ".join(unit.assessment_methods) or ("Observation; Oral "
         "questioning; Written assessment; Practical assessment; Portfolio of evidence")
 
-    return f"""You are a senior TVET trainer and industry expert writing ONE detailed SESSION PLAN (a single lesson) for the session below, taken from an approved Learning Plan. Ground everything in the supplied content; do NOT invent new topics.
-
-UNIT: {unit.unit_title} | CODE: {unit.os_code} | LEVEL: {level}
+    return f"""UNIT: {unit.unit_title}
+CODE: {unit.os_code}
+LEVEL: {level}
 SESSION TITLE: {session.session_title}
+DELIVERY MINUTES (the delivery_steps must sum to exactly this): {delivery}
 
 THIS SESSION'S LEARNING OUTCOMES:
 {los}
 
-THIS SESSION'S LEARNING KEY POINTS (authoritative content to teach):
+THIS SESSION'S LEARNING KEY POINTS (authoritative content to facilitate):
 {kps}
 
 THIS SESSION'S PLANNED TRAINEE ACTIVITIES (active-learning methods to operationalise):
@@ -1274,26 +1771,10 @@ THIS SESSION'S PLANNED TRAINEE ACTIVITIES (active-learning methods to operationa
 
 THIS SESSION'S ASSESSMENTS:
 {assess}
+
 OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
 
-Write every activity line in the imperative present tense (base verb form): "Take roll call", "Lead a group discussion", "Demonstrate the tool" - NOT "Takes roll call", "Leads", "Demonstrates".
-
-Produce a JSON object with these fields:
-- introduction: 3-4 short bullets for the 5-minute opening. Start with "Trainer:" then what the trainer does (take roll call; review the previous session; state this session's title and expected learning outcomes).
-- delivery_steps: 3-4 steps that together fill EXACTLY {delivery} minutes (every step/sub-step "minutes" must sum to {delivery}). Each step:
-    * step_label: "Step 1", "Step 2", "Step 3" (in order). If a single step is involving enough to need its own breakdown, split it into consecutive sub-steps labelled "Step 1(a)", "Step 1(b)", "Step 1(c)"... - each a full step object with its own minutes, trainer_activity, trainee_activity and learning_check. Only break a step down when it genuinely warrants it; otherwise keep one row per step.
-    * minutes: integer; the longest step is the hands-on/practice step.
-    * trainer_activity: 1-3 short lines describing what the TRAINER does this step - name the CBET active-learning method (e.g. Group Discussion, Think-Pair-Share, Demonstration, Guided Practice, Case Study) and reference THIS session's specific key points/tools/tasks. Concrete, never generic. Facilitate the session - never "lecture" or "give a lecture".
-    * trainee_activity: 1-3 short lines describing what the TRAINEES do in response, referencing the same specific content.
-    * learning_check: grouped assessment lines for this step - a CAPITALISED group word ("Knowledge", "Skills", or "Attitudes") followed by numbered items ("1. Oral questioning", "2. Observation of developed work"), drawn from the session's assessments / evidence-guide methods. Early steps lean on Knowledge; hands-on steps add Skills.
-  Order the steps so they progress from understanding -> guided practice -> independent application.
-- review: 2-3 short bullets for the 5-minute close. Start with "Trainer:" (summarise key points; answer questions; preview the next session).
-- assignment: ONE concrete take-home task grounded in this session's content (a full sentence).
-- lln_requirements: one sentence noting how trainees with Language/Literacy/Numeracy or other special needs are catered for in THIS session (e.g. simplified handouts, sign-language interpreter, extra time).
-- safety_requirements: one sentence on the workplace SOPs / safety precautions relevant to THIS session's topic.
-
-TERMINOLOGY - Kenya CBET only: "trainee" (never student/learner/pupil), "trainer" (never teacher/lecturer/instructor), "session" (never "lecture"/"lesson"/"class"), "facilitate" (never "teach" or "deliver a lecture"), "unit of competency", "learning outcome", "performance criteria", "competency", "assessment"/"Continuous Assessment Test (CAT)". Return ONLY the JSON object.
-"""
+Return the JSON object now."""
 
 
 def _group_assessments(assessments: List[str]) -> "dict":
@@ -1531,7 +2012,7 @@ def generate_session_plan(unit: Unit, session: Session, inputs: PlanInputs, *,
     prompt = build_session_plan_prompt(unit, session, duration_minutes)
     _emit_progress(progress_cb, "Session plan: prompt prepared")
     ai = _chat_json(prompt, api_key, model, _session_plan_schema(),
-                    "session_plan", progress_cb=progress_cb)
+                    "session_plan", progress_cb=progress_cb, system=SP_SYSTEM)
     body = _merge_session_plan_body(ai if isinstance(ai, dict) else {},
                                     unit, session, duration_minutes)
     _emit_progress(progress_cb,

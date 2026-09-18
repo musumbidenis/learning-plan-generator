@@ -20,6 +20,8 @@ session content uses AI, in grounded, schema-constrained API calls.**
    ├─(C) GROUNDED GROQ CALLS    ─ ai_client.py                          [the only AI]
    │      └ fills learning_outcomes / activities / resources / assessments,
    │        grounded in parsed data; JSON schema mode forces valid JSON.
+   │        Standing rules live in LP_SYSTEM; only data varies per call.
+   │        CAT rows are rebuilt deterministically and never sent.
    │        Sessions go in batches of LP_SESSION_CHUNK (8), LP_MAX_PARALLEL (3)
    │        in flight at once; a Session Plan and a single-session regenerate
    │        are one call each.
@@ -105,19 +107,78 @@ a 400 otherwise rules a model out. The rows are now recovered and stray keys put
 they belong. The underlying cause is fixed too: the "Follow up Activity:" instruction now
 says plainly that the line is another string in `trainee_activities`, not a field of its own.
 
+**CAT sessions are never sent.** Their rows are rebuilt deterministically from the sessions
+they assess (`_apply_cat_content`), so the model's CAT output was always discarded - about a
+fifth of a term's output tokens, generated and binned. Only content sessions are batched.
+
 ### What this measures
 
 | | 11-session plan |
 |---|---|
 | Sequential batches of 4 | 142s |
 | Parallel batches of 4 | 36.4s |
-| **Parallel batches of 8** | **11.9s** |
+| Parallel batches of 8 | 11.9s |
+| **v2 prompts, 8 of 11 sessions generated** | **13.2s** |
 
 That 11.9s assumes a rested token allowance. An 11-session plan costs about **8,700 tokens**,
 which is roughly one minute's worth, so generating two plans back to back throttles the
 second (measured 20.7s) and a third waits longer still. That is the free tier's real
 throughput — about a plan a minute — and no amount of batching changes it; the fixes above
 lower the bill (from ~11,300 tokens to ~8,700) rather than raise the ceiling.
+
+## The prompts
+
+Both prompts are split in two: the standing instructions (`LP_SYSTEM`, `SP_SYSTEM`) go in a
+system message, and only the unit's data goes in the user message. Nothing that varies may
+appear in the static half - one interpolated value at the top would defeat the whole point.
+
+The original reason was Groq's prefix cache, since [cached tokens do not count against rate
+limits](https://console.groq.com/docs/prompt-caching) and tokens-per-minute is what governs
+speed here. **Measured on this account, it is worth much less than that promises**: the cache
+hit roughly one warm call in five and topped out near 768 tokens, so expect ~150 tokens a
+call, not the ~1,450 the static half contains. The split is kept because instructions and
+data are different things and reading them apart is easier - not for the cache.
+
+### Structured output, formatted here
+
+The model returns *structure*, not formatted strings:
+
+```
+learning_outcomes   {stem, items[]}
+key_points          [{heading, points[]}]
+assessments         {knowledge_checks[], skills[], attitudes[]}
+```
+
+`_flatten_*` turns these into the lines the document renders. That matters because
+`doc_builder` decides what to embolden by inspecting the text - `_keypoint_bold` bolds a line
+only if it is at least 85% uppercase. Asking the model to capitalise its headings meant a
+heading it under-capitalised rendered silently unbolded. Now the `upper()` is ours and cannot
+drift; the same goes for numbering the assessment items, which the model left out on *every*
+row when it was asked for.
+
+### The self-check is code, not a request
+
+Generation runs at `reasoning_effort: "low"` on purpose, so asking the model to verify its own
+work asks for something it is configured not to do. `validate_rows` checks the rules instead -
+three `a./b./c.` outcomes, no unassessable opener verbs, 2-3 key-point blocks of 2-4 points,
+exactly five activity lines with `Follow up Activity:` fourth, a named active-learning method,
+2-4 resources, 1-3 assessments a group, word caps, banned terminology, placeholders, and
+method variety across the whole plan.
+
+Whatever fails goes back to the model **once**, naming each fault, and whatever is still
+imperfect is logged rather than retried again: a second round costs another batch's tokens for
+diminishing returns, and the deterministic backfill means an imperfect row is still usable.
+
+Building the checks revealed two rules that were wrong rather than two models that were: every
+row "failed" assessment numbering (now applied here), and `Think-Pair-Share` written with a
+non-breaking hyphen was reported as naming no method (now matched through the typography).
+
+### Rows carry their own identity
+
+Each session has a `session_id` (`W3-S1`) which the model echoes back, and rows are matched to
+sessions by it. A short, reordered or duplicated answer can no longer slide content onto the
+wrong session - the failure that positional matching needed padding to survive. A model that
+drops the field falls back to pairing in order.
 
 ## The Drive document library (optional)
 
