@@ -15,6 +15,7 @@ import json
 
 import ai_client
 import doc_builder
+import resource_finder
 from ai_client import (AIError, _extract_text, _response_schema,
                        call_model)
 from models import Session, Unit
@@ -54,12 +55,17 @@ def offline(monkeypatch):
     monkeypatch.setattr(ai_client, "_post",
                         lambda *a, **k: FakeResp(200, _ok_payload("[]")))
     monkeypatch.setattr(ai_client, "list_chat_models", lambda key: list(DISCOVERED))
+    # Resource discovery reaches the internet - YouTube and every candidate URL
+    # - so it is stubbed out here. Its own behaviour is covered in
+    # tests/test_resource_finder.py against canned responses.
+    monkeypatch.setattr(resource_finder, "find_for_unit",
+                        lambda *a, **k: resource_finder.ResourcePool())
     # The corrective round is an extra call_model, which would otherwise show up
     # in every batching test's call count. It is exercised directly instead, in
     # the validation section below; `validate_rows` itself stays real.
     monkeypatch.setattr(ai_client, "_repair_rows",
                         lambda unit, sessions, rows, api_key, model,
-                               progress_cb=None: rows)
+                               progress_cb=None, pool=None: rows)
     # what one test learns about the workspace's plan must not leak into another
     monkeypatch.setattr(ai_client, "_UNAVAILABLE_MODELS", set())
     monkeypatch.setattr(ai_client, "_PROVEN_MODELS", set())

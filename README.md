@@ -26,6 +26,11 @@ session content uses AI, in grounded, schema-constrained API calls.**
    │        in flight at once; a Session Plan and a single-session regenerate
    │        are one call each.
    │
+   ├─(C2) VERIFIED RESOURCES    ─ resource_finder.py        [searched, not recalled]
+   │      └ videos searched on YouTube, pages proposed then FETCHED to prove
+   │        they exist; the model picks from the pool by number, never types
+   │        a URL. Cached per unit under .resource_cache/.
+   │
    └─(D) DOC BUILDER            ─ doc_builder.py                        [no AI]
           └ A4, Times New Roman, Table Grid, 9-column RVNP session table
 ```
@@ -172,6 +177,44 @@ diminishing returns, and the deterministic backfill means an imperfect row is st
 Building the checks revealed two rules that were wrong rather than two models that were: every
 row "failed" assessment numbering (now applied here), and `Think-Pair-Share` written with a
 non-breaking hyphen was reported as naming no method (now matched through the typography).
+
+### Resources are found on the internet, and proved to exist
+
+`resource_finder.py`. The Resources column used to be whatever the model
+remembered, and a model's memory of a URL is a guess that reads like a fact.
+Measured against the live API, `openai/gpt-oss-120b` was asked for ten resources
+for one unit: **three resolved**, and of the three YouTube links it gave,
+**none existed** - the video ids were well-formed inventions.
+
+Two rules replace that.
+
+**Candidates come from an index where one exists.** Videos are searched on
+YouTube's own results page, so a real video id is never guessed to begin with.
+No key is needed: the page embeds its data as JSON. Pages are still proposed by
+the model, but asked for stable landing pages rather than deep links, because a
+deep link is the shape that usually turns out to be invented.
+
+**Nothing is returned until it has been fetched.** Every URL is requested before
+it can reach a document. YouTube gets a stronger check than a fetch: a deleted
+or invented watch page still answers `200` with an "unavailable" notice, so the
+oEmbed endpoint is used instead - it 404s for an id that does not exist, and
+hands back the video's **real title and channel**, which is how a resource ends
+up named accurately rather than as the model described it.
+
+**The model never writes a URL.** The verified pool is listed in the user
+message and the model chooses *by number*; `_flatten_resources` renders the line
+from the pool. It cannot mistype or invent what it does not type, and
+`validate_rows` rejects anything that is not a number on the list.
+
+One pool per unit, not per session: a unit's sessions cover one subject, a
+search each would multiply the slowest step by eight, and a trainer reading the
+plan gets a coherent set of references. Pools are cached under
+`.resource_cache/` for a fortnight, so only the first plan for a unit pays for
+the search (measured: 37s uncached, 0s after).
+
+If nothing can be verified - offline, or a search that fails - the plan is still
+produced, with resources named in words and no links, and the run log says so.
+A plan is never lost to this.
 
 ### Rows carry their own identity
 

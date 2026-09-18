@@ -26,6 +26,7 @@ from typing import List, Optional
 
 import requests
 
+import resource_finder
 import runlog
 from models import DeliveryStep, PlanInputs, Session, SessionPlan, Unit
 
@@ -258,6 +259,33 @@ def _flatten_key_points(value) -> List[str]:
 _RE_ITEM_NUMBER = re.compile(r"^\s*\d+\s*[.)]\s*")
 
 
+# "3", "3.", "3. NIST ..." - whatever shape the choice arrives in.
+_RE_LEADING_INT = re.compile(r"^\s*(\d+)")
+
+
+def _flatten_resources(value, pool=None) -> List[str]:
+    """Pool choices -> the exact verified lines; or plain text with no pool.
+
+    The model returns numbers, so what reaches the document is rendered from
+    the pool itself. A title or URL it typed is never trusted, which is the
+    whole point: it cannot mistype or invent what it does not write.
+    """
+    items = _as_list(value)
+    if not pool or not getattr(pool, "resources", None):
+        return items
+    resources = pool.resources
+    out, seen = [], set()
+    for item in items:
+        match = _RE_LEADING_INT.match(str(item))
+        if not match:
+            continue                       # a typed title, with a pool present
+        index = int(match.group(1)) - 1    # the listing is 1-based
+        if 0 <= index < len(resources) and index not in seen:
+            seen.add(index)
+            out.append(resources[index].as_line())
+    return out
+
+
 def _flatten_assessments(value) -> List[str]:
     """{knowledge_checks, skills, attitudes} -> grouped, headed, numbered lines.
 
@@ -343,7 +371,7 @@ Vary the methods across the sessions in one response: no method in more than a t
 Weak: "- Group Discussion: Trainees discuss the topic in groups and present findings."
 Strong: "- Think-Pair-Share: Each trainee lists three differences between a compiler and an interpreter, compares the list with a partner, then the pair reports one agreed difference to the room."
 
-resources: two to four real, locatable items relevant to THIS session - textbooks, official documentation, standards, tools or presentations, including the TVET CDACC curriculum and trainer's guide for the unit. Prefer what a Kenyan polytechnic would realistically have. Never invent ISBNs, page numbers, edition years or URLs; if you are unsure of a URL, name the resource without one.
+resources: choose two to four from the VERIFIED RESOURCES list in the user message, by NUMBER. Each entry in the array is just that number as a string - "3", "7" - and nothing else. Never write a title, a URL, an ISBN or an edition: every one of those resources has already been fetched and confirmed to exist, and the plan prints them from the list, so anything you type instead would be a guess replacing a fact. Pick the ones whose subject matches THIS session, and include a video where one on the list fits. If no VERIFIED RESOURCES list is supplied, and only then, name two to four resources in words, without URLs.
 
 assessments: one to three items per group, derived from the supplied Evidence-Guide methods. Write each as a plain sentence; do not number them.
 - knowledge_checks: what the trainee is asked about this session's key points.
@@ -353,11 +381,16 @@ assessments: one to three items per group, derived from the supplied Evidence-Gu
 Return ONE JSON object and nothing else."""
 
 
-def build_prompt(unit: Unit, sessions: List[Session]) -> str:
+def build_prompt(unit: Unit, sessions: List[Session], pool=None) -> str:
     """The per-unit half of the request: data only, no instructions.
 
     Everything standing lives in LP_SYSTEM. Keeping this half free of
     instructions is what makes separating the two worth doing.
+
+    `pool` is a `resource_finder.ResourcePool` whose every URL has been fetched
+    and confirmed. It is listed here so the model chooses by number instead of
+    writing a link from memory - which, measured, produced three working URLs
+    out of ten and no working video at all.
     """
     pcs = "\n".join(f"{pc.number} {pc.text}" for pc in unit.all_pcs)
     methods = "; ".join(unit.assessment_methods) or "Observation; Oral assessment; " \
@@ -369,6 +402,11 @@ def build_prompt(unit: Unit, sessions: List[Session]) -> str:
 
     verbs = "Identify, Explain, Apply, Demonstrate, Evaluate, Implement" \
         if str(level) >= "6" else "Identify, Explain, Apply, Demonstrate"
+
+    listing = pool.allow_list() if pool and pool.resources else ""
+    resources_block = (
+        f"\nVERIFIED RESOURCES (every one fetched and confirmed to exist; "
+        f"choose by NUMBER only):\n{listing}\n" if listing else "")
 
     return f"""UNIT: {unit.unit_title}
 CODE: {unit.os_code}
@@ -386,7 +424,7 @@ OS REQUIRED KNOWLEDGE: {knowledge or "(none listed)"}
 
 SESSIONS (key_points are AUTHORITATIVE - preserve their meaning):
 {skeleton_json}
-
+{resources_block}
 Return the JSON object now."""
 
 
@@ -944,6 +982,16 @@ def _default_assessments(unit: Unit, s: Session) -> List[str]:
     return out
 
 
+def _pool_fallback(pool) -> List[str]:
+    """Something real for a session that chose nothing usable from the pool.
+
+    Better a verified resource that is merely adjacent than the generic
+    "- Textbooks on <title>" line, which is what this used to fall back to.
+    """
+    resources = getattr(pool, "resources", None) if pool else None
+    return [r.as_line() for r in resources[:3]] if resources else []
+
+
 def _default_resources(s: Session) -> List[str]:
     # CAT rows are handled deterministically before this point; this default
     # only ever fills content (non-CAT) sessions.
@@ -1008,7 +1056,7 @@ def _words(text: str) -> int:
     return len(str(text).split())
 
 
-def _check_row(row: dict) -> List[str]:
+def _check_row(row: dict, pool_size: int = 0) -> List[str]:
     """Everything wrong with one generated session, in plain words."""
     problems: List[str] = []
 
@@ -1089,6 +1137,20 @@ def _check_row(row: dict) -> List[str]:
     res = _as_list(row.get("resources"))
     if not 2 <= len(res) <= 4:
         problems.append(f"resources has {len(res)} entries; it must have 2 to 4")
+    if pool_size:
+        # With a verified list supplied, a resource is a number on that list.
+        # Anything else is the model writing a link from memory, which is the
+        # behaviour this whole path exists to stop.
+        for item in res:
+            match = _RE_LEADING_INT.match(str(item))
+            if not match:
+                problems.append(f"resource {str(item)[:40]!r} is not a number "
+                                f"from the VERIFIED RESOURCES list; choose by "
+                                f"number and never write a title or URL")
+            elif not 1 <= int(match.group(1)) <= pool_size:
+                problems.append(f"resource {match.group(1)} is not on the "
+                                f"VERIFIED RESOURCES list (it has {pool_size} "
+                                f"entries)")
 
     assess = row.get("assessments")
     if not isinstance(assess, dict):
@@ -1147,13 +1209,14 @@ def _row_id(row: dict, index: int) -> str:
     return str(row.get("session_id") or "").strip() or f"row {index + 1}"
 
 
-def validate_rows(rows: List[dict]) -> dict:
+def validate_rows(rows: List[dict], pool=None) -> dict:
     """{session_id: [what is wrong]} for every row that breaks a rule."""
+    pool_size = len(getattr(pool, "resources", None) or []) if pool else 0
     problems: dict = {}
     for i, row in enumerate(rows):
         if not isinstance(row, dict) or not row:
             continue                       # an absent row is the merge's problem
-        found = _check_row(row)
+        found = _check_row(row, pool_size)
         if found:
             problems[_row_id(row, i)] = found
     for key, extra in _check_variety(
@@ -1163,28 +1226,29 @@ def validate_rows(rows: List[dict]) -> dict:
 
 
 def _repair_prompt(unit: Unit, sessions: List[Session], rows: List[dict],
-                   problems: dict) -> str:
+                   problems: dict, pool=None) -> str:
     """Ask for the failing sessions again, naming what was wrong with each."""
     wanted = {_row_id(r, i) for i, r in enumerate(rows)} & set(problems)
     failing = [s for s in sessions if s.session_id in wanted]
     faults = "\n".join(
         f"{sid}:\n" + "\n".join(f"  - {p}" for p in problems[sid])
         for sid in sorted(problems) if sid in wanted)
-    return (build_prompt(unit, failing)
+    return (build_prompt(unit, failing, pool)
             + "\n\nYour previous answer for these sessions broke the field rules "
               "below. Return them again, corrected. Change only what is named; "
               "keep everything else as it was.\n\n" + faults)
 
 
 def _repair_rows(unit: Unit, sessions: List[Session], rows: List[dict],
-                 api_key: str, model: str, progress_cb=None) -> List[dict]:
+                 api_key: str, model: str, progress_cb=None,
+                 pool=None) -> List[dict]:
     """One corrective round. Whatever is still wrong afterwards is logged.
 
     Bounded at a single retry on purpose: a second one costs another batch's
     tokens for diminishing returns, and the deterministic backfill downstream
     means a row that stays imperfect is still a usable row.
     """
-    problems = validate_rows(rows)
+    problems = validate_rows(rows, pool)
     if not problems:
         return rows
 
@@ -1194,7 +1258,7 @@ def _repair_rows(unit: Unit, sessions: List[Session], rows: List[dict],
     runlog.log(f"AI: validation found {len(problems)} session(s) to repair: "
                + "; ".join(f"{k} ({len(v)})" for k, v in problems.items()))
     try:
-        fixed = call_model(_repair_prompt(unit, sessions, rows, problems),
+        fixed = call_model(_repair_prompt(unit, sessions, rows, problems, pool),
                            api_key, model, progress_cb=progress_cb)
     except AIError as e:
         runlog.error(f"AI: repair round failed, keeping the original rows: {e}")
@@ -1206,7 +1270,7 @@ def _repair_rows(unit: Unit, sessions: List[Session], rows: List[dict],
         replacement = by_id.get(_row_id(row, i))
         out.append(replacement if replacement else row)
 
-    left = validate_rows(out)
+    left = validate_rows(out, pool)
     if left:
         runlog.log("AI: still imperfect after one repair round: "
                    + "; ".join(f"{k}: {', '.join(v)}" for k, v in left.items()))
@@ -1214,7 +1278,7 @@ def _repair_rows(unit: Unit, sessions: List[Session], rows: List[dict],
 
 
 def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
-                           unit: Unit) -> List[Session]:
+                           unit: Unit, pool=None) -> List[Session]:
     """Apply AI output onto the deterministic skeleton, with full safety nets.
 
     The deterministic schedule (week / session_no / is_cat / pcs) ALWAYS wins;
@@ -1255,7 +1319,7 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
         lo = _flatten_learning_outcomes(row.get("learning_outcomes"))
         ai_kp = _flatten_key_points(row.get("key_points"))
         acts = _as_list(row.get("trainee_activities"))
-        res = _as_list(row.get("resources"))
+        res = _flatten_resources(row.get("resources"), pool)
         assess = _flatten_assessments(row.get("assessments"))
 
         s.learning_outcomes = lo or _default_learning_outcomes(s)
@@ -1267,7 +1331,8 @@ def merge_ai_into_sessions(sessions: List[Session], ai_rows: List[dict],
             s.key_points = _format_curriculum_keypoints(s.key_points) \
                 or [s.session_title.upper()]
         s.trainee_activities = acts if len(acts) >= 3 else _default_activities(s)
-        s.resources = res if len(res) >= 2 else _default_resources(s)
+        s.resources = res if len(res) >= 2 else _pool_fallback(pool) \
+            or _default_resources(s)
         s.assessments = assess or _default_assessments(unit, s)
         # NOTE: week/session_no/is_cat/pcs are NOT touched -> deterministic wins.
     return sessions
@@ -1535,7 +1600,7 @@ def batch_size_for(model: str) -> int:
 
 
 def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
-                    model: str, progress_cb=None) -> List[dict]:
+                    model: str, progress_cb=None, pool=None) -> List[dict]:
     """Exactly one row per session in `chunk`, whatever the model returns.
 
     Rows are positional - `merge_ai_into_sessions` pairs row *i* with session
@@ -1545,7 +1610,7 @@ def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
     didn't), and anything still missing is padded so the deterministic backfill
     lands on the right row.
     """
-    rows = call_model(build_prompt(unit, chunk), api_key, model,
+    rows = call_model(build_prompt(unit, chunk, pool), api_key, model,
                         progress_cb=progress_cb)
     if len(rows) >= len(chunk):
         return rows[:len(chunk)]
@@ -1558,8 +1623,10 @@ def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
                        f"AI: {len(rows)} of {len(chunk)} sessions came back; "
                        f"retrying them in smaller batches")
         half = len(chunk) // 2
-        return (_generate_batch(unit, chunk[:half], api_key, model, progress_cb)
-                + _generate_batch(unit, chunk[half:], api_key, model, progress_cb))
+        return (_generate_batch(unit, chunk[:half], api_key, model,
+                                progress_cb, pool)
+                + _generate_batch(unit, chunk[half:], api_key, model,
+                                  progress_cb, pool))
 
     return rows + [{}] * (len(chunk) - len(rows))
 
@@ -1591,6 +1658,23 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     if not to_generate:
         return merge_ai_into_sessions(sessions, [], unit)
 
+    # Real resources, found on the internet and fetched to prove they exist,
+    # before anything is generated - the model then chooses from them by number
+    # rather than writing a URL from memory. Cached per unit, so only the first
+    # plan for a unit pays for the search.
+    resource_pool = None
+    try:
+        resource_pool = resource_finder.find_for_unit(
+            unit, to_generate, api_key=api_key, model=model,
+            progress_cb=progress_cb)
+    except Exception as e:                  # noqa: BLE001 - never lose a plan to this
+        runlog.log(f"Resources: search failed, falling back to unverified "
+                   f"wording ({type(e).__name__}: {e})", level="WARN")
+    if resource_pool is not None and not resource_pool.resources:
+        _emit_progress(progress_cb,
+                       "Resources: none could be verified; naming them without links")
+        resource_pool = None
+
     size = batch_size_for(model)
     chunks = [to_generate[i:i + size] for i in range(0, len(to_generate), size)]
 
@@ -1605,7 +1689,8 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
         first = sum(len(c) for c in chunks[:ci - 1]) + 1
         lines.append(f"AI: generating sessions {first}-{first + len(chunk) - 1} "
                      f"of {len(to_generate)} (batch {ci}/{len(chunks)})")
-        rows = _generate_batch(unit, chunk, api_key, model, lines.append)
+        rows = _generate_batch(unit, chunk, api_key, model, lines.append,
+                               pool=resource_pool)
         return lines, rows
 
     ai_rows: List[dict] = []
@@ -1619,8 +1704,9 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     # Checked across the whole plan rather than per batch, because method
     # variety is a property of the plan a trainee sits through, not of however
     # the work happened to be divided.
-    ai_rows = _repair_rows(unit, to_generate, ai_rows, api_key, model, progress_cb)
-    return merge_ai_into_sessions(sessions, ai_rows, unit)
+    ai_rows = _repair_rows(unit, to_generate, ai_rows, api_key, model,
+                           progress_cb, pool=resource_pool)
+    return merge_ai_into_sessions(sessions, ai_rows, unit, resource_pool)
 
 
 def regenerate_learning_plan_session(unit: Unit, sessions: List[Session], idx: int,

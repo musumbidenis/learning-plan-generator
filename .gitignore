@@ -1,5 +1,6 @@
 .env
 .drive_cache/
+.resource_cache/
 __pycache__/
 *.pyc
 .pytest_cache/
