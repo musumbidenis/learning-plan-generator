@@ -163,6 +163,10 @@ class Page:
     index: int
     text: str                       # naive extract_text (used for region detection)
     words: List[dict]               # extract_words (used for column splitting)
+    # Where this page was read from, so a parser can go back for the document's
+    # TABLES (see table_reader) without threading the path through every call.
+    # Empty for pages built in tests or from word-processor formats.
+    source: str = ""
 
 
 def _text_from_words(words: List[dict]) -> str:
@@ -198,7 +202,8 @@ def _load_pdf_pages_fitz(path: str) -> List[Page]:
             words = [{"text": w[4], "x0": w[0], "x1": w[2],
                       "top": w[1], "bottom": w[3]} for w in raw]
             total_words += len(words)
-            pages.append(Page(index=pno, text=_text_from_words(words), words=words))
+            pages.append(Page(index=pno, text=_text_from_words(words),
+                              words=words, source=path))
     finally:
         doc.close()
     if total_words == 0:
@@ -216,6 +221,7 @@ def _load_pdf_pages_pdfplumber(path: str) -> List[Page]:
                 index=i,
                 text=p.extract_text() or "",
                 words=p.extract_words() or [],
+                source=path,
             ))
     return pages
 
