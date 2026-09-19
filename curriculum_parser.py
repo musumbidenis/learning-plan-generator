@@ -267,43 +267,61 @@ def _outcomes_from_tables(unit_pages: List[Page]) -> List[LearningOutcome]:
 
 
 def _richness(outcomes: List[LearningOutcome]) -> tuple:
-    """How much syllabus a parse actually recovered."""
-    return (sum(len(st.key_points) for o in outcomes for st in o.sub_topics),
-            sum(len(o.sub_topics) for o in outcomes))
+    """(sub-topics, key points) recovered - the two things a parse can lose.
+
+    One sub-topic becomes one session, so losing sub-topics loses whole rows of
+    the plan; losing key points thins the rows that remain. They are reported
+    separately because neither substitutes for the other.
+    """
+    return (sum(len(o.sub_topics) for o in outcomes),
+            sum(len(st.key_points) for o in outcomes for st in o.sub_topics))
 
 
 def _choose_outcomes(from_tables: List[LearningOutcome],
                      from_layout: List[LearningOutcome]
                      ) -> List[LearningOutcome]:
-    """Keep whichever parse recovered more, but always take the clean columns.
+    """Keep the tables only when they cost nothing, but always take their columns.
 
-    Measured across the cached curricula, reading the tables recovers MORE on
-    well-formed documents (the benchmark unit gains two whole sub-topics that
-    the coordinate walk missed) and LESS on documents whose grid is irregular
-    enough to fragment. Choosing per unit means neither kind loses content.
+    The two parses divide a unit's content differently, so ranking them on any
+    single score trades one axis for the other and some unit always loses.
+    Measured over 625 units: ranking key points first cost FARM IRRIGATION AND
+    DRAINAGE SYSTEMS 24 sub-topics - 24 sessions - and ranking sub-topics first
+    instead cost AGRICULTURAL REFRIGERATION 7 key points. There is no ordering
+    that wins everywhere.
 
-    Assessment methods and durations are taken from the tables regardless,
-    matched to outcomes by number: those two come from cells the coordinate
-    walk cannot read cleanly at all - it is where the Content bleed came from,
-    and durations live in a table it never looks at.
+    So there is no ordering. The tables are used only when they are at least as
+    good on BOTH counts, which makes losing content impossible by construction;
+    otherwise the coordinate walk stands. It means forgoing the occasional
+    trade (a unit where the tables would add key points at the cost of a
+    sub-topic), and that is the price of the guarantee.
+
+    Assessment methods and durations come from the tables either way, matched
+    by outcome number: those are the two columns the coordinate walk cannot
+    read - one is where the Content bleed came from, the other lives in a table
+    it never looks at.
     """
-    table_extras = {o.number: (o.suggested_methods, o.duration_hours)
-                    for o in from_tables}
-    chosen = from_tables
-    if from_layout and _richness(from_layout) > _richness(from_tables):
-        chosen = from_layout
+    table_subs, table_points = _richness(from_tables)
+    layout_subs, layout_points = _richness(from_layout)
+
+    use_tables = bool(from_tables) and (table_subs >= layout_subs
+                                        and table_points >= layout_points)
+    chosen = from_tables if use_tables else (from_layout or from_tables)
+
+    if not use_tables:
+        extras = {o.number: (o.suggested_methods, o.duration_hours)
+                  for o in from_tables}
         for outcome in chosen:
-            methods, hours = table_extras.get(outcome.number, (None, 0))
+            methods, hours = extras.get(outcome.number, (None, 0))
             if methods:
                 outcome.suggested_methods = list(methods)
             outcome.duration_hours = hours
+
     if chosen:
-        runlog.log(
-            f"Curriculum: {len(chosen)} learning outcomes, "
-            f"{sum(len(o.sub_topics) for o in chosen)} sub-topics, "
-            f"{sum(len(st.key_points) for o in chosen for st in o.sub_topics)} "
-            f"key points, {sum(o.duration_hours for o in chosen)} hours "
-            f"(from {'tables' if chosen is from_tables else 'layout'})")
+        subs, points = _richness(chosen)
+        runlog.log(f"Curriculum: {len(chosen)} learning outcomes, {subs} "
+                   f"sub-topics, {points} key points, "
+                   f"{sum(o.duration_hours for o in chosen)} hours "
+                   f"(from {'tables' if use_tables else 'layout'})")
     return chosen
 
 

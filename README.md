@@ -158,22 +158,35 @@ usable rather than merely present:
   looks like. The whole `Duration (Hours)` column is bare numbers, so filtering it left every
   duration blank.
 
-### Both parses run, and the better one wins
+### Both parses run, and the tables are used only when they cost nothing
 
 Reading cells is not always better. Some curricula have grids whose cells are merged and split
 irregularly enough that pdfplumber fragments one table into 9-, 6-, 4- and 2-column pieces,
-and there the coordinate walk recovers more. So each unit is parsed **both** ways and
-`_choose_outcomes` keeps whichever recovered more syllabus.
+and there the coordinate walk recovers more. So each unit is parsed **both** ways.
 
-Assessment methods and durations are taken from the tables regardless of which parse wins:
-those are the two columns the coordinate walk cannot read cleanly at all — one is where the
-bleed came from, and the other lives in a table it never looks at.
+Choosing between them by any single score does not work, because the two parses divide a
+unit's content differently and a score trades one axis for the other. Measured over **625
+units**, both orderings lose somewhere:
 
-Measured across every cached curriculum, unit by unit: **no unit loses content**, and many
-gain. `APPLICATION END-USER SUPPORT` went from yielding nothing at all to 4 outcomes and 42
-key points; `COMPUTERISED DATABASE SYSTEMS MANAGEMENT` from 6 sub-topics to 31. The benchmark
-unit gains two whole sub-topics — `1.1 Documentation of ICT security assets` and
-`3.3 Updating ICT security system` were simply missing before.
+| ranking | what it cost |
+|---|---|
+| key points first | `FARM IRRIGATION AND DRAINAGE SYSTEMS` 33 sub-topics to 9, for 5 more key points |
+| sub-topics first | `AGRICULTURAL REFRIGERATION` 38 key points to 31, for 1 more sub-topic |
+
+A sub-topic is a *session*; a key point is a *line within* one. Neither substitutes for the
+other, so `_choose_outcomes` does not rank them. The tables are used only when they are at
+least as good on **both** counts, which makes losing content impossible by construction. The
+price is forgoing the occasional genuine trade.
+
+Assessment methods and durations are taken from the tables either way: those are the two
+columns the coordinate walk cannot read cleanly at all - one is where the bleed came from, and
+the other lives in a table it never looks at.
+
+Measured unit by unit across all 625: **120 improved, 0 regressed**. `APPLICATION END-USER
+SUPPORT` went from yielding nothing at all to 4 outcomes and 42 key points; `COMPUTERISED
+DATABASE SYSTEMS MANAGEMENT` from 6 sub-topics to 31. The benchmark unit gains two whole
+sub-topics - `1.1 Documentation of ICT security assets` and `3.3 Updating ICT security
+system` were simply missing before, taking it from 11 sessions to 13.
 
 ### What comes from where
 

@@ -120,6 +120,36 @@ def test_the_layout_wins_when_the_grid_was_too_irregular_to_read():
     assert len(chosen[0].sub_topics) == 9
 
 
+def test_a_gain_in_key_points_never_buys_a_loss_of_sub_topics():
+    """FARM IRRIGATION AND DRAINAGE SYSTEMS, as it actually parsed: the tables
+    offered five more key points for twenty-four fewer sub-topics - twenty-four
+    sessions that would have stopped existing."""
+    tables = [_outcome("1", 9, 1)]          # 9 sub-topics, 9 key points
+    layout = [_outcome("1", 33, 0)]         # 33 sub-topics, none
+
+    chosen = cp._choose_outcomes(tables, layout)
+
+    assert len(chosen[0].sub_topics) == 33
+
+
+def test_a_gain_in_sub_topics_never_buys_a_loss_of_key_points():
+    """AGRICULTURAL REFRIGERATION, the mirror image: one more sub-topic for
+    seven fewer key points. Ranking either axis first loses the other
+    somewhere, so a trade is simply declined."""
+    tables = [_outcome("1", 16, 1)]         # 16 sub-topics, 16 key points
+    layout = [_outcome("1", 15, 2)]         # 15 sub-topics, 30 key points
+
+    chosen = cp._choose_outcomes(tables, layout)
+
+    assert len(chosen[0].sub_topics) == 15
+
+
+def test_the_tables_win_when_they_are_better_on_both_counts():
+    chosen = cp._choose_outcomes([_outcome("1", 5, 4)], [_outcome("1", 5, 1)])
+
+    assert sum(len(st.key_points) for st in chosen[0].sub_topics) == 20
+
+
 def test_methods_and_hours_come_from_the_tables_even_when_the_layout_wins():
     """Those two columns are exactly what the coordinate walk cannot read: the
     bleed came from one, and it never looks at the table holding the other."""
