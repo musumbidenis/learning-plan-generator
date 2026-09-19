@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
+import runlog
+import table_reader
 from models import CurriculumUnit, LearningOutcome, SubTopic, UnitRef
 from pdf_utils import (
     Page,
@@ -136,6 +138,175 @@ def parse_curriculum_unit(pages: List[Page], ref: UnitRef) -> Optional[Curriculu
     return _parse_one_unit(unit_pages)
 
 
+# The three columns, by their headers rather than by where they sit on the page.
+_RE_H_LO = re.compile(r"Learning\s+Outcome", re.I)
+_RE_H_CONTENT = re.compile(r"Content", re.I)
+_RE_H_ASSESS = re.compile(r"Assessment", re.I)
+_RE_H_DURATION = re.compile(r"Duration", re.I)
+
+# A numbered item inside a content cell: '1.1', '1.1.1', '1.1.1.1', with or
+# without a trailing dot. The whole cell arrives as one run-on string, so the
+# numbering is the only thing separating a sub-topic from its key points.
+_RE_NUMBER_RUN = re.compile(r"(?<![\d.])(\d+(?:\.\d+)+)\.?\s+")
+
+# Assessment methods arrive bulleted: '- Practical - Projects - Written tests'.
+_RE_BULLET_SPLIT = re.compile(r"[\u2022\u25aa\u25cf\u00b7\*]|(?<=\w)\s+-\s+|^-\s*")
+
+_RE_LEADING_NUMBER = re.compile(r"^\s*(\d+)\s*[.)]?\s*(.*)$", re.S)
+
+
+def _split_methods(cell: str) -> List[str]:
+    """A bulleted assessment cell as separate methods."""
+    parts = _RE_BULLET_SPLIT.split(cell or "")
+    out: List[str] = []
+    for part in parts:
+        text = clean_text(part or "")
+        if text and len(text) > 2 and not is_noise_line(text):
+            out.append(text)
+    return out
+
+
+def _split_content(cell: str) -> List[SubTopic]:
+    """A content cell as sub-topics, each carrying its own key points.
+
+    The cell is one long string - '1.1. Documentation of ICT security assets
+    1.1.1. Introduction to ICT security 1.1.1.1. Definition ...' - so it is cut
+    at its numbering. Two dotted parts ('1.1') start a sub-topic; three or more
+    ('1.1.1', '1.1.1.1') are key points belonging to the sub-topic above.
+    """
+    text = (cell or "").strip()
+    if not text:
+        return []
+    marks = list(_RE_NUMBER_RUN.finditer(text))
+    if not marks:
+        return []
+
+    subs: List[SubTopic] = []
+    current: Optional[SubTopic] = None
+    for i, mark in enumerate(marks):
+        number = mark.group(1)
+        body_end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        body = clean_text(text[mark.end():body_end])
+        if not body:
+            continue
+        if number.count(".") == 1:
+            current = SubTopic(number=number, title=body)
+            subs.append(current)
+        elif current is not None:
+            current.key_points.append(body)
+        else:
+            # Key points before any sub-topic: keep them under one made from
+            # the outcome itself rather than dropping the syllabus on the floor.
+            current = SubTopic(number=number.rsplit(".", 1)[0], title=body)
+            subs.append(current)
+    return subs
+
+
+def _durations_by_outcome(tables) -> Dict[str, int]:
+    """{'1': 50, '2': 70, ...} from the Summary of Learning Outcomes table."""
+    table = table_reader.find_table(tables, _RE_H_LO, _RE_H_DURATION)
+    if table is None:
+        return {}
+    hours: Dict[str, int] = {}
+    for row in table.rows:
+        if len(row) < 2:
+            continue
+        match = _RE_LEADING_NUMBER.match(row[0])
+        if not match or not row[1].strip().isdigit():
+            continue                       # skips the 'Total Hours' row
+        hours[match.group(1)] = int(row[1].strip())
+    return hours
+
+
+def _outcomes_from_tables(unit_pages: List[Page]) -> List[LearningOutcome]:
+    """Learning outcomes read from this unit's ruled tables, or [].
+
+    Reading the cells beats splitting the page by x-coordinate - it is what
+    stops the Suggested Assessment Methods column swallowing half of Content
+    and running on into Methods of Delivery. But it is not always better:
+    some curricula have grids whose cells are merged and split so irregularly
+    that pdfplumber fragments one table into 9-, 6-, 4- and 2-column pieces,
+    and the result is worse than the coordinate walk. So this returns a
+    CANDIDATE, and `_choose_outcomes` decides - see there.
+    """
+    if not unit_pages:
+        return []
+    source = getattr(unit_pages[0], "source", "")
+    if not source:
+        return []
+    tables = table_reader.tables_in_pages(
+        source, unit_pages[0].index, unit_pages[-1].index)
+    if not tables:
+        return []
+
+    syllabus = table_reader.find_table(tables, _RE_H_LO, _RE_H_CONTENT,
+                                       _RE_H_ASSESS)
+    if syllabus is None:
+        return []
+
+    hours = _durations_by_outcome(tables)
+    outcomes: List[LearningOutcome] = []
+    for row in syllabus.rows:
+        if len(row) < 2:
+            continue
+        match = _RE_LEADING_NUMBER.match(row[0])
+        if not match:
+            continue
+        number, title = match.group(1), clean_text(match.group(2))
+        sub_topics = _split_content(row[1] if len(row) > 1 else "")
+        if not sub_topics:
+            continue
+        outcomes.append(LearningOutcome(
+            number=number,
+            title=title,
+            sub_topics=sub_topics,
+            suggested_methods=_split_methods(row[2] if len(row) > 2 else ""),
+            duration_hours=hours.get(number, 0)))
+
+    return outcomes
+
+
+def _richness(outcomes: List[LearningOutcome]) -> tuple:
+    """How much syllabus a parse actually recovered."""
+    return (sum(len(st.key_points) for o in outcomes for st in o.sub_topics),
+            sum(len(o.sub_topics) for o in outcomes))
+
+
+def _choose_outcomes(from_tables: List[LearningOutcome],
+                     from_layout: List[LearningOutcome]
+                     ) -> List[LearningOutcome]:
+    """Keep whichever parse recovered more, but always take the clean columns.
+
+    Measured across the cached curricula, reading the tables recovers MORE on
+    well-formed documents (the benchmark unit gains two whole sub-topics that
+    the coordinate walk missed) and LESS on documents whose grid is irregular
+    enough to fragment. Choosing per unit means neither kind loses content.
+
+    Assessment methods and durations are taken from the tables regardless,
+    matched to outcomes by number: those two come from cells the coordinate
+    walk cannot read cleanly at all - it is where the Content bleed came from,
+    and durations live in a table it never looks at.
+    """
+    table_extras = {o.number: (o.suggested_methods, o.duration_hours)
+                    for o in from_tables}
+    chosen = from_tables
+    if from_layout and _richness(from_layout) > _richness(from_tables):
+        chosen = from_layout
+        for outcome in chosen:
+            methods, hours = table_extras.get(outcome.number, (None, 0))
+            if methods:
+                outcome.suggested_methods = list(methods)
+            outcome.duration_hours = hours
+    if chosen:
+        runlog.log(
+            f"Curriculum: {len(chosen)} learning outcomes, "
+            f"{sum(len(o.sub_topics) for o in chosen)} sub-topics, "
+            f"{sum(len(st.key_points) for o in chosen for st in o.sub_topics)} "
+            f"key points, {sum(o.duration_hours for o in chosen)} hours "
+            f"(from {'tables' if chosen is from_tables else 'layout'})")
+    return chosen
+
+
 def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
     first = unit_pages[0]
     unit = CurriculumUnit()
@@ -148,6 +319,10 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
                       first.text, re.S | re.I)
     if mdesc:
         unit.description = clean_text(re.sub(r"\s+", " ", mdesc.group(1)))
+
+    # The unit is parsed BOTH ways and the better result kept - see
+    # `_choose_outcomes` for why neither wins outright.
+    table_outcomes = _outcomes_from_tables(unit_pages)
 
     # --- walk the content table --------------------------------------------- #
     lo_titles: Dict[str, str] = {}      # major number -> LO title
@@ -259,11 +434,12 @@ def _parse_one_unit(unit_pages: List[Page]) -> Optional[CurriculumUnit]:
         # Word carries the '1.1' / '1.1.1' numbering as automatic list
         # formatting, which never reaches the text, so nothing matches and the
         # whole content table is lost. Its shape still holds the structure.
-        unit.learning_outcomes = _outcomes_from_layout(
+        layout_outcomes = _outcomes_from_layout(
             raw_lo, raw_content, unique_methods)
-        return unit
+    else:
+        layout_outcomes = [los[k] for k in order]
 
-    unit.learning_outcomes = [los[k] for k in order]
+    unit.learning_outcomes = _choose_outcomes(table_outcomes, layout_outcomes)
     return unit
 
 

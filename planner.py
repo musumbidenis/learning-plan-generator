@@ -49,6 +49,7 @@ def build_content_sessions(curriculum_unit: CurriculumUnit,
                 session_title=st.title,
                 pcs=pcs,
                 key_points=list(st.key_points),
+                suggested_methods=list(lo.suggested_methods),
             ))
     return sessions
 

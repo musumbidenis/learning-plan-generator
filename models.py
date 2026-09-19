@@ -79,6 +79,9 @@ class LearningOutcome:
     title: str                        # e.g. 'Apply computer programming skills'
     sub_topics: List[SubTopic] = field(default_factory=list)
     suggested_methods: List[str] = field(default_factory=list)
+    # Hours the curriculum's "Summary of Learning Outcomes" table allots to this
+    # outcome. Extracted and carried; nothing schedules by it yet.
+    duration_hours: int = 0
 
 
 @dataclass
@@ -122,6 +125,10 @@ class Session:
     is_cat: bool = False
     session_title: str = ""
     pcs: List[str] = field(default_factory=list)          # full PC strings (x.y text)
+    # What the CURRICULUM suggests for assessing this session's outcome. The OS
+    # evidence guide says how a unit may be assessed; this says what the
+    # syllabus author had in mind for this particular outcome.
+    suggested_methods: List[str] = field(default_factory=list)
 
     # --- content / generative ---------------------------------------------- #
     key_points: List[str] = field(default_factory=list)   # curriculum content (authoritative)

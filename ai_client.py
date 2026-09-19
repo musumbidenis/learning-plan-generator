@@ -373,7 +373,7 @@ Strong: "- Think-Pair-Share: Each trainee lists three differences between a comp
 
 resources: choose two to four from the VERIFIED RESOURCES list in the user message, by NUMBER. Each entry in the array is just that number as a string - "3", "7" - and nothing else. Never write a title, a URL, an ISBN or an edition: every one of those resources has already been fetched and confirmed to exist, and the plan prints them from the list, so anything you type instead would be a guess replacing a fact. Pick the ones whose subject matches THIS session, and include a video where one on the list fits. If no VERIFIED RESOURCES list is supplied, and only then, name two to four resources in words, without URLs.
 
-assessments: one to three items per group, derived from the supplied Evidence-Guide methods. Write each as a plain sentence; do not number them.
+assessments: one to three items per group. Draw the METHOD from the OS Evidence-Guide methods, and where a session lists CURRICULUM SUGGESTED METHODS, prefer those - they are what the syllabus author intended for that particular outcome. Write each as a plain sentence; do not number them.
 - knowledge_checks: what the trainee is asked about this session's key points.
 - skills: what the trainee is observed doing.
 - attitudes: observable professional behaviours shown during this session's own activities - accuracy, safety, teamwork, timeliness, adherence to procedure. Observable, never internal states.
@@ -397,6 +397,7 @@ def build_prompt(unit: Unit, sessions: List[Session], pool=None) -> str:
         "Written assessment; Practical assessment; Portfolio of evidence"
     knowledge = "; ".join(unit.required_knowledge)
     skeleton = [s.to_skeleton_dict() for s in sessions]
+    suggested = sorted({m for s in sessions for m in (s.suggested_methods or [])})
     skeleton_json = json.dumps(skeleton, ensure_ascii=False, indent=1)
     level = unit.level or "6"
 
@@ -419,6 +420,8 @@ OS PERFORMANCE CRITERIA:
 {pcs}
 
 OS EVIDENCE-GUIDE ASSESSMENT METHODS: {methods}
+
+CURRICULUM SUGGESTED ASSESSMENT METHODS: {"; ".join(suggested) or "(none listed)"}
 
 OS REQUIRED KNOWLEDGE: {knowledge or "(none listed)"}
 

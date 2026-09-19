@@ -12,6 +12,7 @@ import re
 from collections import Counter
 from typing import List, Optional
 
+import table_reader
 from models import Element, PerformanceCriterion, Unit, UnitRef
 from pdf_utils import (
     Line,
@@ -118,6 +119,84 @@ def _pc_anchored_split(win: List[dict], fallback: float) -> float:
     if pc_left - el_left < 25.0:
         return fallback
     return pc_left - 4.0
+
+
+# The OS grids, by their headers rather than by where they fall on the page.
+_RE_H_ELEMENT = re.compile(r"ELEMENT", re.I)
+_RE_H_PC = re.compile(r"PERFORMANCE\s+CRIT", re.I)
+_RE_H_EVIDENCE = re.compile(r"Critical\s+aspects|Resource\s+implications|"
+                            r"Methods?\s+of\s+assessment", re.I)
+_RE_ROW_METHODS = re.compile(r"Methods?\s+of\s+assessment", re.I)
+
+# Items inside a cell that runs several of them together: '1.1 Assets are
+# documented. 1.2 Threats are identified.' or '5.1 Practical 5.2 Projects'.
+_RE_ITEM_RUN = re.compile(r"(?<![\d.])(\d+\.\d+)\.?\s+")
+
+
+def _split_numbered_cell(cell: str):
+    """[(number, text)] from a cell holding several numbered items."""
+    text = (cell or "").strip()
+    marks = list(_RE_ITEM_RUN.finditer(text))
+    out = []
+    for i, mark in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        body = clean_text(text[mark.end():end])
+        if body:
+            out.append((mark.group(1), body))
+    return out
+
+
+def _unit_tables(unit_pages: List[Page]):
+    """The ruled tables on this unit's pages, or [] when there are none."""
+    source = getattr(unit_pages[0], "source", "") if unit_pages else ""
+    if not source:
+        return []
+    return table_reader.tables_in_pages(
+        source, unit_pages[0].index, unit_pages[-1].index)
+
+
+def _elements_from_table(tables) -> List[Element]:
+    """Elements and their PCs, read from the ELEMENT/PERFORMANCE CRITERIA grid.
+
+    Column 0 names the element, column 1 carries every performance criterion of
+    that element run together, so the cell is cut at its own numbering. Reading
+    it this way means a PC can never be confused with an element, which is what
+    the coordinate split had to infer from an x-position.
+    """
+    table = table_reader.find_table(tables, _RE_H_ELEMENT, _RE_H_PC)
+    if table is None:
+        return []
+    elements: List[Element] = []
+    for row in table.rows:
+        if len(row) < 2:
+            continue
+        head = _RE_ELEMENT.match(row[0].strip())
+        if not head:
+            continue
+        criteria = [PerformanceCriterion(number=num, text=text)
+                    for num, text in _split_numbered_cell(row[1])]
+        if not criteria:
+            continue
+        elements.append(Element(number=head.group(1),
+                                title=clean_text(head.group(2)),
+                                performance_criteria=criteria))
+    return elements
+
+
+def _methods_from_table(tables) -> List[str]:
+    """Evidence-guide assessment methods, from the row that names them."""
+    # Every table is searched, not just one picked by its header: the Evidence
+    # Guide often starts mid-page as a continuation, and then its header row is
+    # a criterion rather than a heading. The row we want names itself.
+    for table in tables:
+        row = table.row_matching(_RE_ROW_METHODS)
+        if row is None or len(row) < 2:
+            continue
+        methods = [text for _num, text in _split_numbered_cell(row[1])
+                   if not is_noise_line(text)]
+        if methods:
+            return methods
+    return []
 
 
 def _extract_elements(unit_pages: List[Page]) -> List[Element]:
@@ -382,8 +461,12 @@ def _build_unit(unit_pages: List[Page], cover_level: str) -> Unit:
 
     unit.description = _extract_description(first.text)
     unit.skill_task = _skill_task_from_description(unit.description)
-    unit.elements = _extract_elements(unit_pages)
-    unit.assessment_methods = _extract_assessment_methods(unit_pages)
+    # Ruled tables first; the coordinate/regex paths below remain for documents
+    # that have none, and for word-processor formats.
+    tables = _unit_tables(unit_pages)
+    unit.elements = _elements_from_table(tables) or _extract_elements(unit_pages)
+    unit.assessment_methods = (_methods_from_table(tables)
+                               or _extract_assessment_methods(unit_pages))
     unit.required_knowledge = _extract_required_knowledge(unit_pages)
     return unit
 

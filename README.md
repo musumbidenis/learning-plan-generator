@@ -26,6 +26,10 @@ session content uses AI, in grounded, schema-constrained API calls.**
    │        in flight at once; a Session Plan and a single-session regenerate
    │        are one call each.
    │
+   │        Sources are read as TABLES (table_reader.py) where the grid is
+   │        well-formed, and by x-coordinate where it is not; the richer
+   │        parse of each unit wins.
+   │
    ├─(C2) VERIFIED RESOURCES    ─ resource_finder.py        [searched, not recalled]
    │      └ videos searched on YouTube, pages proposed then FETCHED to prove
    │        they exist; the model picks from the pool by number, never types
@@ -130,6 +134,66 @@ which is roughly one minute's worth, so generating two plans back to back thrott
 second (measured 20.7s) and a third waits longer still. That is the free tier's real
 throughput — about a plan a minute — and no amount of batching changes it; the fixes above
 lower the bill (from ~11,300 tokens to ~8,700) rather than raise the ceiling.
+
+## Reading the source documents
+
+Everything these documents hold that matters is in a grid: the OS keeps its performance
+criteria in an `ELEMENT | PERFORMANCE CRITERIA` table, and the curriculum keeps the syllabus
+in `Learning Outcome | Content | Suggested Assessment Methods`. The parsers originally
+rebuilt those columns from word **x-coordinates** — a learning outcome is `x0 < 150`, content
+is `< 435`, the rest is assessment. Thresholds are guesses, and they are why the Suggested
+Assessment Methods column used to come back carrying half of Content and then running on into
+the Methods of Delivery section below the table.
+
+`table_reader.py` reads the ruling lines instead, with pdfplumber. Two details make the cells
+usable rather than merely present:
+
+- **Continuations.** A unit's table spans pages, and what marks the part that resumes it is
+  *where it starts*: measured across the benchmark unit, continuations begin at y 50.9–73.2,
+  above where any heading could sit, while every table that genuinely begins on its page
+  starts at 103.9 or lower. Two earlier rules were wrong — "the continuation has an empty
+  first cell" missed the one resuming with a full row, and "the previous table reached the
+  page bottom" was wrong because the OS elements table stops 233pt short and still continues.
+- **Bare numbers.** `is_noise_line` discards a bare number, because that is what a page number
+  looks like. The whole `Duration (Hours)` column is bare numbers, so filtering it left every
+  duration blank.
+
+### Both parses run, and the better one wins
+
+Reading cells is not always better. Some curricula have grids whose cells are merged and split
+irregularly enough that pdfplumber fragments one table into 9-, 6-, 4- and 2-column pieces,
+and there the coordinate walk recovers more. So each unit is parsed **both** ways and
+`_choose_outcomes` keeps whichever recovered more syllabus.
+
+Assessment methods and durations are taken from the tables regardless of which parse wins:
+those are the two columns the coordinate walk cannot read cleanly at all — one is where the
+bleed came from, and the other lives in a table it never looks at.
+
+Measured across every cached curriculum, unit by unit: **no unit loses content**, and many
+gain. `APPLICATION END-USER SUPPORT` went from yielding nothing at all to 4 outcomes and 42
+key points; `COMPUTERISED DATABASE SYSTEMS MANAGEMENT` from 6 sub-topics to 31. The benchmark
+unit gains two whole sub-topics — `1.1 Documentation of ICT security assets` and
+`3.3 Updating ICT security system` were simply missing before.
+
+### What comes from where
+
+| | Source |
+|---|---|
+| Performance criteria | OS `ELEMENT \| PERFORMANCE CRITERIA` table |
+| Evidence-guide assessment methods | OS Evidence Guide, the row naming them |
+| Required knowledge | OS — a bulleted list under its heading, **not** a table |
+| Learning outcomes, content, key points | Curriculum syllabus table |
+| Suggested assessment methods | Curriculum syllabus table, per outcome |
+| Hours per learning outcome | Curriculum `Learning Outcomes \| Duration (Hours)` table |
+
+Both sets of assessment methods reach the model: the OS evidence guide for the vocabulary,
+and the curriculum's own suggestions for what its author intended for that outcome. Durations
+are extracted and carried on `LearningOutcome.duration_hours`; **nothing schedules by them
+yet**.
+
+Word documents deliberately do not go through the table reader: `load_word_pages` already
+builds their columns from real cells at fixed pseudo-x positions, so the guesswork this
+removes is specific to PDFs.
 
 ## The prompts
 

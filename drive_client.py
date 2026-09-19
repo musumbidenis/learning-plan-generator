@@ -92,6 +92,10 @@ def _require_key() -> str:
     return key
 
 
+# Google's throttle page, as opposed to a JSON API error.
+_RE_THROTTLE_PAGE = re.compile(r"<html|<title>Sorry|unusual traffic", re.I)
+
+
 def _explain(status: int, detail: str) -> str:
     """Turn an HTTP status into something a trainer can act on."""
     # A malformed or revoked key comes back as 400, not 401 - say so plainly
@@ -99,8 +103,8 @@ def _explain(status: int, detail: str) -> str:
     if status == 400 and "api key not valid" in detail.lower():
         return ("Google rejected the API key as invalid. Check the GOOGLE_API_KEY "
                 "value in .env against the one in the Cloud console.")
-    # Two different 403s, with two different fixes - saying "check your
-    # restrictions" for the first one sends the reader to the wrong screen.
+    # Several different 403s, with different fixes - saying "check your
+    # restrictions" for any of the others sends the reader to the wrong screen.
     low = detail.lower()
     if status == 403 and "has not been used in project" in low:
         return ("The Google Drive API isn't enabled on the project this key "
@@ -112,6 +116,14 @@ def _explain(status: int, detail: str) -> str:
                 "Credentials -> your key -> API restrictions, and either pick "
                 "'Don't restrict key' or select the Google Drive API without "
                 "narrowing it to individual methods. " + detail)
+    # Google answers a client it considers too busy with its HTML "Sorry..."
+    # interstitial rather than a JSON error. That is rate limiting, it clears by
+    # itself, and telling the reader to go and check their API restrictions
+    # sends them to fix something that is not broken.
+    if status == 403 and _RE_THROTTLE_PAGE.search(detail):
+        return ("Google is rate limiting this key - too many downloads in a "
+                "short time. Nothing is misconfigured; wait a few minutes and "
+                "try again. Documents already downloaded still open normally.")
     if status in (401, 403):
         return ("Google rejected the API key (HTTP %d). Check that the Drive API "
                 "is enabled on the project and that the key's API restrictions "
