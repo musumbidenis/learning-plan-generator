@@ -141,49 +141,85 @@ def _continues(previous, page_index: int, top: float, width: int) -> bool:
     return top <= _CARRIED_OVER_ABOVE
 
 
+# The document most recently opened, kept so parsing a whole document's units
+# does not reopen it once per unit. An Occupational Standard holds around
+# thirty units, and reopening a 100-page PDF for each of them dominated the
+# cost of parsing one - enough that a library-wide check never finished. One
+# entry is all that is needed: units are parsed a document at a time.
+_OPEN_PATH = ""
+_OPEN_PDF = None
+
+
+def close_document() -> None:
+    """Release the cached document. Safe when nothing is open."""
+    global _OPEN_PATH, _OPEN_PDF
+    if _OPEN_PDF is not None:
+        try:
+            _OPEN_PDF.close()
+        except Exception:                   # noqa: BLE001 - closing must not raise
+            pass
+    _OPEN_PDF = None
+    _OPEN_PATH = ""
+
+
+def _open_document(path: str):
+    """The open pdfplumber document for `path`, reusing the last one."""
+    global _OPEN_PATH, _OPEN_PDF
+    if _OPEN_PATH == path and _OPEN_PDF is not None:
+        return _OPEN_PDF
+    close_document()
+    _OPEN_PDF = pdfplumber.open(path)
+    _OPEN_PATH = path
+    return _OPEN_PDF
+
+
 def tables_in_pages(path: str, first: int, last: int) -> List[Table]:
     """Every usable table on pages [first, last], stitched across the range.
 
-    Only the unit's own pages are opened, not the whole document: a curriculum
+    Only the unit's own pages are read, not the whole document: a curriculum
     runs to 147 pages and a unit occupies six of them.
     """
     collected: List[Table] = []
     try:
-        with pdfplumber.open(path) as pdf:
-            last = min(last, len(pdf.pages) - 1)
-            for index in range(max(first, 0), last + 1):
-                page = pdf.pages[index]
-                for found in page.find_tables():
-                    raw = found.extract() or []
-                    rows = [[_clean_cell(c) for c in row] for row in raw]
-                    rows = [r for r in rows if any(r)]
-                    if not rows:
-                        continue
-                    top, bottom = found.bbox[1], found.bbox[3]
-                    width = max(len(r) for r in rows)
-                    previous = collected[-1] if collected else None
+        pdf = _open_document(path)
+        last = min(last, len(pdf.pages) - 1)
+        for index in range(max(first, 0), last + 1):
+            page = pdf.pages[index]
+            for found in page.find_tables():
+                raw = found.extract() or []
+                rows = [[_clean_cell(c) for c in row] for row in raw]
+                rows = [r for r in rows if any(r)]
+                if not rows:
+                    continue
+                top, bottom = found.bbox[1], found.bbox[3]
+                width = max(len(r) for r in rows)
+                previous = collected[-1] if collected else None
 
-                    # Same header restated at the top of a page: the header is
-                    # furniture, the rest is more of the same table.
-                    if previous is not None and _same_header(previous.header,
-                                                             rows[0]):
-                        previous.rows.extend(rows[1:])
-                        previous.end_page = index
-                        previous.bottom = bottom
-                        previous.page_height = float(page.height)
-                        continue
+                # Same header restated at the top of a page: the header is
+                # furniture, the rest is more of the same table.
+                if previous is not None and _same_header(previous.header,
+                                                         rows[0]):
+                    previous.rows.extend(rows[1:])
+                    previous.end_page = index
+                    previous.bottom = bottom
+                    previous.page_height = float(page.height)
+                    continue
 
-                    if _continues(previous, index, top, width):
-                        previous.rows.extend(rows)
-                        previous.end_page = index
-                        previous.bottom = bottom
-                        previous.page_height = float(page.height)
-                        continue
+                if _continues(previous, index, top, width):
+                    previous.rows.extend(rows)
+                    previous.end_page = index
+                    previous.bottom = bottom
+                    previous.page_height = float(page.height)
+                    continue
 
-                    collected.append(Table(
-                        header=rows[0], rows=rows[1:], page=index,
-                        end_page=index, bottom=bottom,
-                        page_height=float(page.height)))
+                collected.append(Table(
+                    header=rows[0], rows=rows[1:], page=index,
+                    end_page=index, bottom=bottom,
+                    page_height=float(page.height)))
+            # pdfplumber keeps every parsed object of a page it has visited.
+            # Over a 150-page document that is a lot of memory for pages whose
+            # tables have already been read.
+            page.flush_cache()
     except Exception as e:                  # noqa: BLE001 - never lose a parse
         runlog.log(f"Tables: could not read {path} pages {first}-{last} "
                    f"({type(e).__name__}: {e})", level="WARN")

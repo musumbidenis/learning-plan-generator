@@ -196,6 +196,27 @@ def test_elements_and_criteria_are_read_from_the_grid():
     assert elements[1].performance_criteria[0].number == "2.1"
 
 
+def test_a_bulleted_evidence_guide_is_read_too():
+    """Two shapes occur in the library and only the numbered one was handled.
+    237 OS units across the library bullet their methods instead, and reading
+    only the numbered form left every one of them with none at all."""
+    table = Table(header=["", ""], rows=[[
+        "3 Methods of assessment",
+        "Competency in this unit may be assessed through: • Practical "
+        "• Simulation • Portfolio of evidence • Third party report "
+        "• Oral questioning • Written tests"]])
+
+    assert os_parser._methods_from_table([table]) == [
+        "Practical", "Simulation", "Portfolio of evidence",
+        "Third party report", "Oral questioning", "Written tests"]
+
+
+def test_the_lead_in_sentence_is_not_mistaken_for_a_method():
+    assert os_parser._split_method_cell(
+        "Competency may be assessed through: 5.1 Practical 5.2 Projects") == [
+        "Practical", "Projects"]
+
+
 def test_the_evidence_guide_row_yields_the_assessment_methods():
     table = Table(header=["", ""],
                   rows=[["1. Critical aspects of competency", "evidence that..."],

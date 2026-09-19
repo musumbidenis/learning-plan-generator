@@ -32,10 +32,16 @@ class FakePage:
     def find_tables(self):
         return self._tables
 
+    def flush_cache(self):
+        """Real pages release their parsed objects; these have none."""
+
 
 class FakePdf:
     def __init__(self, pages):
         self.pages = pages
+
+    def close(self):
+        pass
 
     def __enter__(self):
         return self
@@ -47,6 +53,11 @@ class FakePdf:
 @pytest.fixture
 def plumber(monkeypatch):
     """Let a test describe pages, and have tables_in_pages read them."""
+    # The module keeps the last document open so a whole file's units do not
+    # reopen it; every test here uses the same path, so it must be cleared or
+    # one test's pages answer the next one's.
+    table_reader.close_document()
+
     def install(pages):
         monkeypatch.setattr(table_reader.pdfplumber, "open",
                             lambda path: FakePdf(pages))

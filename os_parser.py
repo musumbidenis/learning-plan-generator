@@ -183,6 +183,35 @@ def _elements_from_table(tables) -> List[Element]:
     return elements
 
 
+# The lead-in an evidence guide puts before its list: "Competency in this unit
+# may be assessed through:". Everything worth keeping follows the colon.
+_RE_METHOD_LEAD_IN = re.compile(r"^.*?\bassessed\b[^:]*:\s*", re.I | re.S)
+
+# Bullets, or a dash used as one. Kept separate from the numbered form because
+# a method's own text may contain a hyphen ("Third-party report").
+_RE_METHOD_BULLET = re.compile(r"[\u2022\u25aa\u25cf\u00b7\*]|(?<=\s)-\s+")
+
+
+def _split_method_cell(cell: str) -> List[str]:
+    """The methods in an evidence-guide cell, however it lists them.
+
+    Two shapes occur in the library and only one was handled at first. The
+    benchmark OS numbers them - "5.1 Practical 5.2 Projects" - but 237 units
+    across the library bullet them instead, and reading only the numbered form
+    left every one of those with no assessment methods at all.
+    """
+    text = _RE_METHOD_LEAD_IN.sub("", (cell or "").strip(), count=1)
+    numbered = [body for _num, body in _split_numbered_cell(text)]
+    if numbered:
+        return numbered
+    out = []
+    for part in _RE_METHOD_BULLET.split(text):
+        item = clean_text(part or "").strip(" .;")
+        if item and 2 < len(item) < 80 and not is_noise_line(item):
+            out.append(item)
+    return out
+
+
 def _methods_from_table(tables) -> List[str]:
     """Evidence-guide assessment methods, from the row that names them."""
     # Every table is searched, not just one picked by its header: the Evidence
@@ -192,8 +221,7 @@ def _methods_from_table(tables) -> List[str]:
         row = table.row_matching(_RE_ROW_METHODS)
         if row is None or len(row) < 2:
             continue
-        methods = [text for _num, text in _split_numbered_cell(row[1])
-                   if not is_noise_line(text)]
+        methods = _split_method_cell(row[1])
         if methods:
             return methods
     return []
