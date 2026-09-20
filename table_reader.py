@@ -123,6 +123,10 @@ def _stitch(rows: List[List[str]]) -> List[List[str]]:
 # Range at 280.6, the Evidence Guide at 607.9, the resources grid at 431.3).
 _CARRIED_OVER_ABOVE = 90.0
 
+# A ruling line is drawn once but can be read as belonging to either side of
+# it, so a contained table's edge can sit a point or so outside its container.
+_NESTING_SLACK = 2.0
+
 
 def _continues(previous, page_index: int, top: float, width: int) -> bool:
     """Whether this table is the tail of `previous`, carried over a page break.
@@ -173,6 +177,39 @@ def _open_document(path: str):
     return _OPEN_PDF
 
 
+def _outermost(found) -> list:
+    """The tables on a page, without the pieces of themselves.
+
+    A header cell that is ruled inside - "ELEMENT / These describe the key
+    outcomes..." - is found a second time as a one-column table of its own
+    lines, sitting wholly within the table it belongs to. Harmless on its own
+    page, ruinous across a page break: it arrives AFTER the real table, so it
+    becomes the one a continuation is compared against, the widths disagree
+    and the continuation starts a new table instead. On APPLY COMPUTER
+    PROGRAMMING PRINCIPLES that cost elements 2 and 3, leaving the unit with
+    one element out of three.
+
+    Keeping only the outermost tables is the fix, and these documents never
+    nest one table inside another for real.
+    """
+    def area(t):
+        x0, top, x1, bottom = t.bbox
+        return max(x1 - x0, 0) * max(bottom - top, 0)
+
+    def inside(inner, outer) -> bool:
+        a, b = inner.bbox, outer.bbox
+        return (a[0] >= b[0] - _NESTING_SLACK and a[1] >= b[1] - _NESTING_SLACK
+                and a[2] <= b[2] + _NESTING_SLACK
+                and a[3] <= b[3] + _NESTING_SLACK)
+
+    kept = []
+    for table in sorted(found, key=area, reverse=True):
+        if not any(inside(table, bigger) for bigger in kept):
+            kept.append(table)
+    # back into the order the page presents them
+    return sorted(kept, key=lambda t: (t.bbox[1], t.bbox[0]))
+
+
 def tables_in_pages(path: str, first: int, last: int) -> List[Table]:
     """Every usable table on pages [first, last], stitched across the range.
 
@@ -185,7 +222,7 @@ def tables_in_pages(path: str, first: int, last: int) -> List[Table]:
         last = min(last, len(pdf.pages) - 1)
         for index in range(max(first, 0), last + 1):
             page = pdf.pages[index]
-            for found in page.find_tables():
+            for found in _outermost(page.find_tables()):
                 raw = found.extract() or []
                 rows = [[_clean_cell(c) for c in row] for row in raw]
                 rows = [r for r in rows if any(r)]

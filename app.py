@@ -156,6 +156,26 @@ _SIDE_LABEL = {"os": "Occupational Standard", "cu": "Curriculum"}
 _UPLOAD_TYPES = ["pdf"] + [e.lstrip(".") for e in word_reader.WORD_EXTENSIONS]
 
 
+def _loading_message(path: str, label: str) -> str:
+    """What the spinner says while the document is being read.
+
+    A Word document is rendered to PDF before it is read, and Microsoft Word
+    takes a minute or two over a 130-page curriculum. Saying so is the
+    difference between waiting and wondering. It happens once per document:
+    afterwards the conversion is cached and the load is as quick as a PDF's.
+    """
+    import word_to_pdf
+
+    if word_reader.sniff_format(path) == word_reader.FMT_PDF:
+        return f"Reading the {label} and extracting units..."
+    if os.path.isfile(word_to_pdf.cache_path(path)):
+        return f"Reading the {label} and extracting units..."
+    if not word_to_pdf.converter_name():
+        return f"Reading the {label} and extracting units..."
+    return (f"Converting the {label} to PDF so its tables can be read - this "
+            "takes a minute or two, and only happens once per document...")
+
+
 def _ingest(side: str, path: str, sig) -> None:
     """Load one source document and index its units into session state.
 
@@ -167,7 +187,7 @@ def _ingest(side: str, path: str, sig) -> None:
     ss[f"{side}_sig"] = sig
     ss[f"{side}_path"] = path
     _invalidate_extraction()
-    with st.spinner(f"Reading the {label} and extracting units..."):
+    with st.spinner(_loading_message(path, label)):
         try:
             runlog.log(f"Loading {label}")
             with runlog.timed(f"Load {label}"):
@@ -225,6 +245,69 @@ def _documents_status() -> None:
 # =========================================================================== #
 # Stage 3/4 body - preview + generate (reads ss.os_unit / ss.curr_unit)
 # =========================================================================== #
+def _render_extraction(os_unit: Unit, curr_unit: CurriculumUnit) -> None:
+    """Everything the parsers took out of the two documents, in full.
+
+    This is where a bad parse shows itself. APPLY COMPUTER PROGRAMMING
+    PRINCIPLES came back with one element instead of three and nothing said
+    so - the plan was simply built from a third of the unit. Nothing here is
+    truncated, and a column that came back empty says so rather than being
+    quietly absent, because an empty Methods of Assessment column means the
+    document was not read properly, not that the document has nothing in it.
+    """
+    os_tab, cu_tab = st.tabs(["From the Occupational Standard",
+                              "From the Curriculum"])
+
+    with os_tab:
+        if not os_unit.elements:
+            st.warning("No elements were read from this unit.")
+        for el in os_unit.elements:
+            st.markdown(f"**{el.number}. {el.title}** "
+                        f"- {len(el.performance_criteria)} performance criteria")
+            for pc in el.performance_criteria:
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{pc.number} {pc.text}",
+                            unsafe_allow_html=True)
+        st.divider()
+        st.markdown("**Evidence-guide assessment methods** - "
+                    + (", ".join(os_unit.assessment_methods)
+                       if os_unit.assessment_methods
+                       else ":orange[none read from the evidence guide]"))
+        st.markdown(f"**Required knowledge** - "
+                    f"{len(os_unit.required_knowledge)} items")
+        for item in os_unit.required_knowledge:
+            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;- {item}",
+                        unsafe_allow_html=True)
+
+    with cu_tab:
+        outcomes = curr_unit.learning_outcomes
+        if not outcomes:
+            st.warning("No learning outcomes were read from this unit.")
+        total = sum(lo.duration_hours for lo in outcomes)
+        st.caption(f"{len(outcomes)} learning outcomes, "
+                   f"{sum(len(lo.sub_topics) for lo in outcomes)} sub-topics, "
+                   + (f"{total} hours in total" if total
+                      else ":orange[no durations read]"))
+        for lo in outcomes:
+            hours = f"{lo.duration_hours} hours" if lo.duration_hours \
+                else ":orange[no hours]"
+            st.markdown(f"**{lo.number}. {lo.title or ':orange[untitled]'}** "
+                        f"- {hours}")
+            st.markdown("&nbsp;&nbsp;*Methods of assessment:* "
+                        + (", ".join(lo.suggested_methods)
+                           if lo.suggested_methods
+                           else ":orange[none read]"),
+                        unsafe_allow_html=True)
+            st.markdown("&nbsp;&nbsp;*Content:*", unsafe_allow_html=True)
+            for stp in lo.sub_topics:
+                st.markdown(
+                    f"&nbsp;&nbsp;&nbsp;&nbsp;**{stp.number} {stp.title}**",
+                    unsafe_allow_html=True)
+                for point in stp.key_points:
+                    st.markdown(
+                        f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;- {point}",
+                        unsafe_allow_html=True)
+
+
 def render_preview_and_generate() -> None:
     os_unit: Unit = ss.os_unit
     curr_unit: CurriculumUnit = ss.curr_unit
@@ -237,21 +320,7 @@ def render_preview_and_generate() -> None:
     m3.metric("Curriculum sub-topics", n_sub)
     m4.metric("Level", os_unit.level or "-")
 
-    with st.expander("Performance criteria - from the Occupational Standard"):
-        for el in os_unit.elements:
-            st.markdown(f"**{el.number}. {el.title}**")
-            for pc in el.performance_criteria:
-                st.markdown(f"- {pc.number} {pc.text}")
-        if os_unit.assessment_methods:
-            st.caption("Evidence-Guide assessment methods: "
-                       + ", ".join(os_unit.assessment_methods))
-
-    with st.expander("Learning key points - from the Curriculum"):
-        for lo in curr_unit.learning_outcomes:
-            st.markdown(f"**{lo.number}. {lo.title}**")
-            for stp in lo.sub_topics:
-                st.markdown(f"- *{stp.number} {stp.title}* - "
-                            + "; ".join(stp.key_points[:4]))
+    _render_extraction(os_unit, curr_unit)
 
     # ----- plan details ----------------------------------------------------- #
     st.subheader("Plan details")

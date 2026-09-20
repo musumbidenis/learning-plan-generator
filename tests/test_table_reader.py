@@ -229,3 +229,50 @@ def test_find_all_returns_them_in_order():
     found = table_reader.find_all(tables, re.compile("Duration", re.I))
 
     assert len(found) == 2 and found[0].rows[0][1] == "50"
+
+
+def test_a_table_found_inside_another_is_not_a_table(plumber):
+    """A header cell ruled inside - 'ELEMENT / These describe the key
+    outcomes...' - is found a second time as a one-column table of its own
+    lines. On its own page that is harmless. Across a page break it is not: it
+    arrives after the real table, so it becomes what the continuation is
+    compared against, the widths disagree and the continuation starts a fresh
+    table. APPLY COMPUTER PROGRAMMING PRINCIPLES lost elements 2 and 3 that
+    way and came back with one element out of three."""
+    outer = FakeFound([HEADER, ["1. Apply computer programming", "1.1 x"]],
+                      top=360.4, bottom=645.6)
+    outer.bbox = (73.2, 360.4, 523.9, 645.6)
+    inner_a = FakeFound([["ELEMENT"], ["These describe the key"]],
+                        top=360.4, bottom=436.1)
+    inner_a.bbox = (78.9, 360.4, 224.4, 436.1)
+    inner_b = FakeFound([["PERFORMANCE CRITERIA"], ["These are assessable"]],
+                        top=360.4, bottom=442.1)
+    inner_b.bbox = (235.9, 360.4, 518.2, 442.1)
+    carried_on = FakeFound([["2. Demonstrate structured", "2.1 Identifiers"],
+                            ["3. Demonstrate object-oriented", "3.1 Objects"]],
+                           top=73.4, bottom=689.8)
+    carried_on.bbox = (73.2, 73.4, 523.9, 689.8)
+
+    plumber([FakePage([outer, inner_a, inner_b]), FakePage([carried_on])])
+
+    tables = table_reader.tables_in_pages("x.pdf", 0, 1)
+
+    assert len(tables) == 1
+    assert [r[0] for r in tables[0].rows] == [
+        "1. Apply computer programming",
+        "2. Demonstrate structured",
+        "3. Demonstrate object-oriented"]
+
+
+def test_two_tables_side_by_side_are_both_kept(plumber):
+    """Containment, not mere overlap: neither of these is inside the other."""
+    left = FakeFound([["S/No.", "Item"], ["1.", "Textbooks"]],
+                     top=100.0, bottom=300.0)
+    left.bbox = (70.0, 100.0, 290.0, 300.0)
+    right = FakeFound([["S/No.", "Tool"], ["1.", "Pliers"]],
+                      top=100.0, bottom=300.0)
+    right.bbox = (300.0, 100.0, 520.0, 300.0)
+
+    plumber([FakePage([left, right])])
+
+    assert len(table_reader.tables_in_pages("x.pdf", 0, 0)) == 2
