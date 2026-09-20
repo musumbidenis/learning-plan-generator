@@ -33,6 +33,7 @@ import streamlit as st
 import ai_client
 import curriculum_parser as cp
 import doc_builder
+import document_reader
 import drive_client
 import drive_library
 import learning_plan_parser
@@ -191,7 +192,9 @@ def _ingest(side: str, path: str, sig) -> None:
         try:
             runlog.log(f"Loading {label}")
             with runlog.timed(f"Load {label}"):
-                pages = load_document(path)
+                pages = document_reader.read(
+                    path, document_reader.OS if side == "os"
+                    else document_reader.CU)
             with runlog.timed(f"Index {label} units"):
                 result = unit_index.index_units(
                     pages, "OS" if side == "os" else "CU")

@@ -463,7 +463,8 @@ def _extract_required_knowledge(unit_pages: List[Page]) -> List[str]:
 # --------------------------------------------------------------------------- #
 def parse_os(path: str) -> List[Unit]:
     """Parse every unit of competency out of an Occupational Standard PDF/DOCX."""
-    pages = load_document(path)
+    import document_reader
+    pages = document_reader.read(path, document_reader.OS)
     return parse_os_pages(pages)
 
 

@@ -97,7 +97,8 @@ def _window_words(page: Page, y_lo: float, y_hi: float, x_min: float, x_max: flo
 
 
 def parse_curriculum(path: str) -> List[CurriculumUnit]:
-    pages = load_document(path)
+    import document_reader
+    pages = document_reader.read(path, document_reader.CU)
     return parse_curriculum_pages(pages)
 
 

@@ -11,11 +11,28 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unit_index
 import word_reader
+import word_to_pdf
 from pdf_utils import load_document
 from word_reader import UnsupportedDocument
 
 TITLES = ["APPLY COMMUNICATION SKILLS", "APPLY DIGITAL LITERACY",
           "PERFORM COMPUTER OPERATIONS"]
+
+
+@pytest.fixture(autouse=True)
+def read_the_word_file_itself(monkeypatch):
+    """No conversion in here: these tests are about the READERS.
+
+    `load_document` renders a Word document as a PDF first (see `word_to_pdf`)
+    and falls back to the reader when it cannot, which is the path this module
+    wants. Two reasons not to let the converter run. It starts Microsoft Word
+    once per test, which took the whole suite from 14 seconds to two minutes.
+    And these fixtures are the least file each format allows - the ODT
+    separates its units with `<text:soft-page-break/>`, a rendering hint a real
+    converter is right to ignore - so what they would measure is the converter,
+    which `test_word_to_pdf` covers.
+    """
+    monkeypatch.setattr(word_to_pdf, "convert", lambda path: None)
 
 
 # --------------------------------------------------------------------------- #

@@ -8,3 +8,4 @@ __pycache__/
 .streamlit/secrets.toml
 sample_Learning_Plan.docx
 *_output.docx
+.converted/
