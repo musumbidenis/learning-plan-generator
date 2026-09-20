@@ -281,3 +281,175 @@ def test_a_short_shared_prefix_is_not_taken_as_a_match():
     entry = unit_index.RosterEntry(code="0611 351 09A", title="Com")
     refs = [UnitRef(title="COMPUTER ESSENTIALS", isced_code="0611 351 01A")]
     assert not unit_index._entry_was_found(entry, refs)
+
+
+# --------------------------------------------------------------------------- #
+# Units the strict detector cannot see
+# --------------------------------------------------------------------------- #
+def mistyped_unit_page(index, title, isced, tvet):
+    """A unit page whose ISCED code is typed with a stray space in it.
+
+    Real: the Agripreneurship level 4 standard heads one unit '0811 34 1 03 A'
+    where its own units table says '0811 351 03 A'. The shape-based detector
+    requires a well-formed ISCED code and so does not see the page at all.
+    """
+    return page(index, [
+        (title, 80, 50),
+        ("UNIT CODE: " + isced, 80, 70),
+        ("TVET CDACC UNIT CODE: " + tvet, 80, 85),
+        ("UNIT DESCRIPTION: This unit specifies the competences required to "
+         "do the thing.", 80, 100),
+        ("ELEMENT", 80, 130), ("PERFORMANCE CRITERIA", 240, 130),
+        ("1. Do the thing", 80, 150), ("1.1 The thing is done", 240, 150)])
+
+
+def test_a_unit_whose_own_isced_code_is_mistyped_is_still_found():
+    pages = [roster_page(0, [
+        ("0811 351 01 A", "AG/OS/PN/CR/01/3/MA Establish Agri-Enterprise", 80),
+        ("0811 351 03 A",
+         "AG/OS/PN/CR/03/3/MA Market Agri-Enterprise Products and", 120)]),
+        unit_page(1, "ESTABLISH AGRI-ENTERPRISE", "0811 351 01 A"),
+        mistyped_unit_page(2, "MARKET AGRI-ENTERPRISE PRODUCTS AND SERVICES",
+                           "0811 34 1 03 A", "AG/OS/PN/CR/03/3/MA")]
+
+    res = unit_index.index_units(pages, "OS")
+
+    assert [r.title for r in res.refs] == [
+        "ESTABLISH AGRI-ENTERPRISE",
+        "MARKET AGRI-ENTERPRISE PRODUCTS AND SERVICES"]
+    assert res.missing == []
+
+
+def test_a_unit_that_was_missed_does_not_leave_its_pages_to_its_neighbour():
+    """The real damage of a missed unit: refs are page RANGES, so the unit
+    before it silently takes its pages and the plan is built from both."""
+    pages = [roster_page(0, [
+        ("0811 351 01 A", "AG/OS/PN/CR/01/3/MA Establish Agri-Enterprise", 80),
+        ("0811 351 03 A",
+         "AG/OS/PN/CR/03/3/MA Market Agri-Enterprise Products and", 120)]),
+        unit_page(1, "ESTABLISH AGRI-ENTERPRISE", "0811 351 01 A"),
+        mistyped_unit_page(2, "MARKET AGRI-ENTERPRISE PRODUCTS AND SERVICES",
+                           "0811 34 1 03 A", "AG/OS/PN/CR/03/3/MA")]
+
+    res = unit_index.index_units(pages, "OS")
+
+    assert res.refs[0].end_page == 2
+
+
+def test_a_unit_put_back_is_titled_from_its_own_page():
+    """Not from the roster row, which wraps and arrives with the neighbouring
+    code column joined onto the front of it."""
+    pages = [roster_page(0, [
+        ("0811 351 01 A", "AG/OS/PN/CR/01/3/MA Establish Agri-Enterprise", 80),
+        ("0811 351 03 A",
+         "AG/OS/PN/CR/03/3/MA Market Agri-Enterprise Products and", 120)]),
+        unit_page(1, "ESTABLISH AGRI-ENTERPRISE", "0811 351 01 A"),
+        mistyped_unit_page(2, "MARKET AGRI-ENTERPRISE PRODUCTS AND SERVICES",
+                           "0811 34 1 03 A", "AG/OS/PN/CR/03/3/MA")]
+
+    titles = [r.title for r in unit_index.index_units(pages, "OS").refs]
+
+    assert titles[1] == "MARKET AGRI-ENTERPRISE PRODUCTS AND SERVICES"
+
+
+# --------------------------------------------------------------------------- #
+# Rows that name no unit
+# --------------------------------------------------------------------------- #
+def test_industrial_attachment_is_not_reported_as_a_missing_unit():
+    """Every curriculum's units table lists it; no curriculum carries a unit
+    for it, only a paragraph of hours owed. 146 of the 588 rows the app was
+    reporting as impossible to locate were these."""
+    pages = [roster_page(0, [
+        ("0611 351 01A", "Computer Essentials", 80),
+        ("0611 351 02A", "Computer Operations", 100),
+        ("0811 251 06 A", "AG/CU/PN/CR/06/3/MA Industrial Training", 480)]),
+        unit_page(1, "COMPUTER ESSENTIALS", "0611 351 01A"),
+        unit_page(2, "COMPUTER OPERATIONS", "0611 351 02A")]
+
+    assert unit_index.index_units(pages, "CU").missing == []
+
+
+def test_a_real_unit_whose_name_carries_industrial_is_still_reported():
+    """'Apply Industrial Chemistry' and 'Perform Industrial Automation' are
+    units, which is why the attachment rule is anchored at both ends."""
+    pages = [roster_page(0, [
+        ("0611 351 01A", "Computer Essentials", 80),
+        ("0611 351 02A", "Computer Operations", 100),
+        ("0541 541 13A", "Apply Industrial Chemistry", 120)]),
+        unit_page(1, "COMPUTER ESSENTIALS", "0611 351 01A"),
+        unit_page(2, "COMPUTER OPERATIONS", "0611 351 02A")]
+
+    res = unit_index.index_units(pages, "CU")
+
+    assert [m.title for m in res.missing] == ["Apply Industrial Chemistry"]
+
+
+def test_industrial_attachment_is_not_offered_as_a_unit_either():
+    """Looking for a unit that does not exist finds the paragraph of hours
+    owed, and puts a unit with no learning outcomes in front of the trainer."""
+    pages = [roster_page(0, [
+        ("0611 351 01A", "Computer Essentials", 80),
+        ("0611 351 02A", "Computer Operations", 100),
+        ("0811 251 06 A", "AG/CU/PN/CR/06/3/MA Industrial Training", 480)]),
+        unit_page(1, "COMPUTER ESSENTIALS", "0611 351 01A"),
+        unit_page(2, "COMPUTER OPERATIONS", "0611 351 02A"),
+        page(3, [("Industrial Training", 80, 50),
+                 ("UNIT DESCRIPTION: The trainee shall undergo industrial "
+                  "training for a minimum of 480 hours.", 80, 70)])]
+
+    titles = [r.title for r in unit_index.index_units(pages, "CU").refs]
+
+    assert titles == ["COMPUTER ESSENTIALS", "COMPUTER OPERATIONS"]
+
+
+def test_a_unit_the_units_table_never_named_is_still_read():
+    """The Forex and Securities standard carries nine units and lists eight.
+    Trusting the table alone lost the ninth and ran the eighth to the end of
+    the document."""
+    pages = [roster_page(0, [
+        ("0412 454 02A", "BUS/OS/FRX/CR/01/5/MA Trade Currencies and Stocks", 80),
+        ("0412 454 03A", "BUS/OS/FRX/CR/02/5/MA Manage Financial Investments", 80)]),
+        unit_page(1, "TRADE CURRENCIES AND STOCKS", "0412 454 02A"),
+        unit_page(2, "MANAGE FINANCIAL INVESTMENTS", "0412 454 03A"),
+        mistyped_unit_page(3, "COMMUNICATE STOCKS FINANCIAL INFORMATION",
+                           "0412 45 4 04A", "BUS/OS/FRX/CR/03/5/MA")]
+
+    res = unit_index.index_units(pages, "OS")
+
+    assert [r.title for r in res.refs][-1] == \
+        "COMMUNICATE STOCKS FINANCIAL INFORMATION"
+    assert res.refs[1].end_page == 3
+
+
+def test_a_page_repeating_its_own_units_code_does_not_split_that_unit():
+    """What makes an unnamed start believable is carrying a DIFFERENT code
+    from the unit it would be splitting; a page in the middle of a unit
+    repeats that unit's own code."""
+    pages = [roster_page(0, [
+        ("0412 454 02A", "BUS/OS/FRX/CR/01/5/MA Trade Currencies and Stocks", 80),
+        ("0412 454 03A", "BUS/OS/FRX/CR/02/5/MA Manage Financial Investments", 80)]),
+        unit_page(1, "TRADE CURRENCIES AND STOCKS", "0412 454 02A"),
+        unit_page(2, "MANAGE FINANCIAL INVESTMENTS", "0412 454 03A"),
+        page(3, [("Evidence Guide", 80, 50),
+                 ("TVET CDACC UNIT CODE: BUS/OS/FRX/CR/02/5/MA", 80, 70),
+                 ("UNIT DESCRIPTION continues here with more prose.", 80, 90)])]
+
+    res = unit_index.index_units(pages, "OS")
+
+    assert len(res.refs) == 2
+
+
+def test_a_malformed_code_line_is_not_taken_for_the_title():
+    """'ISCED UNIT CODE: 0611 451 01' - the trailing letter is missing, so the
+    line is not code-shaped, and the label rule only catches a label alone on
+    its line. Short and upper-case, it scored as well as the real title above
+    it and won the tie on being nearer."""
+    pages = [page(1, [
+        ("APPLY DIGITAL LITERACY", 80, 50),
+        ("ISCED UNIT CODE: 0611 451 01", 80, 65),
+        ("TVETCDACC UNIT CODE: AG/OS/PN/BC/01/5/MA", 80, 80),
+        ("UNIT DESCRIPTION: This unit covers the competencies required to "
+         "demonstrate digital literacy.", 80, 95),
+        ("ELEMENT", 80, 130), ("PERFORMANCE CRITERIA", 240, 130)])]
+
+    assert unit_index._best_title(pages[0]) == "APPLY DIGITAL LITERACY"

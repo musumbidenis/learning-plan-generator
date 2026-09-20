@@ -90,10 +90,6 @@ class RosterEntry:
     title: str = ""
     page: int = 0
 
-    @property
-    def is_isced(self) -> bool:
-        return bool(RE_ISCED_CODE_SHAPE.fullmatch((self.code or "").strip()))
-
 
 @dataclass
 class IndexResult:
@@ -195,27 +191,48 @@ def _looks_like_a_unit_body(page: Page) -> bool:
     return bool(_RE_BODY_MARKER.search(page.text))
 
 
+def _title_names(entry: RosterEntry, text: str) -> bool:
+    """Whether a header line is this roster row's title.
+
+    Neither side is reliably whole. The table cell wraps, so the row arrives
+    clipped ("Market Agri-Enterprise Products and"), and it often carries the
+    neighbouring code column joined onto the front of it. Take the codes out of
+    both and compare as far as the shorter one goes.
+    """
+    want = _entry_title(entry)
+    if not want:
+        return False
+    line = norm(RE_TVET_CODE_SHAPE.sub(" ", RE_ISCED_CODE_SHAPE.sub(" ", text)))
+    return want == line or _shares_a_start(want, line)
+
+
+def _code_names(entry: RosterEntry, text: str) -> bool:
+    """Whether a header line quotes any code this roster row carries.
+
+    Comparing only `entry.code` missed units whose two codes disagree, which
+    happens more often than it should: the Agripreneurship level 4 standard
+    lists "0811 351 03 A" in its units table and prints "0811 34 1 03 A" at the
+    head of the unit itself. The TVET code agreed, and was never consulted.
+    """
+    codes = _entry_codes(entry)
+    found = {norm_code_loose(c) for c in _distinct_codes(text)}
+    return bool(codes & found) or any(_shares_a_start(a, b)
+                                      for a in codes for b in found)
+
+
 def _locate(pages: Sequence[Page], entry: RosterEntry,
             skip: set) -> Optional[int]:
-    """The page where `entry`'s body begins, by title then by code."""
-    want_title = norm(entry.title)
-    want_code = norm(entry.code)
+    """The page where `entry`'s body begins, by title first and then by code.
 
-    # 1. the title standing alone as a heading in the page's header block
-    for page in pages:
-        if page.index in skip:
-            continue
-        for text in _header_lines(page):
-            if norm(text) == want_title and _looks_like_a_unit_body(page):
-                return page.index
-
-    # 2. the code in the header block, with the body markers to back it up
-    for page in pages:
-        if page.index in skip:
-            continue
-        for text in _header_lines(page):
-            if want_code and norm(text).find(want_code) >= 0 \
-                    and _looks_like_a_unit_body(page):
+    Only the header block is read. A unit's last page often names the NEXT unit
+    - an evidence guide cites it - so searching whole pages lands one page
+    early and hands the unit the tail of the one before it.
+    """
+    for names in (_title_names, _code_names):
+        for page in pages:
+            if page.index in skip or not _looks_like_a_unit_body(page):
+                continue
+            if any(names(entry, text) for text in _header_lines(page)):
                 return page.index
     return None
 
@@ -229,6 +246,11 @@ def _roster_refs(pages: Sequence[Page], roster: List[RosterEntry],
     taken: set = set()
 
     for entry in roster:
+        # An attachment row names no unit, so looking for one finds the
+        # paragraph of hours owed and offers the trainer a "unit" with no
+        # learning outcomes in it. Not found, not missing: not a unit.
+        if _has_no_body(entry):
+            continue
         start = _locate(pages, entry, skip=roster_pages | taken)
         if start is None:
             missing.append(entry)
@@ -237,15 +259,12 @@ def _roster_refs(pages: Sequence[Page], roster: List[RosterEntry],
             located.append((start, entry))
 
     located.sort(key=lambda t: t[0])
-    starts = [s for s, _ in located]
-    refs: List[UnitRef] = []
-    for i, (start, entry) in enumerate(located):
-        end = starts[i + 1] if i + 1 < len(starts) else len(pages)
-        refs.append(UnitRef(
-            title=entry.title,
-            isced_code=entry.code if entry.is_isced else "",
-            code="" if entry.is_isced else entry.code,
-            source=source, start_page=start, end_page=end))
+    # The roster row is the fallback title, not the preferred one. Its cell
+    # wraps, so it arrives clipped and often with the neighbouring code column
+    # joined onto the front of it - "AG/OS/PN/CR/03/3/MA Market Agri-Enterprise
+    # Products and". The unit's own page states its title in full.
+    fallback = {start: _clean_roster_title(entry) for start, entry in located}
+    refs = _refs_from_starts(pages, [s for s, _ in located], source, fallback)
     return refs, missing
 
 
@@ -300,7 +319,13 @@ def _title_near_code(page: Page) -> str:
 
     def usable(text: str) -> bool:
         t = (text or "").strip()
-        return bool(t) and not is_noise_line(t)             and not RE_ISCED_CODE_SHAPE.search(t)             and not RE_TVET_CODE_SHAPE.search(t)             and not _RE_CODE_LABEL.search(t)             and not _RE_ROW_NOISE.match(t)             and not _RE_BODY_MARKER.search(t)
+        return bool(t) and not is_noise_line(t) \
+            and not RE_ISCED_CODE_SHAPE.search(t) \
+            and not RE_TVET_CODE_SHAPE.search(t) \
+            and not _RE_CODE_LABEL.search(t) \
+            and not _RE_CODE_FIELD.search(t) \
+            and not _RE_ROW_NOISE.match(t) \
+            and not _RE_BODY_MARKER.search(t)
 
     for back in range(idx - 1, -1, -1):
         if usable(lines[back].text):
@@ -386,10 +411,18 @@ def _best_title(page: Page) -> str:
 
     def usable(text: str) -> bool:
         t = (text or "").strip()
+        # RE_CODE_LABEL only catches a label ALONE on its line, so it is
+        # the code beside it that has to disqualify a line - and a code
+        # is not always code-shaped: this standard heads a unit "ISCED
+        # UNIT CODE: 0611 451 01", with the trailing letter missing.
+        # Short and upper-case, that line scored exactly as well as
+        # APPLY DIGITAL LITERACY above it, and won the tie by being the
+        # nearer of the two.
         return bool(t) and not is_noise_line(t) \
             and not RE_ISCED_CODE_SHAPE.search(t) \
             and not RE_TVET_CODE_SHAPE.search(t) \
             and not _RE_CODE_LABEL.search(t) \
+            and not _RE_CODE_FIELD.search(t) \
             and not _RE_ROW_NOISE.match(t) \
             and not _RE_BODY_MARKER.search(t)
 
@@ -459,7 +492,13 @@ def _unit_codes(page: Page) -> tuple:
 
 
 def _refs_from_starts(pages: Sequence[Page], starts: Sequence[int],
-                      source: str) -> List[UnitRef]:
+                      source: str, fallback: Optional[dict] = None) -> List[UnitRef]:
+    """Refs for the units beginning at `starts`, each read off its own page.
+
+    `fallback` names a start page whose unit is known to exist because the
+    document's units table named it. Without one, a page whose title cannot be
+    resolved is not a unit and is dropped.
+    """
     by_index = {p.index: p for p in pages}
     starts = sorted(set(starts))
     refs: List[UnitRef] = []
@@ -469,7 +508,7 @@ def _refs_from_starts(pages: Sequence[Page], starts: Sequence[int],
         if page is None:
             continue
         title = _best_title(page) or unit_title_above_code(page) \
-            or _title_near_code(page)
+            or _title_near_code(page) or (fallback or {}).get(start, "")
         if not title:
             continue
         isced_code, tvet_code = _unit_codes(page)
@@ -524,6 +563,27 @@ def _entry_title(entry: RosterEntry) -> str:
     return norm(text)
 
 
+def _clean_roster_title(entry: RosterEntry) -> str:
+    """The roster row's title as a reader would say it, codes taken back out."""
+    text = RE_ISCED_CODE_SHAPE.sub(" ", entry.title or "")
+    return clean_text(RE_TVET_CODE_SHAPE.sub(" ", text))
+
+
+# Every curriculum's units table lists industrial attachment among the units,
+# and no curriculum carries a unit for it - only a paragraph saying how many
+# hours in industry the trainee owes. Across the library these were 146 of the
+# 588 rows reported as impossible to locate. Nothing is missing; there is
+# nothing to find. Anchored at both ends on purpose: "Apply Industrial
+# Chemistry" and "Perform Industrial Automation" are real units.
+_RE_ATTACHMENT = re.compile(
+    r"^(?:industr(?:y|ial)(?:\s+(?:training|attachment))?|"
+    r"(?:industrial\s+)?attachment)$", re.I)
+
+
+def _has_no_body(entry: RosterEntry) -> bool:
+    return bool(_RE_ATTACHMENT.match(_clean_roster_title(entry)))
+
+
 def _entry_was_found(entry: RosterEntry, refs: Sequence[UnitRef]) -> bool:
     """Whether a unit the roster names is among the units actually located."""
     codes = _entry_codes(entry)
@@ -538,6 +598,80 @@ def _entry_was_found(entry: RosterEntry, refs: Sequence[UnitRef]) -> bool:
         if title and (title == ref_title or _shares_a_start(title, ref_title)):
             return True
     return False
+
+
+def _unnamed_starts(pages: Sequence[Page], refs: Sequence[UnitRef],
+                    roster: Sequence[RosterEntry]) -> List[int]:
+    """Pages that begin a unit the document's units table never named.
+
+    The table says what SHOULD be in the document; the pages say what IS, and
+    neither answers for the other. The Forex and Securities standard carries
+    nine units and lists eight, so trusting the table alone loses COMMUNICATE
+    CURRENCIES AND STOCKS FINANCIAL INFORMATION and quietly runs the unit
+    before it to the end of the document.
+
+    What makes a candidate believable is the code it carries. A page in the
+    MIDDLE of a unit repeats that unit's own code - an evidence guide restates
+    it - so a page that would split a unit is only taken seriously when its
+    code belongs to no unit already accounted for: not the code of the unit it
+    would be splitting, and not a code the units table already names. Those two
+    tests are both needed, because a unit's page and its continuation pages do
+    not always quote the same code FAMILY.
+    """
+    by_index = {p.index: p for p in pages}
+    named = set()
+    for entry in roster:
+        named |= _entry_codes(entry)
+    out: List[int] = []
+    for start in _relaxed_starts(pages):
+        owner = next((r for r in refs
+                      if r.start_page <= start < r.end_page), None)
+        if owner is None or start == owner.start_page:
+            continue
+        page = by_index.get(start)
+        if page is None:
+            continue
+        codes = {norm_code_loose(c) for c in _distinct_codes(page.text)}
+        owner_codes = {norm_code_loose(c)
+                       for c in (owner.code, owner.isced_code) if c}
+        if codes and not (codes & owner_codes) and not (codes & named):
+            out.append(start)
+    return out
+
+
+def _splice_rostered(pages: Sequence[Page], roster: List[RosterEntry],
+                     refs: List[UnitRef], source: str) -> tuple:
+    """Put back the units the roster names and the winning strategy missed.
+
+    A missed unit is not only a warning. Refs are page RANGES, so a unit whose
+    first page went undetected has its pages handed silently to the unit before
+    it: on the Agripreneurship level 4 standard, OPERATE AGRI-ENTERPRISE ran to
+    fifteen pages, nine of which are MARKET AGRI-ENTERPRISE PRODUCTS AND
+    SERVICES - a unit that reads perfectly well once its own page is found. The
+    strict detector had skipped that page because it insists on an ISCED code
+    and the one printed there is mistyped.
+
+    Only the start PAGES come from the roster; the refs are then rebuilt from
+    the pages themselves, so a unit put back this way is titled and coded
+    exactly like one that was found in the first place.
+    """
+    roster_pages = {e.page for e in roster}
+    starts = {r.start_page for r in refs}
+    fallback: dict = {}
+    missing: List[RosterEntry] = []
+    for entry in roster:
+        if _has_no_body(entry) or _entry_was_found(entry, refs):
+            continue
+        start = _locate(pages, entry, skip=roster_pages | starts)
+        if start is None:
+            missing.append(entry)
+        else:
+            starts.add(start)
+            fallback[start] = _clean_roster_title(entry)
+    starts |= set(_unnamed_starts(pages, refs, roster))
+    if len(starts) == len(refs):
+        return refs, missing
+    return _refs_from_starts(pages, sorted(starts), source, fallback), missing
 
 
 # --------------------------------------------------------------------------- #
@@ -565,11 +699,25 @@ def index_units(pages: Sequence[Page], source: str) -> IndexResult:
     strict = _refs_from_starts(pages, unit_start_pages(pages), source)
     if strict:
         candidates.append((strict, "strict", []))
-    if not candidates:
+
+    # The shape-based fallbacks are for documents the two detectors above
+    # cannot read - but "cannot read" has to mean short of what the document
+    # itself promises, not merely empty-handed. The Christian Ministry
+    # standards have a units table whose rows locate a few of their units and
+    # not the rest; once the roster detector returned anything at all, a gate
+    # of `not candidates` shut the relaxed pass out and the document went from
+    # 22 units to 15. Attachment rows do not count towards the promise: no
+    # detector can find a unit the document does not carry.
+    wanted = len([e for e in roster if not _has_no_body(e)])
+
+    def falls_short() -> bool:
+        return max((len(c[0]) for c in candidates), default=0) < max(wanted, 1)
+
+    if falls_short():
         relaxed = _refs_from_starts(pages, _relaxed_starts(pages), source)
         if relaxed:
             candidates.append((relaxed, "relaxed", []))
-    if not candidates:
+    if falls_short():
         structural = _refs_from_starts(pages, _structural_starts(pages), source)
         if structural:
             candidates.append((structural, "structural", []))
@@ -582,8 +730,9 @@ def index_units(pages: Sequence[Page], source: str) -> IndexResult:
     refs, strategy, missing = max(
         candidates, key=lambda c: (len(c[0]), -order.get(c[1], 9)))
 
-    if strategy != "roster" and roster:
-        missing = [e for e in roster if not _entry_was_found(e, refs)]
+    if roster:
+        refs, missing = _splice_rostered(pages, roster, refs, source)
 
-    return IndexResult(refs=refs, roster=roster, missing=missing,
+    return IndexResult(refs=refs, roster=roster,
+                       missing=[e for e in missing if not _has_no_body(e)],
                        strategy=strategy)
