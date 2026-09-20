@@ -202,19 +202,37 @@ def _split_content(cell: str) -> List[SubTopic]:
     return subs
 
 
+def _column(header: List[str], pattern, default: int) -> int:
+    """Index of the column whose heading matches, or `default`."""
+    return next((i for i, cell in enumerate(header) if pattern.search(cell)),
+                default)
+
+
 def _durations_by_outcome(tables) -> Dict[str, int]:
-    """{'1': 50, '2': 70, ...} from the Summary of Learning Outcomes table."""
+    """{'1': 50, '2': 70, ...} from the Summary of Learning Outcomes table.
+
+    Neither column sits where a two-column table puts it once the document
+    numbers its own rows: the Refrigeration and Air Conditioning curriculum
+    heads that table `S/NO | Learning Outcomes | Duration (Hours)`, so reading
+    column 1 as the hours gives the outcome's TITLE and every duration came
+    back zero. Both columns are found by their headings, and the outcome's
+    number is taken from its own cell, falling back to the S/NO column that
+    carries it when the title cell does not.
+    """
     table = table_reader.find_table(tables, _RE_H_LO, _RE_H_DURATION)
     if table is None:
         return {}
+    lo_col = _column(table.header, _RE_H_LO, 0)
+    hour_col = _column(table.header, _RE_H_DURATION, 1)
     hours: Dict[str, int] = {}
     for row in table.rows:
-        if len(row) < 2:
-            continue
-        match = _RE_LEADING_NUMBER.match(row[0])
-        if not match or not row[1].strip().isdigit():
+        value = table.cell(row, hour_col).strip()
+        if not value.isdigit():
             continue                       # skips the 'Total Hours' row
-        hours[match.group(1)] = int(row[1].strip())
+        match = _RE_LEADING_NUMBER.match(table.cell(row, lo_col)) \
+            or _RE_LEADING_NUMBER.match(row[0] if row else "")
+        if match:
+            hours[match.group(1)] = int(value)
     return hours
 
 

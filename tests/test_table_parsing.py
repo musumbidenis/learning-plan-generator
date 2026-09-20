@@ -91,6 +91,18 @@ def test_no_duration_table_is_not_an_error():
     assert cp._durations_by_outcome([]) == {}
 
 
+def test_durations_are_read_when_the_document_numbers_its_own_rows():
+    """The Refrigeration and Air Conditioning curriculum heads that table
+    'S/NO | Learning Outcomes | Duration (Hours)'. Reading column 1 as the
+    hours gets the outcome's title instead, and every duration came back 0."""
+    table = Table(header=["S/NO", "Learning Outcomes", "Duration (Hours)"],
+                  rows=[["1.", "Conduct site survey", "10"],
+                        ["2.", "Install domestic refrigeration units", "60"],
+                        ["", "Total Hours", "70"]])
+
+    assert cp._durations_by_outcome([table]) == {"1": 10, "2": 60}
+
+
 # --------------------------------------------------------------------------- #
 # Which parse of a unit to keep
 # --------------------------------------------------------------------------- #
