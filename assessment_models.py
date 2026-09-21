@@ -247,6 +247,26 @@ class ElementContent:
         return sum(len(t.key_points) for t in self.topics)
 
 
+@dataclass
+class Exemplar:
+    """One real question from a real past paper, kept with its source.
+
+    A STYLE reference and nothing else. It shows how a TVET CDACC question is
+    phrased - how much situation goes in front of the verb, what a
+    "differentiate" question is worth - which is not written down in any
+    curriculum. It never says what a paper is about; the CONTENT TAUGHT does
+    that. Gathered in `assessment_research`.
+    """
+    text: str
+    marks: int = 0
+    source: str = ""                 # the paper it came from
+    repository: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.source} ({self.repository})" if self.source else ""
+
+
 # --------------------------------------------------------------------------- #
 # What the model returns, once validated
 # --------------------------------------------------------------------------- #
@@ -323,6 +343,10 @@ class AssessmentTool:
     # curriculum was read: the paper is then written from the PCs alone, which
     # is what it used to be and is shallower for it.
     content: List[ElementContent] = field(default_factory=list)
+    # Real questions from real papers, shown to the model as a pattern to
+    # follow. Empty when nothing was found or the repositories were down,
+    # which costs the paper its exemplars and not its generation.
+    exemplars: List[Exemplar] = field(default_factory=list)
     # written
     scenarios: List[Scenario] = field(default_factory=list)
     items: List[Item] = field(default_factory=list)

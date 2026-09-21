@@ -33,13 +33,14 @@ import assessment_allocation as alloc
 import assessment_content as content_builder
 import assessment_docs as docs
 import assessment_ledger as ledger_store
+import assessment_research as research
 import assessment_validators as validators
 import assessment_weighting as weighting_parser
 import runlog
 from assessment_models import (CAT_1, CAT_2, CAT_3, CAT_LABELS, FINAL_CAT,
                                PRACTICAL, THEORY, Allocation, AssessmentTool,
-                               CatDefinition, ElementContent, Problem,
-                               UnitWeighting)
+                               CatDefinition, ElementContent, Exemplar,
+                               Problem, UnitWeighting)
 from models import Unit
 
 ss = st.session_state
@@ -252,6 +253,43 @@ def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
     return content
 
 
+def _research_step(unit_title: str,
+                   content: List[ElementContent]) -> List[Exemplar]:
+    """Real questions from published CDACC papers on this unit.
+
+    Scouted once per unit and cached on disk, so the first assessment on a
+    unit waits about half a minute and every one after it reads the file. A
+    repository that is down costs the exemplars and not the paper.
+    """
+    if not unit_title:
+        return []
+    topics = [t.title for block in content for t in block.topics]
+    cached = research._cached(unit_title) is not None
+    if cached:
+        found = research.exemplars_for(unit_title, topics)
+    else:
+        with st.spinner("Looking for real CDACC papers on this unit..."):
+            found = research.exemplars_for(unit_title, topics)
+
+    if not found:
+        st.caption("No published papers were found for this unit, so the "
+                   "questions are written without a style reference.")
+        return []
+    with st.expander(f"{len(found)} real question(s) found in published "
+                     f"papers - used as a style reference only", expanded=False):
+        st.caption("The model copies the shape of these - how much situation "
+                   "sits in front of the verb, what a question of that many "
+                   "marks asks for. It is told explicitly not to copy the "
+                   "subject: these come from other colleges and other trades.")
+        for ex in found:
+            marks = f"  — *{ex.marks} marks*" if ex.marks else ""
+            st.markdown(f"- {ex.text}{marks}")
+        sources = sorted({e.source for e in found if e.source})
+        if sources:
+            st.caption("From: " + "; ".join(sources))
+    return found
+
+
 # --------------------------------------------------------------------------- #
 # 6-7. generate, then hand over the files
 # --------------------------------------------------------------------------- #
@@ -283,13 +321,15 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
         return
     allocations = _distribution_step(weighting, cat)
     content = _content_step(os_unit, curr_unit, weighting, allocations)
+    exemplars = _research_step(weighting.unit_title or os_unit.unit_title,
+                               content)
 
     if st.button("Generate assessment tool", type="primary", key="at_go"):
         tool = AssessmentTool(
             unit_title=weighting.unit_title, cdacc_code=weighting.cdacc_code,
             isced_code=weighting.isced_code, knqf_level=weighting.knqf_level,
             programme=programme, cat=cat, allocations=allocations,
-            content=content)
+            content=content, exemplars=exemplars)
         messages: List[str] = []
         box = st.empty()
 

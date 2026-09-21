@@ -39,6 +39,7 @@ from ai_client import (AIError, _chat_json, _emit_progress, _strict,
                        load_api_key, load_model_name, resolve_model)
 from assessment_allocation import _largest_remainder
 import assessment_content
+import assessment_research
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
                                SHORT_RESPONSE, TEMPERATURE, VERB_BANK,
@@ -567,6 +568,31 @@ def _content_block(tool: AssessmentTool) -> str:
             "lines themselves:\n" + rendered)
 
 
+def _exemplar_block(tool: AssessmentTool) -> str:
+    """Real questions from real papers, or nothing.
+
+    Handed over with the warning that matters: the repositories that publish
+    these are individual colleges, so a paper on the same unit may come from a
+    health school and be full of clinics. The shape is what is wanted. The
+    subject never is.
+    """
+    rendered = assessment_research.render(tool.exemplars)
+    if not rendered:
+        return ""
+    return ("\n\nHOW REAL TVET CDACC QUESTIONS ARE WRITTEN - actual questions "
+            "from published papers, shown to you as a PATTERN:\n" + rendered
+            + "\n\nCopy the SHAPE of these - the length of the lead-in, where "
+              "the verb falls, how the count is stated, what a question of "
+              "that many marks asks for. Never copy the SUBJECT. These papers "
+              "come from other colleges and other trades, and anything they "
+              "are about that is not in the CONTENT TAUGHT is out of bounds."
+              "\n\nThese are CANDIDATE papers, so they show you questions and "
+              "no marking schemes. Yours still carries one, and every point in "
+              "it still names the answer an assessor looks for - never "
+              "\"Threat 1 description\", never \"First tool\". Give the scheme "
+              "the same attention as the question.")
+
+
 def _header(tool: AssessmentTool) -> str:
     cat = tool.cat
     return (f"UNIT: {tool.unit_title}\n"
@@ -602,7 +628,7 @@ def build_written_prompt(tool: AssessmentTool) -> str:
         level_note = ("\nThis is a KNQF level %s paper: every item is "
                       "constructed response. Selected-response formats are "
                       "not used at this level at all.\n" % tool.knqf_level)
-    return f"""{_header(tool)}{_content_block(tool)}
+    return f"""{_header(tool)}{_content_block(tool)}{_exemplar_block(tool)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 {table}
@@ -631,7 +657,7 @@ def build_practical_prompt(tool: AssessmentTool) -> str:
                  if methods else "")
     # One line per PC, in the order the rows were built, so a PC split across
     # two allocations is budgeted once and at its combined figure.
-    return f"""{_header(tool)}{_content_block(tool)}{suggested}
+    return f"""{_header(tool)}{_content_block(tool)}{_exemplar_block(tool)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
