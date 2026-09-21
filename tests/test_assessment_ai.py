@@ -1,0 +1,390 @@
+"""The assessment module's single AI call. ZERO real API calls - the HTTP layer
+and `_chat_json` are monkeypatched, and model discovery is stubbed out too.
+
+What is worth pinning down here is not that the call happens but what is sent
+and what is done with the answer: one request per tool and never a batch, the
+standing instructions in the system half and only data in the user half, the
+raw generation on disk before anything is made of it, and a junk response
+producing an empty paper rather than a traceback.
+"""
+
+import json
+import os
+
+import pytest
+
+import ai_client
+import assessment_ai
+from ai_client import AIError
+from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
+                               MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
+                               TEMPERATURE, VERB_BANK)
+from assessment_models import (ANALYSING, APPLYING, CAT_1, CREATING,
+                               EVALUATING, KNOWLEDGE, PRACTICAL, THEORY,
+                               UNDERSTANDING, Allocation, AssessmentTool,
+                               CatDefinition)
+
+
+class FakeResp:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch, tmp_path):
+    """Nothing in this module may reach the network, model discovery included.
+
+    `generate` resolves a model before it writes anything, which would
+    otherwise ask Groq what this account may call.
+    """
+    monkeypatch.setattr(
+        ai_client, "_post",
+        lambda *a, **k: FakeResp(200, {"choices": [{"message":
+                                                    {"content": "{}"}}]}))
+    monkeypatch.setattr(ai_client, "list_chat_models",
+                        lambda key: ["openai/gpt-oss-120b"])
+    monkeypatch.setattr(assessment_ai, "resolve_model",
+                        lambda key, model=None, progress_cb=None:
+                            model or "openai/gpt-oss-120b")
+    # Raw generations go to a throwaway directory, never the project's.
+    monkeypatch.setattr(assessment_ai, "RAW_DIR", str(tmp_path / "raw"))
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
+ALLOCATIONS = [
+    ("1", "Prepare for servicing", "1.1",
+     "Tools and equipment are identified according to workplace procedures",
+     KNOWLEDGE, 4),
+    ("1", "Prepare for servicing", "1.2",
+     "Personal protective equipment is selected as per safety standards",
+     UNDERSTANDING, 4),
+    ("2", "Service the vehicle", "2.1",
+     "Work area is prepared according to job requirements", APPLYING, 4),
+    ("2", "Service the vehicle", "2.2",
+     "Faults are diagnosed based on standard operating procedures",
+     ANALYSING, 4),
+    ("2", "Service the vehicle", "2.3",
+     "Work outcomes are assessed against specifications", EVALUATING, 2),
+    ("2", "Service the vehicle", "2.4",
+     "Maintenance schedule is developed as per manufacturer manual",
+     CREATING, 2),
+]
+
+
+def _tool(assessment_type=THEORY, total=20):
+    return AssessmentTool(
+        unit_title="Perform Basic Vehicle Servicing",
+        cdacc_code="ENG/OS/AUT/CR/03/5",
+        isced_code="0716 452 05A",
+        knqf_level=CONSTRUCTED_RESPONSE_ONLY_LEVELS[0],
+        programme="Automotive Engineering Level 5",
+        cat=CatDefinition(cat_id=CAT_1, assessment_type=assessment_type,
+                          total_marks=total, duration_minutes=90,
+                          selected_pcs=[a[2] for a in ALLOCATIONS]),
+        allocations=[Allocation(element_number=e, element_title=t,
+                                pc_number=pc, pc_text=text, weight=marks,
+                                marks=marks, bloom=bloom)
+                     for e, t, pc, text, bloom, marks in ALLOCATIONS],
+    )
+
+
+WRITTEN_PAYLOAD = {
+    "scenarios": [{"id": "S1", "title": "Mwea Garage",
+                   "text": "A saloon car is booked in for a routine service."}],
+    "items": [
+        {"element_number": "1", "pc_number": "1.1", "bloom": KNOWLEDGE,
+         "item_format": "short_response", "scenario_id": "S1",
+         "stem": "State FOUR hand tools issued for the routine service.",
+         "marks": 4,
+         "marking_scheme": [{"text": "Spanner set", "marks": 1},
+                            {"text": "Torque wrench", "marks": 1},
+                            {"text": "Trolley jack", "marks": 1},
+                            {"text": "Feeler gauge", "marks": 1}]},
+        {"element_number": "1", "pc_number": "1.2", "bloom": UNDERSTANDING,
+         "item_format": "short_response", "scenario_id": "",
+         "stem": "Explain FOUR reasons a technician wears the gear issued "
+                 "before grinding.",
+         "marks": 4,
+         "marking_scheme": [{"text": "Prevents metal sparks reaching the eyes",
+                             "marks": 1},
+                            {"text": "Shields the hands from hot fragments",
+                             "marks": 1},
+                            {"text": "Stops loose clothing catching in the "
+                                     "wheel", "marks": 1},
+                            {"text": "Guards the feet against dropped "
+                                     "components", "marks": 1}]},
+    ],
+}
+
+
+PRACTICAL_PAYLOAD = {
+    "task_brief": {
+        "task": "Service the saloon car booked into bay two.",
+        "conditions": "Working alone, in the workshop, within the time given.",
+        "tools_equipment_materials": ["Spanner set", "Trolley jack"],
+        "safety_requirements": ["Wear overalls and safety boots"],
+        "time_allowed": "90 minutes",
+    },
+    "observation_checklist": [
+        {"text": "Positions the wheel chocks before raising the vehicle",
+         "pc_numbers": ["1.1"], "marks": 3, "sub_parts": ["front", "rear"]},
+        {"text": "Selects the 13 mm spanner from the issue board",
+         "pc_numbers": ["1.1"], "marks": 3, "sub_parts": []},
+    ],
+    "product_checklist": [
+        {"text": "The sump plug is torqued to 25 Nm and shows no weep",
+         "pc_numbers": ["2.1"], "marks": 4, "sub_parts": []},
+    ],
+    "oral_questions": [
+        {"pc_numbers": ["2.2"], "question": "Why is the oil drained warm?",
+         "response_indicators": ["It carries the suspended debris out"]},
+    ],
+}
+
+
+class Recorder:
+    """Stands in for `_chat_json`, remembering every call made through it."""
+
+    def __init__(self, payload=None):
+        self.payload = payload if payload is not None else {}
+        self.calls = []
+
+    def __call__(self, prompt, api_key, model, schema, schema_name,
+                 progress_cb=None, temperature=0.2, system=""):
+        self.calls.append({"prompt": prompt, "schema": schema,
+                           "schema_name": schema_name, "system": system,
+                           "temperature": temperature, "model": model})
+        return self.payload
+
+
+def _run(monkeypatch, tool, payload):
+    rec = Recorder(payload)
+    monkeypatch.setattr(assessment_ai, "_chat_json", rec)
+    return assessment_ai.generate(tool, api_key="k", model="m"), rec
+
+
+# --------------------------------------------------------------------------- #
+# One call per tool
+# --------------------------------------------------------------------------- #
+def test_one_assessment_tool_costs_exactly_one_call(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    assert len(rec.calls) == 1
+
+
+def test_two_cats_are_never_written_in_one_call(monkeypatch):
+    # Batching would make item independence uncheckable across the boundary,
+    # so each tool goes out on its own request.
+    rec = Recorder(WRITTEN_PAYLOAD)
+    monkeypatch.setattr(assessment_ai, "_chat_json", rec)
+    assessment_ai.generate(_tool(), api_key="k", model="m")
+    assessment_ai.generate(_tool(), api_key="k", model="m")
+    assert len(rec.calls) == 2
+    assert all(len(c["prompt"].split("MARK ALLOCATION TABLE")) == 2
+               for c in rec.calls)
+
+
+def test_the_paper_is_written_cold(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    assert rec.calls[0]["temperature"] == TEMPERATURE
+
+
+# --------------------------------------------------------------------------- #
+# The system / user split
+# --------------------------------------------------------------------------- #
+def test_the_standing_instructions_travel_as_a_system_message(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    system = rec.calls[0]["system"]
+    assert system == assessment_ai.AS_WRITTEN_SYSTEM
+    for rule in ("marking scheme", "multiple-choice", "independently"):
+        assert rule.lower() in system.lower()
+
+
+def test_the_data_half_carries_data_and_no_standing_instructions(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    prompt = rec.calls[0]["prompt"]
+    assert "Perform Basic Vehicle Servicing" in prompt
+    assert "PC 2.4" in prompt and "marks: 2" in prompt
+    # The rules are in the system half; the data half must not repeat them.
+    for rule in ("Never invent", "MARKING SCHEME", "TERMINOLOGY"):
+        assert rule not in prompt
+
+
+def test_the_allowed_verbs_come_from_the_verb_bank(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    prompt = rec.calls[0]["prompt"]
+    for verb in VERB_BANK[CREATING]:
+        assert verb in prompt
+    # and each row is offered only its own level's bank
+    creating_row = [ln for ln in prompt.splitlines() if "PC 2.4" in ln][0]
+    assert VERB_BANK[KNOWLEDGE][0] not in creating_row
+
+
+def test_a_constrained_level_is_told_it_is_constructed_response_only(monkeypatch):
+    tool = _tool()
+    tool.knqf_level = CONSTRUCTED_RESPONSE_ONLY_LEVELS[-1]
+    _, rec = _run(monkeypatch, tool, WRITTEN_PAYLOAD)
+    assert "constructed response" in rec.calls[0]["prompt"]
+
+
+def test_the_practical_brief_is_told_the_checklist_bounds(monkeypatch):
+    assert str(MIN_CHECKLIST_ITEMS) in assessment_ai.AS_PRACTICAL_SYSTEM
+    assert str(MAX_CHECKLIST_ITEMS) in assessment_ai.AS_PRACTICAL_SYSTEM
+    assert "NEVER REVEALS HOW IT IS MARKED" in assessment_ai.AS_PRACTICAL_SYSTEM
+
+
+def test_the_practical_path_uses_its_own_schema_and_instructions(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(PRACTICAL, total=10), PRACTICAL_PAYLOAD)
+    call = rec.calls[0]
+    assert call["schema_name"] == "assessment_practical"
+    assert call["system"] == assessment_ai.AS_PRACTICAL_SYSTEM
+    assert set(call["schema"]["properties"]) == {
+        "task_brief", "observation_checklist", "product_checklist",
+        "oral_questions"}
+
+
+def test_the_written_path_asks_for_scenarios_and_items(monkeypatch):
+    _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    call = rec.calls[0]
+    assert call["schema_name"] == "assessment_written"
+    assert set(call["schema"]["properties"]) == {"scenarios", "items"}
+    # strict decoding: every declared property required, no extras
+    assert call["schema"]["additionalProperties"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Reading the answer
+# --------------------------------------------------------------------------- #
+def test_a_written_generation_becomes_scenarios_and_numbered_items(monkeypatch):
+    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    assert [s.id for s in tool.scenarios] == ["S1"]
+    assert [i.number for i in tool.items] == [1, 2]
+    assert tool.items[0].marks == 4
+    assert [p.text for p in tool.items[0].marking_scheme][0] == "Spanner set"
+    assert tool.items[0].scenario_id == "S1"
+
+
+def test_a_practical_generation_becomes_a_brief_and_two_checklists(monkeypatch):
+    tool, _ = _run(monkeypatch, _tool(PRACTICAL, total=10), PRACTICAL_PAYLOAD)
+    assert tool.task_brief.time_allowed == "90 minutes"
+    assert [c.number for c in tool.observation_checklist] == [1, 2]
+    # the product checklist numbers on from the observation one
+    assert [c.number for c in tool.product_checklist] == [3]
+    assert tool.observation_checklist[0].sub_parts == ["front", "rear"]
+    assert tool.oral_questions[0].number == 1
+
+
+def test_a_mark_the_model_changed_is_kept_not_quietly_corrected(monkeypatch):
+    # Stamping the allocation's figure over it would leave a question written
+    # to four marks sitting under a total that says six. The validators catch
+    # it instead.
+    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
+    payload["items"][0]["marks"] = 6
+    tool, _ = _run(monkeypatch, _tool(), payload)
+    assert tool.items[0].marks == 6
+    assert tool.allocations[0].marks == 4
+
+
+def test_an_item_naming_a_scenario_that_was_never_written_loses_it(monkeypatch):
+    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
+    payload["items"][1]["scenario_id"] = "S9"
+    tool, _ = _run(monkeypatch, _tool(), payload)
+    assert tool.items[1].scenario_id == ""
+
+
+# --------------------------------------------------------------------------- #
+# A bad generation
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("payload", [
+    [],                                        # an array where an object was asked for
+    "the paper could not be written",          # prose
+    {"items": "four questions"},               # the right key, the wrong type
+    {"items": [None, 7, "State something"]},   # rows that are not objects
+    {"scenarios": {"id": "S1"}, "items": []},  # an object where an array belongs
+])
+def test_a_malformed_generation_does_not_take_the_run_down(monkeypatch, payload):
+    tool, _ = _run(monkeypatch, _tool(), payload)
+    assert tool.items == []
+
+
+def test_an_item_missing_its_tags_falls_back_to_its_allocation(monkeypatch):
+    tool, _ = _run(monkeypatch, _tool(),
+                   {"scenarios": [], "items": [{"stem": "State FOUR tools."}]})
+    item = tool.items[0]
+    assert (item.pc_number, item.element_number, item.bloom) == \
+        ("1.1", "1", KNOWLEDGE)
+    assert item.marks == -1        # no mark arrived; not invented as the allocation's
+
+
+def test_a_malformed_practical_generation_leaves_an_empty_tool(monkeypatch):
+    tool, _ = _run(monkeypatch, _tool(PRACTICAL), ["nonsense"])
+    assert tool.task_brief is None
+    assert tool.observation_checklist == [] and tool.product_checklist == []
+
+
+# --------------------------------------------------------------------------- #
+# The raw generation on disk
+# --------------------------------------------------------------------------- #
+def test_the_raw_generation_is_kept_before_it_is_parsed(monkeypatch):
+    _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    files = [f for f in os.listdir(assessment_ai.RAW_DIR) if f.endswith(".json")]
+    assert len(files) == 1
+    with open(os.path.join(assessment_ai.RAW_DIR, files[0]), encoding="utf-8") as fh:
+        assert json.load(fh) == WRITTEN_PAYLOAD
+
+
+def test_the_raw_directory_keeps_itself_out_of_git(monkeypatch):
+    _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    with open(os.path.join(assessment_ai.RAW_DIR, ".gitignore"),
+              encoding="utf-8") as fh:
+        assert fh.read().strip() == "*"
+
+
+def test_a_generation_that_could_not_be_parsed_is_still_on_disk(monkeypatch):
+    # The whole point: the file is what makes a bad paper debuggable.
+    _run(monkeypatch, _tool(), {"items": "four questions"})
+    files = [f for f in os.listdir(assessment_ai.RAW_DIR) if f.endswith(".json")]
+    assert len(files) == 1
+
+
+def test_a_directory_that_cannot_be_written_does_not_fail_the_paper(monkeypatch):
+    monkeypatch.setattr(assessment_ai.os, "makedirs",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+    assert len(tool.items) == 2
+
+
+def test_the_oldest_generations_are_trimmed(monkeypatch, tmp_path):
+    monkeypatch.setattr(assessment_ai, "MAX_RAW_FILES", 3)
+    rec = Recorder(WRITTEN_PAYLOAD)
+    monkeypatch.setattr(assessment_ai, "_chat_json", rec)
+    for _ in range(5):
+        assessment_ai.generate(_tool(), api_key="k", model="m")
+    files = [f for f in os.listdir(assessment_ai.RAW_DIR) if f.endswith(".json")]
+    assert len(files) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Refusing to start
+# --------------------------------------------------------------------------- #
+def test_a_cat_with_no_allocations_is_refused_before_any_call(monkeypatch):
+    rec = Recorder(WRITTEN_PAYLOAD)
+    monkeypatch.setattr(assessment_ai, "_chat_json", rec)
+    tool = _tool()
+    tool.allocations = []
+    with pytest.raises(AIError):
+        assessment_ai.generate(tool, api_key="k", model="m")
+    assert rec.calls == []
+
+
+def test_no_key_says_so_rather_than_writing_half_a_paper(monkeypatch):
+    monkeypatch.setattr(assessment_ai, "load_api_key", lambda: "")
+    with pytest.raises(AIError) as ei:
+        assessment_ai.generate(_tool(), api_key="")
+    assert "GROQ_API_KEY" in str(ei.value)

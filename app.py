@@ -325,6 +325,17 @@ def render_preview_and_generate() -> None:
 
     _render_extraction(os_unit, curr_unit)
 
+    # The two things that can be made from a unit. Session Plans are not a
+    # third choice here: they are made FROM a Learning Plan, and appear under
+    # it once one exists.
+    path = st.radio("What would you like to generate?",
+                    ["Learning Plan", "Assessment tool"],
+                    horizontal=True, key="output_path")
+    if path == "Assessment tool":
+        import assessment_ui
+        assessment_ui.render(os_unit)
+        return
+
     # ----- plan details ----------------------------------------------------- #
     st.subheader("Plan details")
     d1, d2, d3, d4 = st.columns(4)
