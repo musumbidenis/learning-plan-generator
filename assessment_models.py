@@ -210,6 +210,44 @@ class Ledger:
 
 
 # --------------------------------------------------------------------------- #
+# What the trainees were actually taught
+# --------------------------------------------------------------------------- #
+@dataclass
+class ContentTopic:
+    """One curriculum sub-topic and the key points taught under it."""
+    number: str                                  # '1.2'
+    title: str
+    key_points: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ElementContent:
+    """The curriculum content behind one element of the occupational standard.
+
+    The performance criteria say what competence looks like; they are one line
+    each and deliberately general. The curriculum says what was taught - the
+    sub-topics and the key points under them - and that is the only honest map
+    of what a paper may ask about. Without it the model assesses a PC from its
+    own knowledge of the trade and invents equipment, standards and
+    terminology the trainees never met.
+
+    Built in `assessment_content` by matching each element to its learning
+    outcome; carried on the tool so the prompt, and only the prompt, uses it.
+    """
+    element_number: str
+    element_title: str = ""
+    outcome_number: str = ""
+    outcome_title: str = ""
+    duration_hours: int = 0
+    topics: List[ContentTopic] = field(default_factory=list)
+    suggested_methods: List[str] = field(default_factory=list)
+
+    @property
+    def key_point_count(self) -> int:
+        return sum(len(t.key_points) for t in self.topics)
+
+
+# --------------------------------------------------------------------------- #
 # What the model returns, once validated
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -281,6 +319,10 @@ class AssessmentTool:
     programme: str = ""
     cat: CatDefinition = field(default_factory=CatDefinition)
     allocations: List[Allocation] = field(default_factory=list)
+    # The curriculum content behind the elements being assessed. Empty when no
+    # curriculum was read: the paper is then written from the PCs alone, which
+    # is what it used to be and is shallower for it.
+    content: List[ElementContent] = field(default_factory=list)
     # written
     scenarios: List[Scenario] = field(default_factory=list)
     items: List[Item] = field(default_factory=list)

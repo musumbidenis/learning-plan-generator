@@ -22,7 +22,7 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
 from assessment_models import (ANALYSING, APPLYING, CAT_1, CREATING,
                                EVALUATING, KNOWLEDGE, PRACTICAL, THEORY,
                                UNDERSTANDING, Allocation, AssessmentTool,
-                               CatDefinition)
+                               CatDefinition, ContentTopic, ElementContent)
 
 
 class FakeResp:
@@ -292,9 +292,32 @@ def test_a_mark_the_model_changed_is_kept_not_quietly_corrected(monkeypatch):
 
 
 def test_an_item_naming_a_scenario_that_was_never_written_loses_it(monkeypatch):
+    """A dangling reference never survives - the paper has no S9 to print."""
     payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
+    payload["scenarios"].append({"id": "S2", "title": "Kisii Depot",
+                                 "text": "A second workshop takes overflow."})
     payload["items"][1]["scenario_id"] = "S9"
     tool, _ = _run(monkeypatch, _tool(), payload)
+    assert tool.items[1].scenario_id == ""
+
+
+def test_an_untagged_item_joins_the_papers_only_scenario(monkeypatch):
+    """One scenario is one context, so there is nothing to decide. The model
+    dropping the tag must not leave a question that reads as if it were asked
+    out of the air."""
+    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+
+    assert [i.scenario_id for i in tool.items] == ["S1", "S1"]
+
+
+def test_an_untagged_item_is_left_alone_where_there_is_a_choice(monkeypatch):
+    """Two scenarios and no tag is a real ambiguity: guessing would put the
+    question under the wrong situation, so it is left for the validators."""
+    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
+    payload["scenarios"].append({"id": "S2", "title": "Kisii Depot",
+                                 "text": "A second workshop takes overflow."})
+    tool, _ = _run(monkeypatch, _tool(), payload)
+
     assert tool.items[1].scenario_id == ""
 
 
@@ -388,3 +411,72 @@ def test_no_key_says_so_rather_than_writing_half_a_paper(monkeypatch):
     with pytest.raises(AIError) as ei:
         assessment_ai.generate(_tool(), api_key="")
     assert "GROQ_API_KEY" in str(ei.value)
+
+
+# --------------------------------------------------------------------------- #
+# The curriculum's content reaches the model
+# --------------------------------------------------------------------------- #
+CONTENT = [
+    ElementContent(
+        element_number="1", element_title="Prepare for servicing",
+        outcome_number="1", outcome_title="Prepare for servicing",
+        duration_hours=40,
+        suggested_methods=["Practical", "Written tests"],
+        topics=[ContentTopic(
+            number="1.1", title="Identification of servicing tools",
+            key_points=["Torque wrench and its calibration",
+                        "Trolley jack rated load"])]),
+]
+
+
+def _tool_with_content(assessment_type=THEORY):
+    tool = _tool(assessment_type)
+    tool.content = CONTENT
+    return tool
+
+
+def test_the_written_prompt_carries_the_taught_content():
+    """A PC is one general line. Without the content behind it the model sets
+    the paper from its own knowledge of the trade, and the questions land on
+    things nobody taught."""
+    prompt = assessment_ai.build_written_prompt(_tool_with_content())
+
+    assert "CONTENT TAUGHT" in prompt
+    assert "1.1 Identification of servicing tools" in prompt
+    assert "Torque wrench and its calibration" in prompt
+
+
+def test_the_practical_prompt_carries_it_too():
+    prompt = assessment_ai.build_practical_prompt(
+        _tool_with_content(PRACTICAL))
+
+    assert "Trolley jack rated load" in prompt
+
+
+def test_the_practical_prompt_passes_on_what_the_curriculum_suggests():
+    prompt = assessment_ai.build_practical_prompt(
+        _tool_with_content(PRACTICAL))
+
+    assert "ASSESSMENT METHODS THE CURRICULUM SUGGESTS" in prompt
+    assert "- Written tests" in prompt
+
+
+def test_a_unit_with_no_curriculum_read_still_gets_a_prompt():
+    """The section is left out entirely rather than printed empty: both
+    standing instructions say what to do when it is absent."""
+    prompt = assessment_ai.build_written_prompt(_tool())
+
+    assert "CONTENT TAUGHT" not in prompt
+    assert "MARK ALLOCATION TABLE" in prompt
+
+
+def test_the_standing_instructions_forbid_assessing_what_was_not_taught():
+    assert "Do not assess a topic that is not there" in         assessment_ai.AS_WRITTEN_SYSTEM
+    assert "never taught" in assessment_ai.AS_PRACTICAL_SYSTEM
+
+
+def test_the_paper_is_told_to_open_with_a_scenario():
+    prompt = assessment_ai.build_written_prompt(_tool())
+
+    assert "Write the scenario first" in prompt
+    assert "A scenario_id is never empty" in assessment_ai.AS_WRITTEN_SYSTEM

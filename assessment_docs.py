@@ -433,7 +433,9 @@ def _candidate_instructions(tool: AssessmentTool) -> List[str]:
     return [
         "1. Write your name and registration number in the spaces provided.",
         f"2. This paper consists of {len(tool.items)} question(s).",
-        "3. Answer ALL the questions in the spaces provided.",
+        ("3. Read the scenario in Section A, then answer ALL the questions in "
+         "the spaces provided." if len(tool.scenarios) == 1
+         else "3. Answer ALL the questions in the spaces provided."),
         f"4. Time allowed: {_time_allowed(tool)}.",
         f"5. The paper is marked out of {tool.cat.total_marks} marks.",
         "6. Do not write on this paper anything other than your answers.",
@@ -452,7 +454,8 @@ def _add_written_paper(doc: Document, tool: AssessmentTool) -> None:
     if tool.scenarios:
         # Set once, here, and referred to by number from every item that uses
         # it - a scenario is never reprinted under its questions.
-        _add_heading(doc, "Section A: Scenario")
+        _add_heading(doc, "Section A: Scenario"
+                     if len(tool.scenarios) == 1 else "Section A: Scenarios")
         for scenario in tool.scenarios:
             par = doc.add_paragraph()
             par.paragraph_format.space_after = Pt(0)
@@ -466,7 +469,12 @@ def _add_written_paper(doc: Document, tool: AssessmentTool) -> None:
         par.paragraph_format.space_before = Pt(6)
         par.paragraph_format.space_after = Pt(0)
         _style_run(par.add_run(f"{item.number}. "), bold=True)
-        if item.scenario_id and item.scenario_id in numbers:
+        # With a single scenario the instructions have already said the whole
+        # paper refers to it, so "(Refer to Scenario 1)" on all twelve
+        # questions is noise on the page. It is printed only where the
+        # candidate has a choice of situations to keep straight.
+        if (len(tool.scenarios) > 1
+                and item.scenario_id and item.scenario_id in numbers):
             _style_run(par.add_run(
                 f"(Refer to Scenario {numbers[item.scenario_id]}) "), bold=False)
         _style_run(par.add_run(item.stem), bold=False)

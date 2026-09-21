@@ -7,8 +7,14 @@ actually happens in:
     2  say which CAT it is, written or practical, and out of how many marks
     3  paste the unit's PC weighting table, and correct what the paste lost
     4  read the computed distribution - every mark is final at this point
-    5  generate, validate, repair
-    6  download
+    5  read the curriculum content the paper will be set from
+    6  generate, validate, repair
+    7  download
+
+The performance criteria say what is assessed; the curriculum says what was
+taught. Both go to the model, because a PC on its own is one general line and
+a paper written from it alone is written from the model's own knowledge of the
+trade - plausible, and about things nobody covered.
 
 Steps 4 and 5 are kept apart on purpose. All the arithmetic happens in step 4,
 in `assessment_allocation`, in plain code. By the time the model is called it
@@ -24,6 +30,7 @@ from typing import List, Optional
 import streamlit as st
 
 import assessment_allocation as alloc
+import assessment_content as content_builder
 import assessment_docs as docs
 import assessment_ledger as ledger_store
 import assessment_validators as validators
@@ -31,7 +38,8 @@ import assessment_weighting as weighting_parser
 import runlog
 from assessment_models import (CAT_1, CAT_2, CAT_3, CAT_LABELS, FINAL_CAT,
                                PRACTICAL, THEORY, Allocation, AssessmentTool,
-                               CatDefinition, Problem, UnitWeighting)
+                               CatDefinition, ElementContent, Problem,
+                               UnitWeighting)
 from models import Unit
 
 ss = st.session_state
@@ -197,8 +205,51 @@ def _distribution_step(weighting: UnitWeighting,
     return allocations
 
 
+def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
+                  allocations: List[Allocation]) -> List[ElementContent]:
+    """The taught content behind the elements this CAT covers.
+
+    Shown rather than used silently, because it is the single biggest
+    influence on whether the questions are any good and the trainer is the
+    only person who can tell at a glance that an element has drawn the wrong
+    outcome. Element titles come from the occupational standard where it was
+    read - they are what the curriculum's outcome titles are matched against,
+    and the pasted weighting table's titles are a lossier copy of the same
+    thing.
+    """
+    elements = os_unit.elements or weighting.elements
+    content = content_builder.content_for(
+        curr_unit, elements, {a.element_number for a in allocations})
+
+    st.markdown("#### 5. What the paper is set from")
+    if not content:
+        st.warning(
+            "No curriculum content matched these elements, so the questions "
+            "will be written from the performance criteria alone. They will "
+            "be shallower, and nothing keeps them to what was actually "
+            "taught.")
+        return content
+
+    st.caption(content_builder.summarise(content)
+               + " - the model may assess this and nothing else.")
+    for block in content:
+        head = f"{block.element_number}. {block.element_title or block.outcome_title}"
+        if block.duration_hours:
+            head += f"  ({block.duration_hours} hours)"
+        with st.expander(head, expanded=False):
+            if (block.outcome_title
+                    and block.outcome_title != block.element_title):
+                st.caption(f"Curriculum learning outcome "
+                           f"{block.outcome_number}: {block.outcome_title}")
+            for topic in block.topics:
+                st.markdown(f"**{topic.number} {topic.title}**")
+                for point in topic.key_points:
+                    st.markdown(f"- {point}")
+    return content
+
+
 # --------------------------------------------------------------------------- #
-# 5-6. generate, then hand over the files
+# 6-7. generate, then hand over the files
 # --------------------------------------------------------------------------- #
 def _documents(weighting: UnitWeighting, tool: AssessmentTool) -> None:
     stem = (tool.cdacc_code or tool.unit_title or "assessment").replace("/", "_")
@@ -217,7 +268,7 @@ def _documents(weighting: UnitWeighting, tool: AssessmentTool) -> None:
                            key=f"at_dl_{suffix}")
 
 
-def render(os_unit: Unit, programme: str = "") -> None:
+def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     """The whole path, top to bottom."""
     st.subheader("Assessment tool")
     weighting = _weighting_step(os_unit)
@@ -227,12 +278,14 @@ def render(os_unit: Unit, programme: str = "") -> None:
     if cat is None:
         return
     allocations = _distribution_step(weighting, cat)
+    content = _content_step(os_unit, curr_unit, weighting, allocations)
 
     if st.button("Generate assessment tool", type="primary", key="at_go"):
         tool = AssessmentTool(
             unit_title=weighting.unit_title, cdacc_code=weighting.cdacc_code,
             isced_code=weighting.isced_code, knqf_level=weighting.knqf_level,
-            programme=programme, cat=cat, allocations=allocations)
+            programme=programme, cat=cat, allocations=allocations,
+            content=content)
         messages: List[str] = []
         box = st.empty()
 
@@ -259,14 +312,22 @@ def render(os_unit: Unit, programme: str = "") -> None:
     tool = ss.at_tool
     if tool is None:
         return
-    st.markdown("#### 5. Result")
+    st.markdown("#### 6. Result")
     remaining = validators.blocking(ss.at_problems)
+    warnings = [p for p in ss.at_problems if not p.blocking]
     if remaining:
         st.error("These could not be repaired automatically and need editing "
                  "by hand before the documents are used:")
         _show(remaining)
-    else:
+    elif not warnings:
         st.success("Every check passed.")
+    # Warnings used to be computed and then thrown away here, so a paper with
+    # no scenario at all reported "Every check passed". Anything the checks
+    # found is shown; only the blocking half decides the wording above it.
+    if warnings and not remaining:
+        st.info("Nothing here stops the documents being used - read it and "
+                "decide whether to generate again.")
+    _show(warnings)
     _documents(weighting, tool)
 
 

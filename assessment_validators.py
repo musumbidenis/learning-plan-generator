@@ -41,7 +41,7 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                ITEM_INDEPENDENCE_OVERLAP,
                                ITEM_VS_PC_SIMILARITY, MAX_CHECKLIST_ITEMS,
                                MAX_REPAIR_PASSES, MIN_CHECKLIST_ITEMS,
-                               TEMPERATURE, VERB_BANK, level_of_verb)
+                               REPAIR_TEMPERATURE, VERB_BANK, level_of_verb)
 from assessment_models import (BLOOM_LEVELS, AssessmentTool, ChecklistItem,
                                Item, MarkingPoint, Problem)
 
@@ -56,11 +56,13 @@ STEM_CLUE = "stem_clue"
 PRACTICAL_ITEM_COUNT = "practical_item_count"
 ITEM_NOT_PC = "item_not_pc"
 FORMAT_COMPLIANCE = "format_compliance"
+SCENARIO_GROUNDING = "scenario_grounding"
 
-# The five a model can be asked to fix by rewriting the offending item. The
+# The six a model can be asked to fix by rewriting the offending item. The
 # other five are arithmetic or coverage: rewording cannot change them.
 REPAIRABLE_CHECKS = frozenset({BLOOM_CONFORMANCE, ITEM_INDEPENDENCE, STEM_CLUE,
-                               ITEM_NOT_PC, FORMAT_COMPLIANCE})
+                               ITEM_NOT_PC, FORMAT_COMPLIANCE,
+                               SCENARIO_GROUNDING})
 
 
 @dataclass(eq=False)
@@ -86,10 +88,22 @@ class AssessmentProblem(Problem):
 
 
 def _problem(check: str, message: str, where: str = "",
-             item_number: int = 0) -> AssessmentProblem:
-    repairable = check in REPAIRABLE_CHECKS
-    return AssessmentProblem(message=message, blocking=not repairable,
-                             where=where, check=check, repairable=repairable,
+             item_number: int = 0, blocks: Optional[bool] = None
+             ) -> AssessmentProblem:
+    """A finding. It blocks the documents unless a rewrite could clear it.
+
+    `blocks` overrides that pairing for the one finding where neither half
+    holds: a paper that came back with no scenario at all is not repairable
+    item by item - there is nothing to anchor the items to - but neither is it
+    worth withholding the documents over, because the trainer can see it at a
+    glance and regenerate. It is reported, loudly, and the paper stays
+    downloadable.
+    """
+    fixable = check in REPAIRABLE_CHECKS
+    return AssessmentProblem(message=message,
+                             blocking=(not fixable) if blocks is None
+                             else blocks,
+                             where=where, check=check, repairable=fixable,
                              item_number=item_number)
 
 
@@ -480,10 +494,41 @@ def _check_format(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+def _check_scenario_grounding(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """11. Every question on a written paper is asked about a scenario.
+
+    A CDACC written CAT sets the situation once and questions it; an item
+    asked out of the air tests recall of a syllabus rather than competence in
+    a workplace, which is the distinction the whole framework turns on.
+
+    An item that names no scenario on a paper that HAS one is a real
+    ambiguity - `assessment_ai` has already attached the obvious case, where
+    the paper has exactly one scenario and the model merely dropped the tag,
+    so anything reaching here is a paper with several situations and an item
+    that belongs to none of them. The repair pass re-anchors it.
+    """
+    if tool.is_practical or not tool.items:
+        return []
+    if not tool.scenarios:
+        return [_problem(
+            SCENARIO_GROUNDING,
+            "the paper came back with no scenario, so every question is "
+            "asked out of the air rather than about a workplace situation; "
+            "generate it again",
+            blocks=False)]
+    known = {s.id for s in tool.scenarios}
+    return [_problem(
+        SCENARIO_GROUNDING,
+        f"item {item.number} is not asked about any of the paper's "
+        f"{len(tool.scenarios)} scenarios; anchor it to one of them",
+        where=f"item {item.number}", item_number=item.number)
+        for item in tool.items if item.scenario_id not in known]
+
+
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_bloom_completeness,
            _check_independence, _check_stem_clues, _check_practical_count,
-           _check_item_not_pc, _check_format)
+           _check_item_not_pc, _check_format, _check_scenario_grounding)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:
@@ -516,7 +561,8 @@ RULES
 - The corrected item must not repeat, hint at or give away the answer to any frozen item or to any other corrected item.
 - The corrected stem must not give away its own answer.
 - Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item.
-- Keep the item on its own performance criterion and its own scenario.
+- Keep the item on its own performance criterion. Every item belongs to one of the scenarios you are shown: give that scenario's id in scenario_id, and never invent a scenario of your own.
+- The corrected stem does not restate the scenario. It is one sentence that asks something of it.
 
 Return ONE JSON object and nothing else."""
 
@@ -625,7 +671,7 @@ def _repair_practical(tool: AssessmentTool, faults: Dict[int, List[str]],
                                  api_key, model, _practical_repair_schema(),
                                  "assessment_practical_repair",
                                  progress_cb=progress_cb,
-                                 temperature=TEMPERATURE,
+                                 temperature=REPAIR_TEMPERATURE,
                                  system=PRACTICAL_REPAIR_SYSTEM)
         except AIError as e:
             runlog.error(f"Assessment: repair pass {attempt} failed, keeping "
@@ -651,6 +697,7 @@ def _repair_schema() -> dict:
                         "number": {"type": "integer"},
                         "stem": {"type": "string"},
                         "item_format": {"type": "string"},
+                        "scenario_id": {"type": "string"},
                         "marking_scheme": {
                             "type": "array",
                             "items": {
@@ -755,6 +802,13 @@ def _apply_repair(tool: AssessmentTool, payload,
         fmt = row.get("item_format")
         if isinstance(fmt, str) and fmt.strip():
             item.item_format = fmt.strip()
+        # Only onto a scenario that exists. A repair inventing a new id would
+        # leave the item orphaned again, and silently, since the reference
+        # would look filled in.
+        anchor = row.get("scenario_id")
+        if isinstance(anchor, str) and anchor.strip() in {
+                sc.id for sc in tool.scenarios}:
+            item.scenario_id = anchor.strip()
         scheme = _marking_points(row.get("marking_scheme"))
         if scheme:
             item.marking_scheme = scheme
@@ -823,7 +877,7 @@ def repair(tool: AssessmentTool, problems: Sequence[Problem], api_key: str = "",
             payload = _chat_json(build_repair_prompt(tool, faults), api_key,
                                  model, _repair_schema(), "assessment_repair",
                                  progress_cb=progress_cb,
-                                 temperature=TEMPERATURE, system=REPAIR_SYSTEM)
+                                 temperature=REPAIR_TEMPERATURE, system=REPAIR_SYSTEM)
         except AIError as e:
             runlog.error(f"Assessment: repair pass {attempt} failed, keeping "
                          f"the items as they are: {e}")

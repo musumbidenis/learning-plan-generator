@@ -63,7 +63,7 @@ def _written_tool() -> AssessmentTool:
     items = [
         Item(number=1, element_number="1", pc_number="1.1", bloom=KNOWLEDGE,
              stem="List four types of programming languages.", marks=10,
-             item_format="short_response",
+             item_format="short_response", scenario_id="S1",
              marking_scheme=[MarkingPoint("Machine and assembly languages", 6),
                              MarkingPoint("High level and 4GL languages", 4)]),
         Item(number=2, element_number="1", pc_number="1.2", bloom=UNDERSTANDING,
@@ -73,7 +73,7 @@ def _written_tool() -> AssessmentTool:
                              MarkingPoint("Compilation model is explained", 3)]),
         Item(number=3, element_number="2", pc_number="2.1", bloom=APPLYING,
              stem="Develop an algorithm that sorts a list of marks.", marks=12,
-             item_format="short_response",
+             item_format="short_response", scenario_id="S1",
              marking_scheme=[MarkingPoint("Correct pseudocode structure", 7),
                              MarkingPoint("Correct comparison and swap", 5)]),
     ]
@@ -325,13 +325,33 @@ def test_candidate_written_paper_carries_instructions_items_and_marks():
         assert f"({item.marks} marks)" in text
 
 
-def test_candidate_paper_sets_each_scenario_once_and_references_it():
+def test_candidate_paper_sets_the_scenario_once_at_the_top():
     tool = _written_tool()
     text = _text(_doc(assessment_docs.build_candidates_tool(tool)))
     body = tool.scenarios[0].text
     assert text.count(body) == 1
     assert "Scenario 1: The payroll rewrite" in text
+
+
+def test_a_single_scenario_is_pointed_at_once_not_on_every_question():
+    """The instruction says the paper is about it, so repeating "(Refer to
+    Scenario 1)" under all three questions is noise on the page."""
+    text = _text(_doc(assessment_docs.build_candidates_tool(_written_tool())))
+
+    assert "(Refer to Scenario 1)" not in text
+    assert "Read the scenario in Section A" in text
+
+
+def test_several_scenarios_are_named_on_the_questions_that_use_them():
+    """With a choice of situations the candidate has to be told which one."""
+    tool = _written_tool()
+    tool.scenarios.append(Scenario(id="S2", title="The stock take",
+                                   text="A store is counting its spares."))
+    tool.items[2].scenario_id = "S2"
+    text = _text(_doc(assessment_docs.build_candidates_tool(tool)))
+
     assert "(Refer to Scenario 1)" in text
+    assert "(Refer to Scenario 2)" in text
 
 
 def test_candidate_paper_never_shows_the_marking_scheme():

@@ -99,6 +99,26 @@ ITEM_INDEPENDENCE_OVERLAP = 0.60
 # formats are not used here.
 CONSTRUCTED_RESPONSE_ONLY_LEVELS = ("5", "6")
 
-# The model writes prose under tight constraints, so it is kept cold.
-TEMPERATURE = 0.3
+# How alike an element's title and a learning outcome's title must be before
+# the two are taken to be the same thing. The two documents are written by
+# different committees and the titles are usually identical, so a match this
+# far below 1.0 is generous on purpose - it absorbs a dropped plural or a
+# reordered phrase without letting two genuinely different outcomes pair up.
+OUTCOME_MATCH_SIMILARITY = 0.62
+
+# Writing is a generative job and a cold model does it badly: at 0.3 every
+# paper on a unit came back with the same scenario, the same worked example
+# and the same four marking points, because the highest-probability wording is
+# the same wording every time. The constraints that matter - the marks, the
+# Bloom levels, which PC each item sits on - are not entrusted to sampling at
+# all; they are computed before the call and checked after it. So the
+# temperature buys variety and depth in the prose and risks nothing that the
+# validators are not already watching.
+TEMPERATURE = 0.85
+
+# A repair is the opposite job: one item, one named fault, everything else
+# frozen. Here the likeliest correction IS the wanted one, and warmth only
+# invites the model to rewrite more than it was asked to.
+REPAIR_TEMPERATURE = 0.35
+
 MAX_REPAIR_PASSES = 2

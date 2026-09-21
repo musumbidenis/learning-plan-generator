@@ -109,7 +109,7 @@ def _written() -> AssessmentTool:
             marks=alloc.marks,
             marking_scheme=[MarkingPoint(text=p, marks=per) for p in points],
             item_format="short_response",
-            scenario_id="S1" if n == 1 else ""))
+            scenario_id="S1"))
     return tool
 
 
@@ -657,3 +657,89 @@ def test_the_helpers_split_the_problems_the_way_the_ui_needs():
     problems = av.validate(tool)
     assert av.repairable(problems) and av.blocking(problems)
     assert set(av.repairable(problems)).isdisjoint(av.blocking(problems))
+
+
+# --------------------------------------------------------------------------- #
+# 11. Every question is asked about a scenario
+# --------------------------------------------------------------------------- #
+def _grounding(tool):
+    return [p for p in av.validate(tool)
+            if getattr(p, "check", "") == av.SCENARIO_GROUNDING]
+
+
+def test_an_item_belonging_to_no_scenario_is_caught():
+    """A CDACC written CAT sets the situation once and questions it. An item
+    asked out of the air tests recall of a syllabus, not competence."""
+    tool = _written()
+    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot",
+                                   text="A second bay takes the overflow."))
+    tool.items[2].scenario_id = ""
+
+    found = _grounding(tool)
+
+    assert len(found) == 1
+    assert found[0].item_number == 3
+
+
+def test_an_orphaned_item_is_repairable_rather_than_fatal():
+    """Re-anchoring is a rewrite the model can do, so it does not stop the
+    documents - it goes round the repair loop like any other wording fault."""
+    tool = _written()
+    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot", text="..."))
+    tool.items[2].scenario_id = ""
+
+    found = _grounding(tool)
+
+    assert found[0].repairable
+    assert not found[0].blocking
+
+
+def test_an_item_pointing_at_a_scenario_that_is_not_there_is_caught():
+    tool = _written()
+    tool.items[1].scenario_id = "S9"
+
+    assert [p.item_number for p in _grounding(tool)] == [2]
+
+
+def test_a_paper_with_no_scenario_at_all_is_reported_but_not_withheld():
+    """There is nothing to anchor the items to, so no rewrite fixes it and
+    the trainer has to generate again. Withholding the documents over it would
+    help nobody: they can see it at a glance."""
+    tool = _written()
+    tool.scenarios = []
+    for item in tool.items:
+        item.scenario_id = ""
+
+    found = _grounding(tool)
+
+    assert len(found) == 1                     # once for the paper, not per item
+    assert not found[0].blocking
+    assert "generate it again" in found[0].message
+
+
+def test_a_practical_tool_is_not_asked_for_scenarios():
+    assert _grounding(_practical()) == []
+
+
+def test_a_repair_may_move_an_item_onto_a_scenario(monkeypatch):
+    """The repair prompt shows every scenario, so re-anchoring is within what
+    the pass can return - and only onto one that exists."""
+    tool = _written()
+    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot", text="..."))
+    tool.items[2].scenario_id = ""
+
+    av._apply_repair(tool, {"items": [{"number": 3, "stem": tool.items[2].stem,
+                                       "scenario_id": "S2"}]}, {3: ["orphan"]})
+
+    assert tool.items[2].scenario_id == "S2"
+
+
+def test_a_repair_cannot_invent_a_scenario_to_anchor_to():
+    """An id nobody wrote would leave the item orphaned and look filled in."""
+    tool = _written()
+    tool.items[0].scenario_id = ""
+
+    av._apply_repair(tool, {"items": [{"number": 1, "stem": tool.items[0].stem,
+                                       "scenario_id": "S7"}]}, {1: ["orphan"]})
+
+    assert tool.items[0].scenario_id == ""

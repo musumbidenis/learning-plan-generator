@@ -35,6 +35,7 @@ from typing import Dict, List, Optional
 import runlog
 from ai_client import (AIError, _chat_json, _emit_progress, _strict,
                        load_api_key, load_model_name, resolve_model)
+import assessment_content
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
                                TEMPERATURE, VERB_BANK)
@@ -169,6 +170,11 @@ Each allocation row states the marks for that item. Write the item to exactly th
 ONE ITEM PER ROW
 Return exactly one item per allocation row, in the order the rows are given. Echo that row's element number, PC number, Bloom level and marks onto the item verbatim. Do not add an item, drop an item or reorder them.
 
+WHAT YOU MAY ASSESS
+You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element, which is what the trainees actually sat through. Set every item from that content. Do not assess a topic that is not there. Do not invent equipment, standards, legislation, formulae, software, suppliers or terminology the content does not mention, and do not fall back on your own knowledge of the trade to fill a gap - where the content is thin on a performance criterion, ask a narrower question rather than a better-informed one.
+Spread the paper across that content. Where an element lists many key points, draw the items from different ones rather than circling the same idea twice, and let the scenario touch enough of the taught ground for that to be possible.
+Where no taught content is given for an element, and only then, work from the performance criterion alone and keep the item general.
+
 FORMAT - CONSTRUCTED RESPONSE ONLY
 Every item is answered in the candidate's own words. Use only:
 - short_response: a few lines to a short paragraph.
@@ -190,8 +196,16 @@ The items may be answered in any order, independently.
 MARKING SCHEME
 Each item carries a marking scheme of discrete, mark-bearing points whose marks SUM to that item's stated marks. One point per mark is the norm; a point worth more says so in its own marks field. Each point is the substance an assessor looks for, written as a short sentence or phrase - not "1 mark for each correct answer".
 
-SCENARIOS
-Where several items share a workplace situation, set it out once as a scenario and have those items reference it by id. A scenario is a realistic Kenyan workplace situation - a named workshop, garage, salon, farm, clinic, hotel, site or SME, with plausible Kenyan places, roles, equipment and quantities in Kenya Shillings where money appears. It gives the candidate the facts to work from and never contains an answer. An item that needs no scenario carries an empty scenario_id.
+THE PAPER OPENS WITH A SCENARIO
+Write the scenario first. Every item then hangs off it: the candidate reads the situation once and answers every question about that situation. No item is asked directly, out of the air, as a bare context-free question.
+A scenario is a realistic Kenyan workplace situation - a named workshop, garage, salon, farm, clinic, hotel, site, office or SME - and it gives the candidate the facts to work from: where they are, who they are in it, what has happened, and what they have been asked to do. Use plausible Kenyan places, roles, equipment and quantities, in Kenya Shillings where money appears. Make it rich enough that every item has something concrete to bite on, and draw its detail from the taught content so that the situation is one the trainees are equipped to reason about. It never contains the answer to any item.
+Write ONE scenario. Write a second, or at most a third, only where the performance criteria genuinely belong to separate workplace situations that cannot honestly be folded into one. Never one scenario per item.
+EVERY item carries the id of the scenario it belongs to. A scenario_id is never empty.
+
+KEEP THE STEMS SHORT
+The scenario carries the situation, so the stem does not restate it. A stem is normally one sentence: the lead verb, what is wanted, and how many. An item may add a small detail of its own - a reading just taken, a figure quoted, a further thing the supervisor now asks for - where that detail is what turns a general question into a question about this scenario. What a stem may not do is set the workshop, the customer and the job out all over again before it gets round to asking anything.
+Weak, because it asks nothing of the scenario: "Explain FOUR causes of overheating in a petrol engine."
+Strong: "Explain FOUR likely causes of the overheating Mutiso reported on the Probox." 
 
 TERMINOLOGY (Kenya CBET) - MANDATORY
 Use: trainee, candidate, assessor, unit of competency, performance criteria, competency, Continuous Assessment Test (CAT).
@@ -207,6 +221,9 @@ You are GIVEN the unit, the CAT, and a MARK ALLOCATION TABLE stating the marks f
 
 THE MARKS ARE NOT YOURS
 Distribute each PC's stated marks across the items of evaluation that trace to it. The marks of the items tracing to a PC sum to exactly that PC's stated marks. Never alter a PC's total, never move marks between PCs, and never state a grand total anywhere.
+
+WHAT THE TASK MAY REQUIRE
+You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. The task you set, the tools you issue and the items of evaluation you write all come from that content. Do not require a technique, a machine, a material or a standard the trainees were never taught, and do not reach for your own knowledge of the trade to make the task look more professional: a task nobody was prepared for is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
 
 THE CANDIDATE'S TASK BRIEF
 One practical task, realistic for a Kenyan workplace, that can genuinely be performed in the time allowed with the tools listed. The brief gives:
@@ -245,6 +262,22 @@ Return ONE JSON object and nothing else.""" % {
 # --------------------------------------------------------------------------- #
 # The data half of the request
 # --------------------------------------------------------------------------- #
+def _content_block(tool: AssessmentTool) -> str:
+    """The taught content, or nothing at all.
+
+    Nothing at all is a real case, not a defect: a unit whose curriculum could
+    not be read still gets a paper, written from its performance criteria the
+    way the module worked before this existed. Both standing instructions say
+    what to do when this section is absent, so the omission is handled rather
+    than silently changing what the model thinks it is being asked for.
+    """
+    rendered = assessment_content.render(tool.content)
+    if not rendered:
+        return ""
+    return ("\n\nCONTENT TAUGHT, from the curriculum - the body of knowledge "
+            "this assessment draws on:\n" + rendered)
+
+
 def _header(tool: AssessmentTool) -> str:
     cat = tool.cat
     return (f"UNIT: {tool.unit_title}\n"
@@ -277,14 +310,14 @@ def build_written_prompt(tool: AssessmentTool) -> str:
         level_note = ("\nThis is a KNQF level %s paper: every item is "
                       "constructed response. Selected-response formats are "
                       "not used at this level at all.\n" % tool.knqf_level)
-    return f"""{_header(tool)}
+    return f"""{_header(tool)}{_content_block(tool)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 {table}
 
 ITEMS REQUIRED: {len(tool.allocations)}
 {level_note}
-Write the scenarios first, then one item per row above. Return the JSON object now."""
+Write the scenario first, then one item per row above, each one carrying that scenario's id. Return the JSON object now."""
 
 
 def build_practical_prompt(tool: AssessmentTool) -> str:
@@ -299,7 +332,11 @@ def build_practical_prompt(tool: AssessmentTool) -> str:
         rows.append(f"- PC {a.pc_number} (element {a.element_number} "
                     f"{a.element_title}): {a.pc_text} | marks: "
                     f"{by_pc.get(a.pc_number, a.marks)}")
-    return f"""{_header(tool)}
+    methods = assessment_content.methods(tool.content)
+    suggested = ("\n\nASSESSMENT METHODS THE CURRICULUM SUGGESTS FOR THIS "
+                 "UNIT:\n" + "\n".join(f"- {m}" for m in methods)
+                 if methods else "")
+    return f"""{_header(tool)}{_content_block(tool)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
@@ -523,11 +560,23 @@ def apply_written(tool: AssessmentTool, payload) -> AssessmentTool:
     tool.scenarios = _scenarios(data.get("scenarios"))
     tool.items = _items(data.get("items"), tool)
     known = {s.id for s in tool.scenarios}
+    only = tool.scenarios[0].id if len(tool.scenarios) == 1 else ""
     for item in tool.items:
         if item.scenario_id and item.scenario_id not in known:
             runlog.warn(f"Assessment: item {item.number} references scenario "
                         f"'{item.scenario_id}', which was not written")
             item.scenario_id = ""
+        if not item.scenario_id and only:
+            # One scenario means one context, so there is nothing to decide:
+            # the item was written to that situation whether or not the tag
+            # came back. This is a pointer being restored, not a correction -
+            # it changes no wording and hides no fault. Where the paper has
+            # SEVERAL scenarios an untagged item is genuinely ambiguous, so it
+            # is left alone for the validators to raise and the repair pass to
+            # re-anchor.
+            runlog.log(f"Assessment: item {item.number} arrived without a "
+                       f"scenario id; attached to the paper's only scenario")
+            item.scenario_id = only
     return tool
 
 

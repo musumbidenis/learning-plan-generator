@@ -75,7 +75,7 @@ _DEFAULTS = dict(
     # uploaded-Learning-Plan path (generate Session Plans without OS + Curriculum)
     up_sig=None, up_unit=None, up_sessions=None, up_inputs=None,
     # Drive library browsing (which folder / files the documents came from)
-    lib_collection_id=None, lib_programme_id=None,
+    lib_collection_id=None, lib_programme_id=None, lib_programme_name="",
     # units a document's own contents table names but that couldn't be found
     os_missing=[], cu_missing=[],
 )
@@ -333,7 +333,9 @@ def render_preview_and_generate() -> None:
                     horizontal=True, key="output_path")
     if path == "Assessment tool":
         import assessment_ui
-        assessment_ui.render(os_unit)
+        assessment_ui.render(os_unit, curr_unit,
+                             ss.get("lib_programme_name")
+                             or ss.get("f_course", ""))
         return
 
     # ----- plan details ----------------------------------------------------- #
@@ -840,6 +842,10 @@ def render_library_source() -> None:
         return
     programme = programmes[pi]
     ss.lib_programme_id = programme.id
+    # Kept because the assessment tool prints it on every document's header;
+    # the Learning Plan asks for a course name by hand, the library already
+    # knows it.
+    ss.lib_programme_name = programme.name
 
     try:
         files = _cached_files(programme.id)
