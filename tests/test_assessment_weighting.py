@@ -242,10 +242,17 @@ def test_a_page_number_between_two_wrapped_lines_is_not_taken_as_a_weight():
 # --------------------------------------------------------------------------- #
 # What validate refuses to let through
 # --------------------------------------------------------------------------- #
-def test_a_sub_total_that_does_not_add_up_is_blocking():
+def test_a_sub_total_that_does_not_add_up_warns_and_the_rows_win():
     """The checksum's whole purpose. This is element 1 of the real table with
     PC 1.3 lost to a page break: the five rows that arrived add up to 15 and 21
-    where the document's own sub-total row says 18 and 27."""
+    where the document's own sub-total row says 18 and 27.
+
+    It warns rather than blocks, because the same mismatch has an innocent
+    cause that is at least as common: these tables are typed by hand and their
+    sub-totals drift from their rows by a mark. One real document stated 29
+    practical against 30 in its rows and 26 theory against 27. Blocking there
+    would stop a trainer over somebody else's arithmetic, so the rows are
+    taken as the truth and the discrepancy is reported."""
     _, problems = aw.parse(_mini(
         "1. Prepare for tour guiding operations",
         "1.1\tTour itinerary is obtained\t4\t4",
@@ -255,13 +262,14 @@ def test_a_sub_total_that_does_not_add_up_is_blocking():
         "1.6\tTransport arrangements are confirmed\t3\t4",
         "\tSub Total\t18\t27"))
 
-    theory = [p for p in _blocking(problems) if "theory sub-total" in p.message]
-    assert theory and theory[0].where == "1"
+    theory = [p for p in problems if "theory sub-total" in p.message]
+    assert theory and theory[0].where == "1" and not theory[0].blocking
     assert "18" in theory[0].message and "15" in theory[0].message
-    assert any("practical sub-total" in p.message for p in _blocking(problems))
+    assert any("practical sub-total" in p.message for p in problems)
+    assert _blocking(problems) == []
 
 
-def test_sub_totals_that_do_not_reach_the_grand_total_are_blocking():
+def test_sub_totals_that_do_not_reach_the_grand_total_warn():
     """A whole element can vanish between two page breaks; each surviving
     element then adds up perfectly and only the grand total notices."""
     _, problems = aw.parse(_mini(
@@ -270,7 +278,10 @@ def test_sub_totals_that_do_not_reach_the_grand_total_are_blocking():
         "\tSub Total\t4\t4",
         "\tGRAND TOTAL\t36\t54"))
 
-    assert any("grand total says 36" in p.message for p in _blocking(problems))
+    grand = [p for p in problems if "grand total says 36" in p.message]
+    assert grand and not grand[0].blocking
+    assert "The 4 is used." in grand[0].message
+    assert _blocking(problems) == []
 
 
 def test_a_heading_that_disagrees_with_the_totals_is_blocking():
@@ -459,3 +470,44 @@ def test_a_wrapped_line_opening_with_a_figure_is_not_an_element():
     assert [e.number for e in weighting.elements] == ["1"]
     assert "24 hours" in weighting.elements[0].pcs[0].text
     assert problems == []
+
+
+# --------------------------------------------------------------------------- #
+# A hand-typed table whose arithmetic drifted
+# --------------------------------------------------------------------------- #
+def test_the_rows_become_the_stated_totals_once_the_table_is_read():
+    """Reported from a real document: element 1 stating 29 practical against
+    30 in its rows, and a grand total a mark short of its own sub-totals.
+
+    Warning is not enough on its own. Every later step reads the stored
+    figures, so leaving 29 in place would print a sub-total of 29 over cells
+    that add to 30, and allocate the CAT's marks from the typo."""
+    weighting, problems = aw.parse(_mini(
+        "1. Manage tourist arrival and departures",
+        "1.1\tTour transfer resources are assembled\t4\t6",
+        "1.2\tTourists are received\t3\t6",
+        "1.3\tLuggage is handled\t3\t6",
+        "1.4\tTourists are transferred\t3\t6",
+        "1.5\tRecords are maintained\t3\t6",
+        "\tSub Total\t16\t29",
+        "\tGRAND TOTAL\t16\t29"))
+
+    assert _blocking(problems) == []
+    assert any("add up to 30" in p.message for p in problems)
+    assert weighting.elements[0].stated_practical_total == 30
+    assert weighting.stated_grand_practical == 30
+
+
+def test_reconciling_a_corrected_table_finds_nothing_left_to_say():
+    """Idempotent, so the UI can re-validate on every rerun without the
+    warnings multiplying or the numbers drifting further."""
+    weighting, _ = aw.parse(_mini(
+        "1. Manage tourist arrival and departures",
+        "1.1\tTour transfer resources are assembled\t4\t6",
+        "1.2\tTourists are received\t3\t6",
+        "\tSub Total\t9\t11"))
+
+    aw.reconcile(weighting)
+
+    assert aw.validate(weighting) == []
+    assert weighting.elements[0].stated_theory_total == 7

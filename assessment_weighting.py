@@ -155,16 +155,15 @@ def _element_prefix(pc_number: str) -> str:
 
 
 def _sub_total_of(element: WeightedElement, kind: str) -> int:
-    """An element's contribution to the grand total, stated where it was read.
+    """An element's contribution to the grand total: its rows, added up.
 
-    The stated figure is preferred so that the commonest failure - one PC row
-    that wrapped and lost its weights - is reported once, against the element
-    whose rows the user must go and look at, rather than a second time as a
-    grand-total mismatch that names no row at all.
+    Not the stated figure. Real CDACC tables are typed by hand and their
+    sub-totals drift from their rows by a mark - one document had element 1
+    stating 29 practical against 30 in its rows, element 3 stating 26 theory
+    against 27, and a grand total of 65 against 66. Preferring the stated
+    figure there would carry the typo into every mark the CAT allocates.
     """
-    stated = (element.stated_theory_total if kind == THEORY
-              else element.stated_practical_total)
-    return element.total(kind) if stated is None else stated
+    return element.total(kind)
 
 
 # --------------------------------------------------------------------------- #
@@ -448,7 +447,38 @@ def parse(text: str) -> Tuple[UnitWeighting, List[Problem]]:
     except Exception as exc:                            # pragma: no cover
         reader.problem(f"The table could not be read past the point it "
                        f"stopped: {exc}")
-    return reader.weighting, reader.problems + validate(reader.weighting)
+    # Warn about the checksums, THEN make the table agree with its own rows.
+    # The order matters: after reconciling there is nothing left to warn about.
+    problems = reader.problems + validate(reader.weighting)
+    reconcile(reader.weighting)
+    return reader.weighting, problems
+
+
+def reconcile(weighting: UnitWeighting) -> None:
+    """Replace every stated checksum with what the rows actually add up to.
+
+    The rows are the document's real content; a sub-total is somebody's
+    arithmetic about them, typed by hand, and where the two disagree it is the
+    arithmetic that is wrong. `validate` has already said so - this is what
+    makes the rest of the module agree with the warning, so the PC
+    distribution table cannot print 29 in a column whose cells add to 30.
+
+    Done once, when the table is parsed, and idempotent: running it again
+    finds nothing left to correct.
+    """
+    for element in weighting.elements:
+        if element.stated_theory_total is not None:
+            element.stated_theory_total = element.total(THEORY)
+        if element.stated_practical_total is not None:
+            element.stated_practical_total = element.total(PRACTICAL)
+    if weighting.stated_grand_theory is not None:
+        weighting.stated_grand_theory = weighting.grand_total(THEORY)
+    if weighting.stated_grand_practical is not None:
+        weighting.stated_grand_practical = weighting.grand_total(PRACTICAL)
+    derived = _reduce(weighting.grand_total(THEORY),
+                      weighting.grand_total(PRACTICAL))
+    if derived:
+        weighting.ratio = derived
 
 
 def validate(weighting: UnitWeighting) -> List[Problem]:
@@ -513,7 +543,8 @@ def validate(weighting: UnitWeighting) -> List[Problem]:
             if actual != stated:
                 fail(f"Element {element.number} states a {kind} sub-total of "
                      f"{stated} but its {len(element.pcs)} performance "
-                     f"criteria add up to {actual}.", where=element.number)
+                     f"criteria add up to {actual}. The {actual} is used.",
+                     where=element.number, blocking=False)
 
     for kind, grand in ((THEORY, weighting.stated_grand_theory),
                         (PRACTICAL, weighting.stated_grand_practical)):
@@ -525,7 +556,7 @@ def validate(weighting: UnitWeighting) -> List[Problem]:
         parts = sum(_sub_total_of(el, kind) for el in weighting.elements)
         if parts != grand:
             fail(f"The {kind} sub-totals add up to {parts} but the grand "
-                 f"total says {grand}.")
+                 f"total says {grand}. The {parts} is used.", blocking=False)
 
     if (weighting.stated_grand_theory is not None
             and weighting.stated_grand_practical is not None):
