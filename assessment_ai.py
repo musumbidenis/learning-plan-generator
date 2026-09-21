@@ -30,6 +30,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 from typing import Dict, List, Optional
 
 import runlog
@@ -38,7 +39,7 @@ from ai_client import (AIError, _chat_json, _emit_progress, _strict,
 import assessment_content
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
-                               TEMPERATURE, VERB_BANK)
+                               TEMPERATURE, VERB_BANK, marks_per_response)
 from assessment_models import (AssessmentTool, ChecklistItem, Item,
                                MarkingPoint, OralQuestion, TaskBrief)
 
@@ -430,11 +431,29 @@ out of them. Published papers are consistent:
   support implementation." is 10 marks. "Describe three recognized stages of
   fire." is 6 marks.
 
-So the count you ask for is the item's marks divided by what its verb buys,
-and the marking scheme carries exactly that many points, each worth that much.
-An item of 4 marks at UNDERSTANDING asks for TWO things, not four. Never ask
-for four things and then write four one-mark points under a verb that cannot
-be answered in one mark.
+Every allocation row tells you the number to ask for, as "ask for: N". Use
+that number. It is the item's marks divided by what its verb buys, rounded
+down, so a 4-mark UNDERSTANDING item asks for TWO things and not four.
+
+Where the marks do not divide evenly, one point carries the extra rather than
+the count going up: 7 marks at UNDERSTANDING is THREE things, marked 2, 2 and
+3 - not seven things at one mark each. Published papers do this routinely
+("Explain in detail FIVE classifications of solid and liquid wastes. [15
+Marks]" is five points of three).
+
+EVERY MARKING POINT IS A REAL ANSWER
+The marking scheme is what an assessor holds while marking, so each point
+states the substance actually expected from the candidate. Write the answer.
+
+  Right: "Trojan - malware disguised as legitimate software"
+  Right: "Likelihood of the threat being realised, rated against the matrix"
+  WRONG: "Threat classified as ___"
+  WRONG: "Way 1", "Step 2", "Measure 3"
+  WRONG: "1 mark for each correct answer"
+
+A marking scheme of blanks, numbered slots or placeholders is not a marking
+scheme. If you cannot name the answer from the CONTENT TAUGHT, ask a narrower
+question that you can.
 
 THE ASK
 - Begins with the allowed verb for that row's Bloom level. Where a situation
@@ -532,10 +551,13 @@ def build_written_prompt(tool: AssessmentTool) -> str:
     rows = []
     for n, a in enumerate(tool.allocations, start=1):
         verbs = ", ".join(VERB_BANK.get(a.bloom, []))
+        per_point = marks_per_response(a.bloom)
+        asked = max(1, a.marks // per_point)
         rows.append(
-            f"{n}. element {a.element_number} ({a.element_title}) | "
-            f"PC {a.pc_number}: {a.pc_text} | bloom: {a.bloom} | "
-            f"marks: {a.marks} | allowed verbs: {verbs or '(any)'}")
+            f"{n}. element_number: {a.element_number} ({a.element_title}) | "
+            f"pc_number: {a.pc_number} | criterion: {a.pc_text} | "
+            f"bloom_level: {a.bloom} | marks: {a.marks} | "
+            f"ask for: {asked} | allowed verbs: {verbs or '(any)'}")
     table = "\n".join(rows)
     level_note = ""
     if str(tool.knqf_level).strip() in CONSTRUCTED_RESPONSE_ONLY_LEVELS:
@@ -629,6 +651,25 @@ def _text(value) -> str:
     return str(value).strip() if isinstance(value, (str, int, float)) else ""
 
 
+_RE_LABEL = re.compile(r"^\s*(?:pc|p\.?c\.?|element|el|item|no|number)\s*"
+                       r"[:.\-]?\s*", re.I)
+
+
+def _number(value) -> str:
+    """A PC or element number with any label the model repeated stripped off.
+
+    The allocation table labels its columns, and a model told to echo a value
+    back "verbatim" may echo the label with it - a live paper came back with
+    every pc_number as "PC 1.1", which read as six items assessing nothing and
+    three performance criteria never assessed. The label is not part of the
+    number, and stripping it is not a correction: no wording changes and no
+    fault is hidden, because an item genuinely tagged to the wrong PC still
+    fails the coverage check afterwards.
+    """
+    text = _RE_LABEL.sub("", _text(value))
+    return text.strip(" :.-")
+
+
 def _int(value, default: int = 0) -> int:
     """A mark, however the model spelled it, or the default.
 
@@ -696,9 +737,9 @@ def _items(raw, tool: AssessmentTool) -> List[Item]:
         fmt = _text(row.get("response_type")) or "short_response"
         out.append(Item(
             number=len(out) + 1,
-            element_number=(_text(row.get("element_number"))
+            element_number=(_number(row.get("element_number"))
                             or (fallback.element_number if fallback else "")),
-            pc_number=(_text(row.get("pc_number"))
+            pc_number=(_number(row.get("pc_number"))
                        or (fallback.pc_number if fallback else "")),
             bloom=(_text(row.get("bloom_level")).lower()
                    or (fallback.bloom if fallback else "")),

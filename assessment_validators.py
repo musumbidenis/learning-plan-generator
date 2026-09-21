@@ -60,13 +60,15 @@ PRACTICAL_ITEM_COUNT = "practical_item_count"
 ITEM_NOT_PC = "item_not_pc"
 FORMAT_COMPLIANCE = "format_compliance"
 MARKS_FIT_VERB = "marks_fit_verb"
+PLACEHOLDER_KEY = "placeholder_key"
 
 # The five a model can be asked to fix by rewriting the offending item. The
 # other six are arithmetic, coverage or allocation: rewording cannot change
 # them - an item too small for its own Bloom level needs more marks, not
 # better words.
 REPAIRABLE_CHECKS = frozenset({BLOOM_CONFORMANCE, ITEM_INDEPENDENCE, STEM_CLUE,
-                               ITEM_NOT_PC, FORMAT_COMPLIANCE})
+                               ITEM_NOT_PC, FORMAT_COMPLIANCE,
+                               PLACEHOLDER_KEY})
 
 
 @dataclass(eq=False)
@@ -428,9 +430,16 @@ def _check_bloom_completeness(tool: AssessmentTool) -> List[AssessmentProblem]:
 
     Not repairable, and not the model's fault when it fires: the levels are
     fixed in the allocation before a word is written, so a paper that misses
-    one was allocated that way. The fix is to allocate again (splitting a
-    well-funded PC across two levels is what `assessment_allocation` does for
-    exactly this), not to reword an item.
+    one was allocated that way. The fix is to allocate again - more marks, or
+    more performance criteria - not to reword an item.
+
+    Reported, but it does not block. A small CAT often cannot reach all six
+    AND keep every question answerable: 30 marks over three elements leaves
+    EVALUATING about one mark in each, too little to carry a question, so the
+    level is dropped rather than an unanswerable item written. Withholding the
+    documents there would withhold a sound paper over a shape the trainer
+    chose and can see, and the advice - allocate again - is something they can
+    act on with the paper in hand.
     """
     if tool.is_practical:
         return []                      # a checklist item has no Bloom level
@@ -440,8 +449,13 @@ def _check_bloom_completeness(tool: AssessmentTool) -> List[AssessmentProblem]:
         return []
     return [_problem(
         BLOOM_COMPLETENESS,
-        f"the paper reaches no item at: {', '.join(missing)}; a CAT is "
-        f"expected to span all six levels. Re-allocate rather than reword.")]
+        f"the paper reaches no item at: {', '.join(missing)}. A CAT is "
+        f"expected to span all six levels; this one cannot at "
+        f"{tool.cat.total_marks} marks over "
+        f"{len({a.element_number for a in tool.allocations})} element(s). "
+        f"Raise the total marks or select more performance criteria to reach "
+        f"{'them' if len(missing) > 1 else 'it'}.",
+        blocks=False)]
 
 
 def _check_independence(tool: AssessmentTool) -> List[AssessmentProblem]:
@@ -576,10 +590,55 @@ def _check_marks_fit_verb(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+# A marking point that is a slot rather than an answer. Seen live: "Threat
+# classified as ___", "Way 1 ___", "Measure 3". Three or more underscores, or
+# a bare noun-and-number with nothing else in it.
+_RE_BLANK = re.compile(r"_{3,}|\.{5,}")
+# The NUMBER is what makes it a slot. Without it these are ordinary one-word
+# answers - "Threat" is a correct response to "list the terms defined in this
+# unit", and flagging it told a trainer to rewrite a marking point that was
+# right. Only "Threat 1", "Way 2", "Step 3" name a position rather than a
+# thing.
+_RE_SLOT = re.compile(
+    r"^\s*(?:the\s+)?(?:point|step|way|item|measure|reason|factor|type|"
+    r"indicator|answer|method|example|stage|principle|control|threat|"
+    r"response|element|option|part)\s*\d+\s*[:\-.]?\s*\W*$", re.I)
+
+
+def is_placeholder(text: str) -> bool:
+    """A marking point that names a slot instead of stating the answer."""
+    body = (text or "").strip()
+    return bool(body) and bool(_RE_BLANK.search(body) or _RE_SLOT.match(body))
+
+
+def _check_placeholder_key(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """12. Every marking point states an answer, not a blank to fill in.
+
+    The marking scheme is what an assessor holds while marking a script. A
+    scheme of "Way 1 ___", "Way 2 ___" is not one, and a paper carrying it is
+    unusable however good its questions read. Caught rather than trusted
+    because the standing instructions forbid it and a live generation did it
+    anyway, on five items out of six.
+    """
+    out: List[AssessmentProblem] = []
+    for item in tool.items:
+        blanks = [p.text for p in item.marking_scheme if is_placeholder(p.text)]
+        if not blanks:
+            continue
+        out.append(_problem(
+            PLACEHOLDER_KEY,
+            f"item {item.number} has {len(blanks)} marking point(s) that name "
+            f"a blank instead of stating the answer (e.g. \"{blanks[0]}\"); "
+            f"write what the assessor should look for",
+            where=f"item {item.number}", item_number=item.number))
+    return out
+
+
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_bloom_completeness,
            _check_independence, _check_stem_clues, _check_practical_count,
-           _check_item_not_pc, _check_format, _check_marks_fit_verb)
+           _check_item_not_pc, _check_format, _check_marks_fit_verb,
+           _check_placeholder_key)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:
@@ -614,6 +673,7 @@ RULES
 - Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item.
 - Keep the item on its own performance criterion, and assess only what the CONTENT TAUGHT covers. Never introduce equipment, standards, terminology or procedures that are not in it.
 - Keep the stem concise - normally one sentence - and state exactly how many responses are wanted.
+- Every marking point states the answer the assessor looks for. Never a blank, a numbered slot ("Way 1", "Step 2"), or "1 mark for each correct answer".
 - Do not add a scenario to connect the item to any other item.
 
 Return ONE JSON object and nothing else."""

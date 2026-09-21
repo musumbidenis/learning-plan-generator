@@ -313,8 +313,25 @@ def test_a_paper_that_misses_a_level_is_caught():
     problems = [p for p in av.validate(tool)
                 if p.check == av.BLOOM_COMPLETENESS]
     assert problems and CREATING in problems[0].message
-    # an allocation decision, so not something a rewrite can put right
-    assert not problems[0].repairable and problems[0].blocking
+    # An allocation decision, so no rewrite puts it right - but it does not
+    # withhold the documents either. A small CAT often cannot reach all six
+    # levels AND keep every question answerable, and the trainer can see the
+    # shape they chose and act on the advice with the paper in hand.
+    assert not problems[0].repairable
+    assert not problems[0].blocking
+
+
+def test_a_missed_level_says_what_to_change():
+    """"Re-allocate" is not advice anyone can act on. The numbers that caused
+    it are."""
+    tool = _written()
+    tool.items[5].bloom = EVALUATING
+
+    message = [p for p in av.validate(tool)
+               if p.check == av.BLOOM_COMPLETENESS][0].message
+
+    assert "20 marks" in message
+    assert "select more performance criteria" in message
 
 
 def test_a_practical_tool_is_not_asked_to_span_the_levels():
@@ -797,3 +814,52 @@ def test_a_single_mark_at_knowledge_is_fine():
 def test_the_clean_paper_says_nothing_about_marks_and_verbs():
     assert [p for p in av.validate(_written())
             if p.check == av.MARKS_FIT_VERB] == []
+
+
+# --------------------------------------------------------------------------- #
+# 12. A marking point states an answer, not a blank
+# --------------------------------------------------------------------------- #
+def test_a_marking_scheme_of_blanks_is_caught():
+    """Live fault: five items out of six came back with schemes like
+    "Threat classified as ___" and "Way 1 ___". The standing instructions
+    forbid it and the model did it anyway, so it is checked."""
+    tool = _written()
+    tool.items[0].marking_scheme = [MarkingPoint(text="Way 1 ___", marks=1),
+                                    MarkingPoint(text="Way 2 ___", marks=1),
+                                    MarkingPoint(text="Way 3 ___", marks=1),
+                                    MarkingPoint(text="Way 4 ___", marks=1)]
+
+    found = [p for p in av.validate(tool) if p.check == av.PLACEHOLDER_KEY]
+
+    assert [p.item_number for p in found] == [1]
+    assert found[0].repairable          # rewriting the scheme clears it
+
+
+def test_a_numbered_slot_with_no_answer_in_it_counts_as_a_blank():
+    assert av.is_placeholder("Measure 3")
+    assert av.is_placeholder("Step 2")
+    assert av.is_placeholder("Threat classified as ___")
+    assert av.is_placeholder("Point 1:")
+
+
+def test_a_one_word_answer_is_not_mistaken_for_a_slot():
+    """Caught live: a paper listing the terms taught in the unit had "Threat"
+    as a marking point, and the check told the trainer to rewrite it. The
+    number is what makes a slot, not the noun."""
+    assert not av.is_placeholder("Threat")
+    assert not av.is_placeholder("Vulnerability")
+    assert not av.is_placeholder("Risk")
+    assert av.is_placeholder("Threat 1")
+
+
+def test_a_real_marking_point_is_left_alone():
+    assert not av.is_placeholder(
+        "Trojan - malware disguised as legitimate software")
+    assert not av.is_placeholder("Likelihood rated against the risk matrix")
+    assert not av.is_placeholder("Step 2 of the drain is done with the engine "
+                                 "warm so the debris carries out")
+
+
+def test_the_clean_paper_has_no_blanks_in_its_schemes():
+    assert [p for p in av.validate(_written())
+            if p.check == av.PLACEHOLDER_KEY] == []

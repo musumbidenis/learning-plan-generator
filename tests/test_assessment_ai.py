@@ -211,7 +211,7 @@ def test_the_data_half_carries_data_and_no_standing_instructions(monkeypatch):
     _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
     prompt = rec.calls[0]["prompt"]
     assert "Perform Basic Vehicle Servicing" in prompt
-    assert "PC 2.4" in prompt and "marks: 2" in prompt
+    assert "pc_number: 2.4" in prompt and "marks: 2" in prompt
     # The rules are in the system half; the data half must not repeat them.
     for rule in ("Never invent", "MARKING SCHEME", "TERMINOLOGY"):
         assert rule not in prompt
@@ -223,7 +223,8 @@ def test_the_allowed_verbs_come_from_the_verb_bank(monkeypatch):
     for verb in VERB_BANK[CREATING]:
         assert verb in prompt
     # and each row is offered only its own level's bank
-    creating_row = [ln for ln in prompt.splitlines() if "PC 2.4" in ln][0]
+    creating_row = [ln for ln in prompt.splitlines()
+                    if "pc_number: 2.4" in ln][0]
     assert VERB_BANK[KNOWLEDGE][0] not in creating_row
 
 
@@ -476,3 +477,47 @@ def test_the_paper_is_not_told_to_invent_a_common_scenario():
     assert "Do not create one common scenario for the whole CAT" in \
         assessment_ai.AS_WRITTEN_SYSTEM
     assert "scenario" not in assessment_ai.build_written_prompt(_tool())
+
+
+# --------------------------------------------------------------------------- #
+# Numbers the model echoed a label onto
+# --------------------------------------------------------------------------- #
+def test_a_pc_number_echoed_with_its_label_is_read_as_a_number(monkeypatch):
+    """Live fault: every pc_number came back as "PC 1.1" because the
+    allocation row said "PC 1.1: ...". Six items read as assessing nothing and
+    three performance criteria read as never assessed."""
+    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
+    payload["items"][0]["pc_number"] = "PC 1.1"
+    payload["items"][1]["element_number"] = "element 1"
+    tool, _ = _run(monkeypatch, _tool(), payload)
+
+    assert tool.items[0].pc_number == "1.1"
+    assert tool.items[1].element_number == "1"
+
+
+def test_a_number_that_was_never_labelled_is_untouched(monkeypatch):
+    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+
+    assert [i.pc_number for i in tool.items] == ["1.1", "1.2"]
+
+
+def test_the_row_labels_match_the_field_names_it_asks_to_be_echoed():
+    """Section 3 says echo these back verbatim, so the row labels each value
+    with the JSON field it belongs in - otherwise "verbatim" includes the
+    label."""
+    prompt = assessment_ai.build_written_prompt(_tool())
+
+    for field in ("element_number:", "pc_number:", "bloom_level:", "marks:"):
+        assert field in prompt
+
+
+def test_each_row_says_how_many_responses_to_ask_for():
+    """7 marks at understanding is THREE things, not seven - the arithmetic is
+    done here rather than left to the model, which got it wrong live."""
+    tool = _tool()
+    tool.allocations[0].bloom = UNDERSTANDING
+    tool.allocations[0].marks = 7
+    row = [ln for ln in assessment_ai.build_written_prompt(tool).splitlines()
+           if "pc_number: 1.1" in ln][0]
+
+    assert "ask for: 3" in row
