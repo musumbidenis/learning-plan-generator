@@ -183,7 +183,11 @@ def _header_pairs(tool: AssessmentTool) -> List[Tuple[str, str]]:
     """The six identity fields, in the order the header block prints them."""
     cat = tool.cat
     return [
-        ("Unit of Competence", tool.unit_title),
+        # "Competency", not "Competence": every published CDACC assessment
+        # tool spells it that way. The Learning Plan and Session Plan keep
+        # "Competence" because that is what the RVNP/KTTC template they copy
+        # actually says, and `learning_plan_parser` reads that label back.
+        ("Unit of Competency", tool.unit_title),
         ("ISCED Unit Code", tool.isced_code),
         ("TVET CDACC Unit Code", tool.cdacc_code),
         ("Assessment", cat.label),
