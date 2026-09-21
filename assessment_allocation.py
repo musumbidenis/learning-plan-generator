@@ -27,7 +27,8 @@ from typing import Dict, List, Sequence, Tuple
 
 from assessment_config import (MAX_TOTAL_MARKS, MIN_MARKS_PER_PC,
                                SPLIT_ITEM_THRESHOLD, VIABLE_MARKS_PER_PC,
-                               marks_per_response, profile_for)
+                               MAX_RESPONSES_PER_ITEM, marks_per_response,
+                               natural_level, profile_for)
 from assessment_models import (BLOOM_LEVELS, Allocation, CatDefinition,
                                Problem, UnitWeighting, WeightedPC)
 
@@ -410,27 +411,89 @@ def assign_bloom(allocations: List[Allocation], knqf_level: str,
                  total_marks: int) -> List[Allocation]:
     """Give every allocated mark a Bloom level, without moving any of them.
 
-    Both margins of the grid are fixed before a single PC is placed: the rows
-    are the marks `allocate` already gave each element, the columns are the
-    KNQF level's profile integerised by largest remainder so that the six of
-    them still total the paper. Only then are the PCs fitted into the cells -
-    which is why the table of specifications adds up along its rows and down
-    its columns, and why no PC's total changes to make it do so.
+    THE CRITERION DECIDES. A performance criterion states its own cognitive
+    demand in its own verb - "Tools and equipment are identified", "Faults are
+    diagnosed", "Maintenance schedule is developed" - and that is the level
+    the item is written at. This used to be settled the other way round: a
+    target profile was integerised first and each PC was fitted into whatever
+    cell was left, which is how a criterion about identifying tools ended up
+    demanding that a candidate design something. Forcing a level onto a
+    criterion that does not ask for it does not make a paper harder, it makes
+    it unanswerable.
 
-    `total_marks` sizes the profile. When it disagrees with what the
-    allocations actually carry, the allocations win - a mark that exists has to
-    appear somewhere in the grid - and the profile is sized to them instead.
+    A criterion whose verb is in no bank says nothing about its own level, and
+    only those are placed by the profile - across the marks they carry, not
+    across the paper, so a level the profile wants is reached only if a free
+    criterion can honestly carry it.
 
-    Returned in the order given, a split PC's two entries adjacent and in
-    taxonomy order. Every entry carries a level, and the marks still total what
-    came in.
+    Nothing here is expected to span the six levels. A CAT assesses the
+    criteria it assesses, and if all of them are identification criteria then
+    it is an identification paper. `total_marks` is kept in the signature
+    because callers pass it, and is used only to size the profile for the free
+    criteria.
+
+    Returned in the order given, and the marks still total what came in.
     """
     if not allocations:
         return []
 
+    spoken: List[Allocation] = []
+    silent: List[Allocation] = []
+    for a in allocations:
+        (spoken if natural_level(a.pc_text) else silent).append(a)
+
+    placed: Dict[int, List[Allocation]] = {}
+    for a in spoken:
+        placed[id(a)] = _sized(a, natural_level(a.pc_text))
+    if silent:
+        for a, entries in _by_profile(silent, knqf_level).items():
+            placed[a] = entries
+    return [entry for a in allocations for entry in placed[id(a)]]
+
+
+def _sized(a: Allocation, bloom: str) -> List[Allocation]:
+    """One criterion as however many questions its marks can honestly fill.
+
+    A criterion's level is settled by its own verb, so splitting it can no
+    longer be about reaching a different level - both halves sit at the same
+    one. It is about size. A KNOWLEDGE criterion holding twelve marks buys one
+    mark a response, and "List TWELVE ICT security threats" is a list-writing
+    exercise rather than an assessment item; published papers ask for three to
+    five. So it becomes two questions of six marks, or three of four, until no
+    question asks for more than MAX_RESPONSES_PER_ITEM.
+
+    The marks are split by the same largest-remainder rule as everything else,
+    so the criterion's total is untouched and the paper still adds up.
+    """
+    per_response = marks_per_response(bloom)
+    responses = a.marks / per_response if per_response else a.marks
+    pieces = max(1, math.ceil(responses / MAX_RESPONSES_PER_ITEM))
+    if pieces == 1:
+        return [_with_bloom(a, bloom, a.marks)]
+    even = [Fraction(a.marks, pieces)] * pieces
+    shares = _largest_remainder(even, a.marks, list(range(pieces)))
+    return [_with_bloom(a, bloom, share) for share in shares if share > 0]
+
+
+def _with_bloom(a: Allocation, bloom: str, marks: int) -> Allocation:
+    return Allocation(element_number=a.element_number,
+                      element_title=a.element_title, pc_number=a.pc_number,
+                      pc_text=a.pc_text, weight=a.weight, marks=marks,
+                      bloom=bloom)
+
+
+def _by_profile(allocations: List[Allocation],
+                knqf_level: str) -> Dict[int, List[Allocation]]:
+    """Place the criteria that do not name a level, using the KNQF profile.
+
+    The old whole-paper machinery, now working only on the marks these
+    criteria carry. Both margins of the grid are still fixed before a PC is
+    placed - rows are each element's marks, columns the profile integerised by
+    largest remainder - so the table of specifications still adds up along its
+    rows and down its columns.
+    """
     carried = sum(a.marks for a in allocations)
-    asked = int(total_marks)
-    columns = _column_targets(knqf_level, asked if asked == carried else carried)
+    columns = _column_targets(knqf_level, carried)
 
     order: List[str] = []
     rows: Dict[str, int] = {}
@@ -442,11 +505,22 @@ def assign_bloom(allocations: List[Allocation], knqf_level: str,
 
     grid = _fit_grid([rows[e] for e in order], columns)
 
-    out: List[Allocation] = []
+    out: Dict[int, List[Allocation]] = {}
     for index, element in enumerate(order):
         demand = _respect_minimums(
             _largest_remainder(grid[index], rows[element],
                                list(range(len(BLOOM_LEVELS)))))
-        out.extend(_place([a for a in allocations
-                           if a.element_number == element], demand))
+        mine = [a for a in allocations if a.element_number == element]
+        for a, entries in zip(mine, _place_grouped(mine, demand)):
+            out[id(a)] = entries
     return out
+
+
+def _place_grouped(allocations: List[Allocation],
+                   demand: List[int]) -> List[List[Allocation]]:
+    """`_place`'s result, kept grouped by the PC each entry came from."""
+    flat = _place(allocations, demand)
+    grouped: Dict[str, List[Allocation]] = {}
+    for entry in flat:
+        grouped.setdefault(entry.pc_number, []).append(entry)
+    return [grouped.get(a.pc_number, []) for a in allocations]

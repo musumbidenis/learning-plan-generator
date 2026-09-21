@@ -230,6 +230,8 @@ Do NOT use:
 
 ## 5. BLOOM LEVEL CONTROL
 
+Each allocation row's Bloom level comes from the performance criterion's own wording - a criterion reading "Tools and equipment are identified" is a KNOWLEDGE criterion - so the level already fits what is being assessed. Write to it; do not reach above or below it to make the paper look more demanding.
+
 The first word of every item must be an allowed verb for the Bloom level specified in that allocation row.
 
 - The lead verb must be the first word of the stem.

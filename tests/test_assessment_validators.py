@@ -1,4 +1,4 @@
-"""The eleven checks, in both directions, and the bounded repair loop.
+"""The twelve checks, in both directions, and the bounded repair loop.
 
 ZERO real API calls: the repair pass's `_chat_json` is monkeypatched and the
 HTTP layer under it is stubbed as well, so a missed patch fails loudly rather
@@ -307,35 +307,24 @@ def test_an_item_the_model_numbered_itself_still_finds_its_verb():
 # --------------------------------------------------------------------------- #
 # 5 Bloom completeness
 # --------------------------------------------------------------------------- #
-def test_a_paper_that_misses_a_level_is_caught():
+def test_no_paper_is_required_to_span_the_six_levels():
+    """Dropped on instruction. A CAT assesses the criteria it assesses, and a
+    unit whose criteria are all identification criteria yields an
+    identification paper - demanding all six forced a level onto a criterion
+    that did not ask for one."""
     tool = _written()
-    tool.items[5].bloom = EVALUATING
-    problems = [p for p in av.validate(tool)
-                if p.check == av.BLOOM_COMPLETENESS]
-    assert problems and CREATING in problems[0].message
-    # An allocation decision, so no rewrite puts it right - but it does not
-    # withhold the documents either. A small CAT often cannot reach all six
-    # levels AND keep every question answerable, and the trainer can see the
-    # shape they chose and act on the advice with the paper in hand.
-    assert not problems[0].repairable
-    assert not problems[0].blocking
+    for item in tool.items:
+        item.bloom = KNOWLEDGE
+        item.stem = "State FOUR tools issued for the service."
+
+    assert all(getattr(p, "check", "") != "bloom_completeness"
+               for p in av.validate(tool))
 
 
-def test_a_missed_level_says_what_to_change():
-    """"Re-allocate" is not advice anyone can act on. The numbers that caused
-    it are."""
-    tool = _written()
-    tool.items[5].bloom = EVALUATING
-
-    message = [p for p in av.validate(tool)
-               if p.check == av.BLOOM_COMPLETENESS][0].message
-
-    assert "20 marks" in message
-    assert "select more performance criteria" in message
-
-
-def test_a_practical_tool_is_not_asked_to_span_the_levels():
-    assert av.BLOOM_COMPLETENESS not in _checks(av.validate(_practical()))
+def test_a_practical_tool_has_no_bloom_levels_to_answer_for():
+    """A checklist item is a thing the assessor watches, not a cognitive
+    demand, so no level is read off it and none is required of it."""
+    assert all(c.bloom == "" for c in _practical().allocations)
 
 
 # --------------------------------------------------------------------------- #

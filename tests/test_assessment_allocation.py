@@ -510,3 +510,104 @@ def test_an_unwritable_item_is_reported_before_anything_is_generated():
 
 def test_a_sound_distribution_reports_nothing():
     assert alloc.check_items(_bloomed(THEORY, 50)) == []
+
+
+# --------------------------------------------------------------------------- #
+# The criterion decides its own level
+# --------------------------------------------------------------------------- #
+def _alloc(pc_text, marks=6, pc="1.1", element="1"):
+    from assessment_models import Allocation
+    return Allocation(element_number=element, element_title="E", pc_number=pc,
+                      pc_text=pc_text, weight=marks, marks=marks)
+
+
+def test_a_criterion_is_assessed_at_the_level_its_own_verb_asks_for():
+    """"Tools and equipment are identified" is a KNOWLEDGE criterion. It
+    cannot be assessed at CREATING however much a target profile would like
+    it to be."""
+    out = alloc.assign_bloom(
+        [_alloc("Tools and equipment are identified as per procedure"),
+         _alloc("Faults are diagnosed based on standard procedures", pc="1.2"),
+         _alloc("A maintenance schedule is developed as per the manual",
+                pc="1.3")], "6", 18)
+
+    levels = {}
+    for a in out:
+        levels.setdefault(a.pc_number, set()).add(a.bloom)
+
+    assert levels == {"1.1": {"knowledge"}, "1.2": {"analysing"},
+                      "1.3": {"creating"}}
+
+
+def test_a_criterion_too_big_for_one_question_becomes_several_at_that_level():
+    """Live: a 12-mark KNOWLEDGE criterion produced "List TWELVE ICT security
+    threats". Splitting it can no longer be about reaching another level, so
+    it is about size - and both halves stay at the criterion's own level."""
+    out = alloc.assign_bloom(
+        [_alloc("Threats are identified as per policy", 12, "1.1")], "6", 12)
+
+    assert len(out) == 3
+    assert {a.bloom for a in out} == {"knowledge"}
+    assert [a.marks for a in out] == [4, 4, 4]
+    assert sum(a.marks for a in out) == 12
+
+
+def test_no_question_asks_for_more_responses_than_a_paper_ever_does():
+    from assessment_config import MAX_RESPONSES_PER_ITEM, marks_per_response
+    for marks in range(1, 41):
+        out = alloc.assign_bloom(
+            [_alloc("Threats are identified as per policy", marks, "1.1")],
+            "6", marks)
+        for a in out:
+            asked = a.marks / marks_per_response(a.bloom)
+            assert asked <= MAX_RESPONSES_PER_ITEM, (marks, a.marks, asked)
+        assert sum(a.marks for a in out) == marks
+
+
+def test_a_criterion_that_names_no_level_is_placed_by_the_profile():
+    """"Access controls are configured" uses a verb from no bank, so nothing
+    in its wording objects to wherever the paper needs it."""
+    out = alloc.assign_bloom(
+        [_alloc("Access controls are configured as per the security plan")],
+        "6", 6)
+
+    assert len(out) == 1
+    assert out[0].bloom in BLOOM_LEVELS
+
+
+def test_a_paper_of_identification_criteria_stays_at_knowledge():
+    """The point of the change: it is no longer stretched to span six levels
+    it has no criteria for."""
+    out = alloc.assign_bloom(
+        [_alloc("Tools are identified as per procedure", pc="1.1"),
+         _alloc("Materials are identified as per the specification", pc="1.2"),
+         _alloc("Hazards are identified as per the policy", pc="1.3")],
+        "6", 18)
+
+    assert {a.bloom for a in out} == {"knowledge"}
+
+
+def test_the_marks_still_total_what_came_in():
+    given = [_alloc("Tools are identified as per procedure", 7, "1.1"),
+             _alloc("Access controls are configured", 5, "1.2"),
+             _alloc("Faults are diagnosed by procedure", 9, "2.1", "2")]
+
+    out = alloc.assign_bloom(given, "6", 21)
+
+    assert sum(a.marks for a in out) == 21
+    by_pc = {}
+    for a in out:
+        by_pc[a.pc_number] = by_pc.get(a.pc_number, 0) + a.marks
+    assert by_pc == {"1.1": 7, "1.2": 5, "2.1": 9}
+
+
+def test_every_entry_still_carries_a_level():
+    out = alloc.assign_bloom(
+        [_alloc("Work area is prepared as per requirements", 4, "1.1"),
+         _alloc("Tools are identified as per procedure", 4, "1.2")], "6", 8)
+
+    assert all(a.bloom in BLOOM_LEVELS for a in out)
+
+
+def test_an_empty_allocation_is_not_an_error():
+    assert alloc.assign_bloom([], "6", 0) == []

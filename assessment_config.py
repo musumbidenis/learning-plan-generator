@@ -12,6 +12,7 @@ lists put it under ANALYSING. The guideline wins. Do not "fix" it.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List
 
 from assessment_models import (ANALYSING, APPLYING, BLOOM_LEVELS, CREATING,
@@ -57,6 +58,53 @@ VERB_BANK: Dict[str, List[str]] = {
     CREATING: ["design", "develop", "formulate", "compose", "construct",
                "propose"],
 }
+
+
+def _participles(verb: str) -> set:
+    """The forms a verb takes in a performance criterion.
+
+    CDACC writes its criteria in the passive - "Tools and equipment ARE
+    IDENTIFIED according to workplace procedures" - so the bank's infinitives
+    never appear as written. The forms are generated from the bank rather than
+    listed in a second table, because a second table is a second thing to keep
+    in step with the first.
+    """
+    forms = {verb, verb + "ed", verb + "d"}
+    if verb.endswith("y"):
+        forms.add(verb[:-1] + "ied")
+    if verb.endswith("e"):
+        forms.add(verb + "d")
+    if re.match(r".*[aeiou][bcdfgklmnprstvz]$", verb):
+        forms.add(verb + verb[-1] + "ed")     # plan -> planned
+    return forms
+
+
+_NATURAL: Dict[str, str] = {}
+for _level in BLOOM_LEVELS:
+    for _verb in VERB_BANK[_level]:
+        for _form in _participles(_verb):
+            _NATURAL.setdefault(_form, _level)
+
+
+def natural_level(text: str) -> str:
+    """The Bloom level a performance criterion asks for, or '' if it is silent.
+
+    A criterion reading "Tools and equipment are identified according to
+    workplace procedures" is a KNOWLEDGE criterion. It cannot be assessed at
+    CREATING however much a target distribution would like it to be, and a
+    paper that tries produces a question nobody can answer honestly.
+
+    The first bank verb found wins - a criterion states its demand once, at
+    the front. A criterion using a verb from no bank ("Access controls are
+    CONFIGURED", "Work area is PREPARED") returns '', and the caller is free
+    to place it wherever the paper needs it, because nothing in its wording
+    says otherwise.
+    """
+    for word in re.findall(r"[a-z]+", (text or "").lower()):
+        level = _NATURAL.get(word)
+        if level:
+            return level
+    return ""
 
 
 def level_of_verb(verb: str) -> str:
@@ -106,9 +154,16 @@ def marks_per_response(level: str) -> int:
 # Thresholds
 # --------------------------------------------------------------------------- #
 # A PC allocated more than this may be split into two items at different
-# levels, which is how a paper reaches all six without disturbing any PC's
-# total.
+# levels. Used only for criteria whose own wording names no level - the rest
+# are split for size alone, by MAX_RESPONSES_PER_ITEM.
 SPLIT_ITEM_THRESHOLD = 5
+
+# The most responses one question may ask for. Published CDACC papers sit at
+# three to five - "State FOUR methods", "Discuss FIVE factors" - and a
+# question asking for twelve is a list-writing exercise, not an assessment
+# item. A criterion carrying more marks than this allows is split into as many
+# questions as it needs, all at its own level.
+MAX_RESPONSES_PER_ITEM = 5
 
 # Marks per selected PC. Below the floor a PC allocates to zero and cannot be
 # assessed at all; below the viable figure every PC gets one mark, which forces

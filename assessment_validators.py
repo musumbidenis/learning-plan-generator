@@ -1,4 +1,4 @@
-"""The eleven checks a generated tool has to pass, and one repair pass.
+"""The twelve checks a generated tool has to pass, and one repair pass.
 
 The model writes prose under tight constraints and mostly holds to them; these
 checks are for the times it does not. They fall into two kinds, and the
@@ -6,9 +6,9 @@ difference is the whole design of this file:
 
     NOT REPAIRABLE  the paper is wrong in a way no rewording can fix - a PC
                     that was never assessed, an item written to the wrong
-                    marks, a total that does not reconcile, a level the
-                    allocation could never reach, an item worth less than one
-                    answer at its own level, a checklist of the wrong length.
+                    marks, a total that does not reconcile, an item
+                    worth less than one answer at its own level, a checklist
+                    of the wrong length.
                     The fix is upstream (allocate again) or by hand.
 
     REPAIRABLE      the wording is wrong - the lead verb sits in another
@@ -53,7 +53,6 @@ PC_COVERAGE = "pc_coverage"
 MARK_FIDELITY = "mark_fidelity"
 TOTAL_RECONCILIATION = "total_reconciliation"
 BLOOM_CONFORMANCE = "bloom_conformance"
-BLOOM_COMPLETENESS = "bloom_completeness"
 ITEM_INDEPENDENCE = "item_independence"
 STEM_CLUE = "stem_clue"
 PRACTICAL_ITEM_COUNT = "practical_item_count"
@@ -426,39 +425,6 @@ def _check_bloom_conformance(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
-def _check_bloom_completeness(tool: AssessmentTool) -> List[AssessmentProblem]:
-    """5. All six levels appear on the paper.
-
-    Not repairable, and not the model's fault when it fires: the levels are
-    fixed in the allocation before a word is written, so a paper that misses
-    one was allocated that way. The fix is to allocate again - more marks, or
-    more performance criteria - not to reword an item.
-
-    Reported, but it does not block. A small CAT often cannot reach all six
-    AND keep every question answerable: 30 marks over three elements leaves
-    EVALUATING about one mark in each, too little to carry a question, so the
-    level is dropped rather than an unanswerable item written. Withholding the
-    documents there would withhold a sound paper over a shape the trainer
-    chose and can see, and the advice - allocate again - is something they can
-    act on with the paper in hand.
-    """
-    if tool.is_practical:
-        return []                      # a checklist item has no Bloom level
-    present = {i.bloom for i in tool.items}
-    missing = [lv for lv in BLOOM_LEVELS if lv not in present]
-    if not missing:
-        return []
-    return [_problem(
-        BLOOM_COMPLETENESS,
-        f"the paper reaches no item at: {', '.join(missing)}. A CAT is "
-        f"expected to span all six levels; this one cannot at "
-        f"{tool.cat.total_marks} marks over "
-        f"{len({a.element_number for a in tool.allocations})} element(s). "
-        f"Raise the total marks or select more performance criteria to reach "
-        f"{'them' if len(missing) > 1 else 'it'}.",
-        blocks=False)]
-
-
 def _check_independence(tool: AssessmentTool) -> List[AssessmentProblem]:
     """6. No item's stem carries another item's marking key."""
     out: List[AssessmentProblem] = []
@@ -686,8 +652,7 @@ def _check_unfunded_items(tool: AssessmentTool) -> List[AssessmentProblem]:
 
 
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
-           _check_bloom_conformance, _check_bloom_completeness,
-           _check_independence, _check_stem_clues, _check_practical_count,
+           _check_bloom_conformance, _check_independence, _check_stem_clues, _check_practical_count,
            _check_item_not_pc, _check_format, _check_marks_fit_verb,
            _check_placeholder_key, _check_unfunded_items)
 
