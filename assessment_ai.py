@@ -490,7 +490,8 @@ THE ASK
   these belong to a syllabus, not to a question, and the candidate sitting the
   paper already knows which unit it is. They are also a claim that everything
   asked for was taught, which stops being true the moment you go deeper than
-  the syllabus line. Ask the question directly: "State FOUR types of malware.""""
+  the syllabus line. Ask the question directly - "State FOUR types of
+  malware." - and leave the course out of it."""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.
