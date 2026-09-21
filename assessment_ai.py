@@ -41,7 +41,8 @@ from assessment_allocation import _largest_remainder
 import assessment_content
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
-                               TEMPERATURE, VERB_BANK, marks_per_response)
+                               SHORT_RESPONSE, TEMPERATURE, VERB_BANK,
+                               marks_per_response, response_type)
 from assessment_models import (AssessmentTool, ChecklistItem, Item,
                                MarkingPoint, OralQuestion, TaskBrief)
 
@@ -164,21 +165,26 @@ You are GIVEN:
 
 Your task is to write the assessment items only. The CONTENT TAUGHT is the primary source for what may be assessed. The PERFORMANCE CRITERIA are used only as a link to the relevant competency and must not be treated as additional teaching content.
 
-## 1. CONTENT TAUGHT IS THE ASSESSMENT SOURCE
+## 1. CONTENT TAUGHT SETS THE SCOPE - WORK WITHIN IT, DO NOT RECITE IT
 
-Every question MUST be based on the CONTENT TAUGHT supplied for the unit.
+The CONTENT TAUGHT lists the sub-topics and key points the trainees actually covered. It says WHAT may be assessed. It is a syllabus outline, not a script, and a question that merely hands one of its lines back is a weak question: "State FOUR types of malware covered in the unit" tests whether a trainee can read a heading.
 
-- Assess only concepts, sub-topics, procedures, principles, examples, skills or key points that appear in the CONTENT TAUGHT.
-- Do not assess something simply because it appears in a performance criterion if it was not covered in the CONTENT TAUGHT.
-- Use the relevant performance criterion only to link the item to the competency being assessed.
-- Do not expand, reinterpret or add content from the performance criterion.
-- Do not use your own occupational knowledge to fill gaps in the taught content.
-- Do not introduce equipment, tools, materials, standards, legislation, formulae, software, suppliers, procedures or terminology that are not present in the CONTENT TAUGHT.
-- Where the taught content is limited, write a narrower question rather than introducing additional knowledge.
-- Where an element contains several taught sub-topics, spread the questions across the available content instead of repeatedly assessing the same point.
+WORK WITHIN THE SCOPE
+- Every question must sit on a sub-topic or key point that appears in the CONTENT TAUGHT. Do not assess a topic that is not there.
+- Where an element lists several taught sub-topics, spread the questions across them instead of assessing the same point twice.
+- Where a performance criterion names something the CONTENT TAUGHT does not cover at all, that criterion is still only the competency link. Do not assess the uncovered thing.
+
+GO DEEPER THAN THE LINE IN FRONT OF YOU
+- A key point reading "Types of malware: virus, worm, trojan" opens up how each one propagates, what damage it does, how it is detected, what is done about it and how they are told apart - not only a request to name them.
+- Bring in the real substance of the trade: the tools, standards, legislation, procedures, settings, figures and terminology a competent practitioner in Kenya would actually use on that topic, by name. A question on vulnerability scanning may name a real scanner and a real finding; a question on access control may cite the principle or standard by its proper name.
+- Draw on how this competency is really assessed - in the workplace, and in comparable TVET and industry assessments of the same skill - so the paper tests what an assessor in the field would test, at the depth they would test it.
+- Prefer a question that makes the candidate USE the taught content over one that asks them to repeat it.
+
+THE LINE YOU MAY NOT CROSS
+New DEPTH on a taught topic is wanted. A new TOPIC is not. Naming a real scanning tool under a taught sub-topic on vulnerability scanning is depth; setting a question on firewall rule syntax when the content never mentions firewalls is a question nobody was prepared for, and that is not a harder assessment, it is an invalid one. If you cannot find depth inside the taught scope, ask a narrower question on it rather than changing the subject.
 
 **Important distinction:**
-CONTENT TAUGHT = what the candidate can be assessed on.
+CONTENT TAUGHT = the scope of what the candidate can be assessed on, and the starting point for how deep to go.
 PERFORMANCE CRITERION = the competency link for the item.
 
 ## 2. MARKS ARE FIXED
@@ -371,8 +377,8 @@ Before returning the JSON, verify that:
 3. Every item's marks exactly match its allocation row.
 4. Every item's Bloom level exactly matches its allocation row.
 5. Every lead verb is allowed for the specified Bloom level.
-6. Every question is supported by the CONTENT TAUGHT.
-7. No question introduces content merely because it appears in the performance criterion.
+6. Every question sits on a sub-topic or key point in the CONTENT TAUGHT, and goes deeper than restating it.
+7. No question assesses a topic that is absent from the CONTENT TAUGHT, whether it came from a performance criterion or from your own knowledge.
 8. The performance criterion is used only as the competency link.
 9. Every response requirement is quantifiable.
 10. Every marking scheme matches the item's stated marks exactly.
@@ -408,8 +414,9 @@ THE SITUATION
 - ONE clause, or one short sentence. Never a paragraph, never a set of facts
   to be worked through, and never anything the candidate must read twice.
 - It sets up the question. It never contains, hints at or narrows the answer.
-- It is drawn from the CONTENT TAUGHT, and introduces no equipment, standard
-  or term the content does not have.
+- It sits on a taught topic, and may name real equipment, tools, standards,
+  places and figures a Kenyan workplace would really use on that topic - that
+  is what makes it a situation rather than a sentence.
 
 WHEN TO USE ONE
 Not on every question. A paper where every item opens with a little story
@@ -453,6 +460,18 @@ states the substance actually expected from the candidate. Write the answer.
   WRONG: "Way 1", "Step 2", "Measure 3"
   WRONG: "1 mark for each correct answer"
 
+This holds however compound the question is. An item asking for three types of
+malware with a propagation method and a detection technique for each needs
+three points naming three actual types with their actual propagation and
+detection - not "First malware type with propagation method and detection
+technique", which restates the question and tells an assessor nothing they did
+not already have.
+
+  Right: "Worm - spreads itself across the network without a host file;
+          detected by unexplained traffic between hosts"
+  WRONG: "First malware type with propagation method and detection technique"
+  WRONG: "First tool", "Second finding", "Third component"
+
 A marking scheme of blanks, numbered slots or placeholders is not a marking
 scheme. If you cannot name the answer from the CONTENT TAUGHT, ask a narrower
 question that you can.
@@ -465,7 +484,13 @@ THE ASK
 - Do NOT write the marks into the stem. The marks are printed beside every
   question by the document itself, and a stem carrying "(4 marks)" prints them
   twice.
-- Do not number the item in the stem. The numbering is printed for you."""
+- Do not number the item in the stem. The numbering is printed for you.
+- Do not mention the course inside the stem. "State FOUR types of malware
+  covered in the unit", "as taught in this unit", "from the content covered" -
+  these belong to a syllabus, not to a question, and the candidate sitting the
+  paper already knows which unit it is. They are also a claim that everything
+  asked for was taught, which stops being true the moment you go deeper than
+  the syllabus line. Ask the question directly: "State FOUR types of malware.""""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.
@@ -478,7 +503,11 @@ Give every item of evaluation a marks figure saying how much it is worth RELATIV
 Each item of evaluation traces to exactly ONE performance criterion. Give that one pc_number, as it is written in the list below and with no label in front of it.
 
 WHAT THE TASK MAY REQUIRE
-You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. The task you set, the tools you issue and the items of evaluation you write all come from that content. Do not require a technique, a machine, a material or a standard the trainees were never taught, and do not reach for your own knowledge of the trade to make the task look more professional: a task nobody was prepared for is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
+You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. It sets the SCOPE of the task: every skill the candidate is asked to perform sits on a topic that appears there.
+
+Within that scope, set a real job rather than a rehearsal of the syllabus. Use the tools, materials, settings, standards and quantities a Kenyan workplace would really use for that work, by name, and make the items of evaluation say what a competent assessor would actually watch for - the things that separate work done properly from work that merely got finished.
+
+The line is the same as the scope: more realism on a taught skill is wanted, a skill nobody covered is not. A task requiring a technique the trainees were never taught is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
 
 THE CANDIDATE'S TASK BRIEF
 One practical task, realistic for a Kenyan workplace, that can genuinely be performed in the time allowed with the tools listed. The brief gives:
@@ -532,8 +561,9 @@ def _content_block(tool: AssessmentTool) -> str:
     rendered = assessment_content.render(tool.content)
     if not rendered:
         return ""
-    return ("\n\nCONTENT TAUGHT, from the curriculum - the body of knowledge "
-            "this assessment draws on:\n" + rendered)
+    return ("\n\nCONTENT TAUGHT, from the curriculum - the scope of this "
+            "assessment. Work within these topics and go deeper than the "
+            "lines themselves:\n" + rendered)
 
 
 def _header(tool: AssessmentTool) -> str:
@@ -759,7 +789,7 @@ def _items(raw, tool: AssessmentTool) -> List[Item]:
         stem = _text(row.get("stem"))
         if not stem:
             runlog.warn(f"Assessment: item {i + 1} arrived with no stem")
-        fmt = _text(row.get("response_type")) or "short_response"
+        fmt = response_type(_text(row.get("response_type"))) or SHORT_RESPONSE
         out.append(Item(
             number=len(out) + 1,
             element_number=(_number(row.get("element_number"))

@@ -901,3 +901,54 @@ def test_a_written_paper_is_not_asked_about_items_of_evaluation():
 def test_a_fully_funded_checklist_says_nothing():
     assert [p for p in av.validate(_practical())
             if p.check == av.UNFUNDED_ITEM] == []
+
+
+def test_a_marking_point_that_numbers_itself_is_a_slot_too():
+    """Found live once the content stopped being a script: richer questions
+    brought richer-sounding slots. "First malware type with propagation method
+    and detection technique" restates the question and tells an assessor
+    nothing they did not already have."""
+    assert av.is_placeholder("First tool")
+    assert av.is_placeholder(
+        "First malware type with propagation method and detection technique")
+    assert av.is_placeholder("Third component and its support for least "
+                             "privilege")
+
+
+def test_an_answer_that_merely_starts_with_an_ordinal_is_left_alone():
+    """The ordinal is not the signal - the slot noun after it is."""
+    assert not av.is_placeholder("First aid kit is checked before the shift")
+    assert not av.is_placeholder(
+        "Worm - spreads itself across the network without a host file")
+
+
+# --------------------------------------------------------------------------- #
+# A synonym for the right format is not a wrong format
+# --------------------------------------------------------------------------- #
+def test_a_repair_saying_constructed_response_is_understood():
+    """Live: a repair came back with response_type "constructed_response",
+    the format check rejected it, and two passes could not converge because
+    nothing was actually wrong with the item."""
+    tool = _written()
+
+    av._apply_repair(tool, {"items": [{"number": 1, "stem": "State FOUR tools.",
+                                       "response_type": "constructed_response"}]},
+                     {1: ["wrong wording"]})
+
+    assert tool.items[0].item_format == "short_response"
+    assert [p for p in av.validate(tool)
+            if p.check == av.FORMAT_COMPLIANCE] == []
+
+
+def test_a_selected_response_format_is_never_quietly_relabelled():
+    """"multiple_choice" is not another word for the same thing, it is a
+    different thing. A model that wrote one must be reported."""
+    tool = _written()
+
+    av._apply_repair(tool, {"items": [{"number": 1, "stem": "State FOUR tools.",
+                                       "response_type": "multiple_choice"}]},
+                     {1: ["wrong wording"]})
+
+    assert tool.items[0].item_format == "multiple_choice"
+    assert [p for p in av.validate(tool)
+            if p.check == av.FORMAT_COMPLIANCE] != []

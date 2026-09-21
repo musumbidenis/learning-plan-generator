@@ -133,6 +133,42 @@ ITEM_INDEPENDENCE_OVERLAP = 0.60
 # formats are not used here.
 CONSTRUCTED_RESPONSE_ONLY_LEVELS = ("5", "6")
 
+# The two response types an item may carry, and the other words a model uses
+# for them. A repair pass came back saying "constructed_response", which is the
+# right KIND of item named in the wrong words - the format check then rejected
+# a perfectly good item, and two repair passes could not converge because
+# nothing was actually wrong with it.
+#
+# Only synonyms are mapped. "multiple_choice" is NOT a wrong word for the same
+# thing, it is a different thing, so it is left exactly as returned for the
+# format check to catch. A model that wrote a selected-response item must be
+# reported, never quietly relabelled.
+SHORT_RESPONSE = "short_response"
+EXTENDED_RESPONSE = "extended_response"
+
+_FORMAT_SYNONYMS: Dict[str, str] = {
+    "constructed_response": SHORT_RESPONSE,
+    "constructed response": SHORT_RESPONSE,
+    "short": SHORT_RESPONSE,
+    "short_answer": SHORT_RESPONSE,
+    "short answer": SHORT_RESPONSE,
+    "structured_response": SHORT_RESPONSE,
+    "structured": SHORT_RESPONSE,
+    "extended": EXTENDED_RESPONSE,
+    "extended_answer": EXTENDED_RESPONSE,
+    "essay": EXTENDED_RESPONSE,
+    "long_answer": EXTENDED_RESPONSE,
+    "long response": EXTENDED_RESPONSE,
+}
+
+
+def response_type(value: str) -> str:
+    """A response type as this module names it, where the model meant one."""
+    text = (value or "").strip().lower().replace("-", "_")
+    if text in (SHORT_RESPONSE, EXTENDED_RESPONSE):
+        return text
+    return _FORMAT_SYNONYMS.get(text, (value or "").strip())
+
 # How alike an element's title and a learning outcome's title must be before
 # the two are taken to be the same thing. The two documents are written by
 # different committees and the titles are usually identical, so a match this

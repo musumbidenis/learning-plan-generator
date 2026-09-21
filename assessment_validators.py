@@ -44,7 +44,7 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                ITEM_VS_PC_SIMILARITY, MAX_CHECKLIST_ITEMS,
                                MAX_REPAIR_PASSES, MIN_CHECKLIST_ITEMS,
                                REPAIR_TEMPERATURE, VERB_BANK, level_of_verb,
-                               marks_per_response)
+                               marks_per_response, response_type)
 from assessment_models import (BLOOM_LEVELS, AssessmentTool, ChecklistItem,
                                Item, MarkingPoint, Problem)
 
@@ -600,16 +600,34 @@ _RE_BLANK = re.compile(r"_{3,}|\.{5,}")
 # unit", and flagging it told a trainer to rewrite a marking point that was
 # right. Only "Threat 1", "Way 2", "Step 3" name a position rather than a
 # thing.
+_SLOT_NOUN = (r"point|step|way|item|measure|reason|factor|type|indicator|"
+              r"answer|method|example|stage|principle|control|threat|"
+              r"response|element|option|part|component|finding|scenario|"
+              r"feature|benefit|cause|effect|advantage|function|"
+              r"characteristic|tool")
+
 _RE_SLOT = re.compile(
-    r"^\s*(?:the\s+)?(?:point|step|way|item|measure|reason|factor|type|"
-    r"indicator|answer|method|example|stage|principle|control|threat|"
-    r"response|element|option|part)\s*\d+\s*[:\-.]?\s*\W*$", re.I)
+    r"^\s*(?:the\s+)?(?:" + _SLOT_NOUN + r")\s*\d+\s*[:\-.]?\s*\W*$", re.I)
+
+# The ordinal form, which the first pattern missed entirely: "First tool",
+# "Second malware type with propagation method and detection technique". A
+# real answer does not begin by numbering itself. One or two words are allowed
+# between the ordinal and the slot noun so "First malware type" is caught
+# while "First aid kit is checked before the shift" is not - 'kit' is not a
+# slot noun.
+_RE_ORDINAL_SLOT = re.compile(
+    r"^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|seventh|"
+    r"eighth|ninth|tenth)\s+(?:\w+\s+){0,2}(?:" + _SLOT_NOUN + r")\b",
+    re.I)
 
 
 def is_placeholder(text: str) -> bool:
     """A marking point that names a slot instead of stating the answer."""
     body = (text or "").strip()
-    return bool(body) and bool(_RE_BLANK.search(body) or _RE_SLOT.match(body))
+    if not body:
+        return False
+    return bool(_RE_BLANK.search(body) or _RE_SLOT.match(body)
+                or _RE_ORDINAL_SLOT.match(body))
 
 
 def _check_placeholder_key(tool: AssessmentTool) -> List[AssessmentProblem]:
@@ -703,7 +721,7 @@ RULES
 - The marking scheme's points still sum to the item's stated marks. Never restate, adjust or total a mark.
 - The corrected item must not repeat, hint at or give away the answer to any frozen item or to any other corrected item.
 - The corrected stem must not give away its own answer.
-- Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item.
+- Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item. Give response_type as exactly "short_response" or "extended_response".
 - Keep the item on its own performance criterion, and assess only what the CONTENT TAUGHT covers. Never introduce equipment, standards, terminology or procedures that are not in it.
 - Keep the stem concise - normally one sentence - and state exactly how many responses are wanted.
 - Every marking point states the answer the assessor looks for. Never a blank, a numbered slot ("Way 1", "Step 2"), or "1 mark for each correct answer".
@@ -954,7 +972,7 @@ def _apply_repair(tool: AssessmentTool, payload,
         item.stem = stem.strip()
         fmt = row.get("response_type")
         if isinstance(fmt, str) and fmt.strip():
-            item.item_format = fmt.strip()
+            item.item_format = response_type(fmt)
         scheme = _marking_points(row.get("marking_scheme"))
         if scheme:
             item.marking_scheme = scheme

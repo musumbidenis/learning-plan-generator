@@ -459,11 +459,33 @@ def test_a_unit_with_no_curriculum_read_still_gets_a_prompt():
     assert "MARK ALLOCATION TABLE" in prompt
 
 
-def test_the_standing_instructions_forbid_assessing_what_was_not_taught():
+def test_the_taught_content_bounds_the_topics_not_the_depth():
+    """The scope is the topics. Within them the paper is expected to go
+    further than the syllabus line - a question that hands a key point back is
+    testing whether a trainee can read a heading."""
     written = assessment_ai.AS_WRITTEN_SYSTEM
-    assert "CONTENT TAUGHT IS THE ASSESSMENT SOURCE" in written
-    assert "Do not use your own occupational knowledge" in written
-    assert "never taught" in assessment_ai.AS_PRACTICAL_SYSTEM
+
+    assert "CONTENT TAUGHT SETS THE SCOPE" in written
+    assert "Do not assess a topic that is not there" in written
+    assert "GO DEEPER THAN THE LINE IN FRONT OF YOU" in written
+
+
+def test_a_topic_nobody_covered_is_still_out_of_bounds():
+    """The one boundary kept when the content stopped being a script: depth on
+    a taught topic is wanted, a new topic is a question nobody was prepared
+    for."""
+    written = assessment_ai.AS_WRITTEN_SYSTEM
+
+    assert "THE LINE YOU MAY NOT CROSS" in written
+    assert "invalid one" in written
+    assert "invalid one" in assessment_ai.AS_PRACTICAL_SYSTEM
+
+
+def test_the_paper_is_told_to_name_real_tools_and_standards():
+    written = assessment_ai.AS_WRITTEN_SYSTEM
+
+    assert "real substance of the trade" in written
+    assert "comparable TVET and industry assessments" in written
 
 
 def test_a_performance_criterion_is_a_link_not_a_source():
