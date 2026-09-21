@@ -863,3 +863,41 @@ def test_a_real_marking_point_is_left_alone():
 def test_the_clean_paper_has_no_blanks_in_its_schemes():
     assert [p for p in av.validate(_written())
             if p.check == av.PLACEHOLDER_KEY] == []
+
+
+# --------------------------------------------------------------------------- #
+# 13. Every item of evaluation carries marks
+# --------------------------------------------------------------------------- #
+def test_an_item_of_evaluation_worth_nothing_is_caught():
+    """Seen live and invisible to every other check: a product-checklist row
+    came back at nought marks while its PC's marks were already spread across
+    two other rows, so the totals still reconciled."""
+    tool = _practical()
+    tool.product_checklist[0].marks = 0
+    tool.observation_checklist[0].marks += 1
+
+    found = [p for p in av.validate(tool) if p.check == av.UNFUNDED_ITEM]
+
+    assert len(found) == 1
+    assert found[0].item_number == tool.product_checklist[0].number
+    assert not found[0].blocking       # one visible row, fixable by hand
+
+
+def test_the_totals_check_cannot_see_an_unfunded_item():
+    """Why check 13 has to exist separately: the arithmetic is still right."""
+    tool = _practical()
+    tool.product_checklist[0].marks = 0
+    tool.observation_checklist[0].marks += 1
+
+    assert [p for p in av.validate(tool)
+            if p.check == av.TOTAL_RECONCILIATION] == []
+
+
+def test_a_written_paper_is_not_asked_about_items_of_evaluation():
+    assert [p for p in av.validate(_written())
+            if p.check == av.UNFUNDED_ITEM] == []
+
+
+def test_a_fully_funded_checklist_says_nothing():
+    assert [p for p in av.validate(_practical())
+            if p.check == av.UNFUNDED_ITEM] == []

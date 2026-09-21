@@ -61,6 +61,7 @@ ITEM_NOT_PC = "item_not_pc"
 FORMAT_COMPLIANCE = "format_compliance"
 MARKS_FIT_VERB = "marks_fit_verb"
 PLACEHOLDER_KEY = "placeholder_key"
+UNFUNDED_ITEM = "unfunded_item"
 
 # The five a model can be asked to fix by rewriting the offending item. The
 # other six are arithmetic, coverage or allocation: rewording cannot change
@@ -634,11 +635,43 @@ def _check_placeholder_key(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+def _check_unfunded_items(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """13. Every item of evaluation carries at least one mark.
+
+    Seen live, and invisible to every other check: a practical tool came back
+    with ten items where a product-checklist row - "Submitted vulnerability
+    assessment report containing the scanned findings" - carried nought. The
+    totals still reconciled, because that PC's nine marks were already spread
+    across two other rows, so nothing else noticed. What prints is an
+    assessor's checklist with a row worth no marks: either the assessor scores
+    it and the paper does not add up, or they skip it and the candidate did
+    that work for nothing.
+
+    Not repairable - the repair pass freezes marks, and it is not a wording
+    fault - but it does not block either. It is one visible row in a document
+    the trainer is about to read, and they can give it marks or drop it.
+    """
+    if not tool.is_practical:
+        return []
+    out: List[AssessmentProblem] = []
+    for item in _parent_items(tool):
+        if item.marks <= 0:
+            out.append(_problem(
+                UNFUNDED_ITEM,
+                f"item of evaluation {item.number} carries no marks "
+                f"(\"{item.text[:60]}\"); give it marks out of the "
+                f"{', '.join(item.pc_numbers) or 'PC'} it traces to, or drop "
+                f"it - an assessor cannot score a row worth nothing",
+                where=f"item of evaluation {item.number}",
+                item_number=item.number, blocks=False))
+    return out
+
+
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_bloom_completeness,
            _check_independence, _check_stem_clues, _check_practical_count,
            _check_item_not_pc, _check_format, _check_marks_fit_verb,
-           _check_placeholder_key)
+           _check_placeholder_key, _check_unfunded_items)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:

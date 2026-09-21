@@ -31,11 +31,13 @@ import datetime as _dt
 import json
 import os
 import re
+from fractions import Fraction
 from typing import Dict, List, Optional
 
 import runlog
 from ai_client import (AIError, _chat_json, _emit_progress, _strict,
                        load_api_key, load_model_name, resolve_model)
+from assessment_allocation import _largest_remainder
 import assessment_content
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
@@ -471,7 +473,9 @@ AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the pr
 You are GIVEN the unit, the CAT, and a MARK ALLOCATION TABLE stating the marks fixed for each performance criterion. You do not choose what is assessed or for how many marks. You write the task the candidate is set and the items of evaluation the assessor works from.
 
 THE MARKS ARE NOT YOURS
-Distribute each PC's stated marks across the items of evaluation that trace to it. The marks of the items tracing to a PC sum to exactly that PC's stated marks. Never alter a PC's total, never move marks between PCs, and never state a grand total anywhere.
+Give every item of evaluation a marks figure saying how much it is worth RELATIVE to the other items on the SAME performance criterion - 1 for a routine step, more for a step that carries the task. Those figures are scaled to the criterion's real marks afterwards, so they do not have to add up to anything and you must not try to make them. Never state a total for a criterion, a checklist or the assessment.
+
+Each item of evaluation traces to exactly ONE performance criterion. Give that one pc_number, as it is written in the list below and with no label in front of it.
 
 WHAT THE TASK MAY REQUIRE
 You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. The task you set, the tools you issue and the items of evaluation you write all come from that content. Do not require a technique, a machine, a material or a standard the trainees were never taught, and do not reach for your own knowledge of the trade to make the task look more professional: a task nobody was prepared for is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
@@ -494,6 +498,9 @@ AN ITEM OF EVALUATION IS NOT A PERFORMANCE CRITERION
 A performance criterion is general and comes from the occupational standard. An item of evaluation is specific to the task you have set and says what the assessor will actually observe or inspect, in this task, with these tools, on this product. Never restate a PC, reword a PC, or shorten a PC into an item. If an item could be lifted unchanged into another task on the same unit, it is too general - make it concrete.
 Weak: "Demonstrates correct use of hand tools."
 Strong: "Grips the tenon saw at the knee-height mark and cuts on the waste side of the line without splintering the shoulder."
+
+EVERY ITEM OF EVALUATION CARRIES MARKS
+There is no such thing as an item worth nothing. Each PC's stated marks are shared out across the items that trace to it, and every one of those items gets at least one mark. If an item is not worth a mark it is not worth the assessor's attention - fold it into another item or leave it out.
 
 HOW MANY
 Between %(min_items)d and %(max_items)d parent items across the two checklists COMBINED. Where one item has genuine stages, list them as sub_parts of that item; sub-parts do not count towards the total and carry no marks of their own.
@@ -583,17 +590,23 @@ def build_practical_prompt(tool: AssessmentTool) -> str:
         if a.pc_number in seen:
             continue
         seen.append(a.pc_number)
-        rows.append(f"- PC {a.pc_number} (element {a.element_number} "
-                    f"{a.element_title}): {a.pc_text} | marks: "
+        rows.append(f"- pc_number: {a.pc_number} | element_number: "
+                    f"{a.element_number} ({a.element_title}) | criterion: "
+                    f"{a.pc_text} | marks: "
                     f"{by_pc.get(a.pc_number, a.marks)}")
     methods = assessment_content.methods(tool.content)
     suggested = ("\n\nASSESSMENT METHODS THE CURRICULUM SUGGESTS FOR THIS "
                  "UNIT:\n" + "\n".join(f"- {m}" for m in methods)
                  if methods else "")
+    # One line per PC, in the order the rows were built, so a PC split across
+    # two allocations is budgeted once and at its combined figure.
     return f"""{_header(tool)}{_content_block(tool)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
+
+HOW THE MARKS ABOVE ARE USED
+Each criterion's marks are shared out across the items you write for it, in proportion to the relative figures you give them. You do not need to make anything add up - write the number of items the task genuinely needs and say how much each is worth next to the others on the same criterion.
 
 TIME ALLOWED: {tool.cat.duration_minutes} minutes
 
@@ -690,6 +703,18 @@ def _int(value, default: int = 0) -> int:
     return default
 
 
+def _number_list(value) -> List[str]:
+    """PC numbers, with any label the model echoed onto them stripped.
+
+    The same fault as `_number` and in the same place - a model told to echo a
+    value back gives the label with it - but on the practical path, where the
+    numbers arrive as a list. Worth its own helper because it went unnoticed
+    when the written path was fixed: one live run returned "1.1" and the next
+    returned "PC 1.1" from the same prompt, which is what a warm model does.
+    """
+    return [n for n in (_number(v) for v in _str_list(value)) if n]
+
+
 def _str_list(value) -> List[str]:
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
@@ -764,14 +789,89 @@ def _checklist(raw, start: int) -> List[ChecklistItem]:
         text = _text(row.get("text"))
         if not text:
             continue
+        # One criterion per item. Every check in `assessment_validators`
+        # counts an item's marks in full against each PC it names, while the
+        # grand total is a plain sum of the items - so an item tracing to two
+        # PCs makes the two views of the same paper disagree by its own marks.
+        # A CDACC checklist row evidences one criterion anyway.
+        traced = _number_list(row.get("pc_numbers"))[:1]
         out.append(ChecklistItem(
             number=start + len(out),
             text=text,
-            pc_numbers=_str_list(row.get("pc_numbers")),
+            pc_numbers=traced,
             marks=_int(row.get("marks"), 0),
             sub_parts=_str_list(row.get("sub_parts")),
         ))
     return out
+
+
+def _apportion(weights: List[int], total: int) -> List[int]:
+    """`total` shared across `weights` in proportion, as whole numbers.
+
+    `assessment_allocation._largest_remainder` takes shares that already sum
+    to about `total` and settles the rounding; it does not scale. So the
+    weights are scaled here first, on exact Fractions, and it settles the
+    remainder - the same rule, and the same tie-break, the CAT's own marks
+    were allocated with.
+
+    Weights that are all zero fall back to an even split: the model said
+    nothing useful about relative worth, and an even share is the honest
+    reading of that.
+    """
+    if total <= 0 or not weights:
+        return [0] * len(weights)
+    pool = sum(weights)
+    if pool <= 0:
+        weights, pool = [1] * len(weights), len(weights)
+    raw = [Fraction(w * total, pool) for w in weights]
+    return _largest_remainder(raw, total, list(range(len(weights))))
+
+
+def _fund_checklist(tool: AssessmentTool) -> None:
+    """Share each PC's allocated marks across the items that evidence it.
+
+    The model proposes how much each item is worth RELATIVE to the others on
+    the same criterion; this turns those proposals into the CAT's actual
+    marks. The arithmetic was the one thing still asked of the model on this
+    path, and it was the one thing it could not be relied on for: three live
+    runs at the same prompt gave a clean tool, a tool whose PCs all read as
+    unassessed, and a tool of nineteen items totalling 72 marks against an
+    allocation of 40. None of that is a wording fault, so no repair pass could
+    have cleared it - the trainer just lost the generation.
+
+    Every other mark in this module is computed in plain code before or after
+    the model speaks. This brings the practical path into line, and the sums
+    stop being a thing that can go wrong at all.
+
+    Each item is given one mark first, so no row is worth nothing, and what is
+    left is apportioned by the model's proposals using the same
+    largest-remainder rule the CAT's own marks were allocated with. Where a
+    criterion has more items than marks there are not enough to go round; the
+    proposals are used as they are and `_check_unfunded_items` reports the
+    rows that came out at nought.
+    """
+    by_pc = tool.marks_by_pc()
+    items = tool.observation_checklist + tool.product_checklist
+    for pc_number, budget in by_pc.items():
+        mine = [c for c in items if pc_number in c.pc_numbers]
+        if not mine:
+            continue
+        proposed = [max(0, c.marks) for c in mine]
+        if len(mine) <= budget:
+            shares = _apportion(proposed, budget - len(mine))
+            for item, share in zip(mine, shares):
+                item.marks = 1 + share
+        else:
+            for item, share in zip(mine, _apportion(proposed, budget)):
+                item.marks = share
+        runlog.log(f"Assessment: PC {pc_number} - {budget} mark(s) over "
+                   f"{len(mine)} item(s) of evaluation")
+
+    orphans = [c for c in items if not c.pc_numbers]
+    for item in orphans:
+        runlog.warn(f"Assessment: item of evaluation {item.number} traces to "
+                    f"no performance criterion and carries no marks")
+        item.marks = 0
 
 
 def _task_brief(raw) -> Optional[TaskBrief]:
@@ -796,7 +896,7 @@ def _oral_questions(raw) -> List[OralQuestion]:
             continue
         out.append(OralQuestion(
             number=len(out) + 1,
-            pc_numbers=_str_list(row.get("pc_numbers")),
+            pc_numbers=_number_list(row.get("pc_numbers")),
             question=question,
             response_indicators=_str_list(row.get("response_indicators")),
         ))
@@ -834,6 +934,7 @@ def apply_practical(tool: AssessmentTool, payload) -> AssessmentTool:
     tool.product_checklist = _checklist(
         data.get("product_checklist"), len(tool.observation_checklist) + 1)
     tool.oral_questions = _oral_questions(data.get("oral_questions"))
+    _fund_checklist(tool)
     return tool
 
 

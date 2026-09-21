@@ -521,3 +521,115 @@ def test_each_row_says_how_many_responses_to_ask_for():
            if "pc_number: 1.1" in ln][0]
 
     assert "ask for: 3" in row
+
+
+def test_a_checklist_pc_number_echoed_with_its_label_is_read(monkeypatch):
+    """The same fault as the written path, found on the practical one a run
+    later: one generation returned "1.1" and the next "PC 1.1" from the same
+    prompt. Every PC read as unassessed and carrying nought marks."""
+    payload = json.loads(json.dumps(PRACTICAL_PAYLOAD))
+    payload["observation_checklist"][0]["pc_numbers"] = ["PC 1.1"]
+    tool, _ = _run(monkeypatch, _tool(PRACTICAL, total=10), payload)
+
+    assert tool.observation_checklist[0].pc_numbers == ["1.1"]
+
+
+def test_the_practical_row_labels_match_the_fields_too():
+    prompt = assessment_ai.build_practical_prompt(_tool(PRACTICAL))
+
+    assert "pc_number:" in prompt and "element_number:" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# The practical path does not ask the model for arithmetic
+# --------------------------------------------------------------------------- #
+def _practical_payload(groups):
+    """groups: {pc_number: [proposed marks, ...]}"""
+    obs = [{"text": f"observes {pc} step {i}", "pc_numbers": [pc], "marks": m}
+           for pc, marks in groups.items() for i, m in enumerate(marks)]
+    return {"task_brief": {"task": "Harden the workstation."},
+            "observation_checklist": obs, "product_checklist": [],
+            "oral_questions": []}
+
+
+def _funded(groups, allocations, total):
+    tool = AssessmentTool(
+        cat=CatDefinition(assessment_type=PRACTICAL, total_marks=total),
+        allocations=[Allocation("1", "E", pc, "criterion", m, m)
+                     for pc, m in allocations.items()])
+    tool = assessment_ai.apply_practical(tool, _practical_payload(groups))
+    return tool.observation_checklist + tool.product_checklist
+
+
+def test_each_criterions_items_sum_to_its_allocated_marks():
+    """Three live runs wrote 72, 57 and 50 marks against an allocation of 40.
+    None of it was a wording fault, so no repair pass could clear it - the
+    trainer simply lost the generation. The arithmetic is ours now."""
+    items = _funded({"1.1": [5, 5, 5], "1.2": [7, 7], "2.1": [9, 9, 9, 9]},
+                    {"1.1": 13, "1.2": 9, "2.1": 18}, 40)
+
+    per_pc = {}
+    for c in items:
+        per_pc[c.pc_numbers[0]] = per_pc.get(c.pc_numbers[0], 0) + c.marks
+
+    assert per_pc == {"1.1": 13, "1.2": 9, "2.1": 18}
+    assert sum(c.marks for c in items) == 40
+
+
+def test_no_item_of_evaluation_comes_out_worth_nothing():
+    items = _funded({"1.1": [1, 1, 1, 1, 1]}, {"1.1": 7}, 7)
+
+    assert [c.marks for c in items] == [2, 2, 1, 1, 1]
+    assert sum(c.marks for c in items) == 7
+
+
+def test_the_model_still_says_which_items_matter_most():
+    """Its figures are read as relative worth, not as marks - so a step it
+    called twice as important still gets more."""
+    items = _funded({"1.1": [8, 2, 2]}, {"1.1": 24}, 24)
+
+    assert items[0].marks > items[1].marks
+    assert sum(c.marks for c in items) == 24
+
+
+def test_proposals_of_nothing_become_an_even_split():
+    items = _funded({"1.1": [0, 0, 0]}, {"1.1": 9}, 9)
+
+    assert [c.marks for c in items] == [3, 3, 3]
+
+
+def test_more_items_than_marks_leaves_some_unfunded_to_be_reported():
+    """Not enough marks to go round. The rows that come out at nought are
+    what `_check_unfunded_items` is for."""
+    items = _funded({"1.1": [1, 1, 1, 1, 1]}, {"1.1": 3}, 3)
+
+    assert sum(c.marks for c in items) == 3
+    assert any(c.marks == 0 for c in items)
+
+
+def test_an_item_tracing_to_two_criteria_keeps_the_first():
+    """Every check counts an item's marks in full against each PC it names
+    while the total is a plain sum, so two PCs on one item makes the two views
+    of the same paper disagree by that item's marks."""
+    tool = AssessmentTool(
+        cat=CatDefinition(assessment_type=PRACTICAL, total_marks=10),
+        allocations=[Allocation("1", "E", "1.1", "c", 10, 10)])
+    tool = assessment_ai.apply_practical(tool, {
+        "task_brief": {"task": "t"},
+        "observation_checklist": [{"text": "does the thing",
+                                   "pc_numbers": ["1.1", "2.1"], "marks": 5}],
+        "product_checklist": [], "oral_questions": []})
+
+    assert tool.observation_checklist[0].pc_numbers == ["1.1"]
+
+
+def test_apportionment_never_loses_or_invents_a_mark():
+    import random
+    random.seed(13)
+    for _ in range(400):
+        weights = [random.randint(0, 9) for _ in range(random.randint(1, 8))]
+        total = random.randint(0, 40)
+        shares = assessment_ai._apportion(weights, total)
+        assert len(shares) == len(weights)
+        assert sum(shares) == max(0, total)
+        assert all(x >= 0 for x in shares)
