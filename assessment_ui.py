@@ -98,7 +98,7 @@ def _weighting_step(os_unit: Unit) -> Optional[UnitWeighting]:
         _show(ss.at_problems)
         return None
 
-    edited = st.data_editor(rows, key="at_grid", use_container_width=True,
+    edited = st.data_editor(rows, key="at_grid", width="stretch",
                             num_rows="fixed")
     # Edits go back onto the parsed object rather than into a second copy of
     # the table: one source of truth for every later step.
@@ -199,7 +199,7 @@ def _distribution_step(weighting: UnitWeighting,
           "Performance criterion": a.pc_text[:80], "Weight": a.weight,
           f"{cat.label} marks": a.marks, "Bloom": a.bloom.title()}
          for a in allocations],
-        use_container_width=True, hide_index=True)
+        width="stretch", hide_index=True)
     st.caption(f"Total {sum(a.marks for a in allocations)} of "
                f"{cat.total_marks} marks")
     # Said here rather than after generating: an item too small for its own
