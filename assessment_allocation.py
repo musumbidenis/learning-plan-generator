@@ -27,7 +27,7 @@ from typing import Dict, List, Sequence, Tuple
 
 from assessment_config import (MAX_TOTAL_MARKS, MIN_MARKS_PER_PC,
                                SPLIT_ITEM_THRESHOLD, VIABLE_MARKS_PER_PC,
-                               profile_for)
+                               marks_per_response, profile_for)
 from assessment_models import (BLOOM_LEVELS, Allocation, CatDefinition,
                                Problem, UnitWeighting, WeightedPC)
 
@@ -233,13 +233,123 @@ def _fit_grid(row_totals: Sequence[int], col_totals: Sequence[int],
     return grid
 
 
+def _need(column: int) -> int:
+    """The smallest item the Bloom column at `column` can carry."""
+    return marks_per_response(BLOOM_LEVELS[column])
+
+
 def _best_whole(demand: List[int], marks: int) -> int:
     """Where a whole PC goes: the tightest cell that still holds it, or failing
-    that the emptiest one, so an overflow lands where there is most room."""
-    fits = [i for i, d in enumerate(demand) if d >= marks]
+    that the emptiest one, so an overflow lands where there is most room.
+
+    Cells that cannot carry an item this small are passed over first - one
+    mark at ANALYSING is a question asking the candidate to analyse something
+    for a single mark, which is not a hard question but an unanswerable one.
+    Only if no column can carry it does the usual choice apply, because the
+    mark exists and has to be somewhere.
+    """
+    allowed = [i for i in range(len(demand)) if marks >= _need(i)]
+    fits = [i for i in allowed if demand[i] >= marks]
     if fits:
         return min(fits, key=lambda i: (demand[i], i))
+    if allowed:
+        return min(allowed, key=lambda i: (-demand[i], i))
     return min(range(len(demand)), key=lambda i: (-demand[i], i))
+
+
+def _split_at(demand: List[int], marks: int):
+    """Where to cut a PC in two so BOTH halves are writable, or None.
+
+    The head finishes some column exactly and the tail goes where it fits.
+    Both have to clear the minimum of the column they land in: splitting a
+    6-mark PC into 5 and 1 is fine when the 1 goes to KNOWLEDGE and wrong when
+    it goes to CREATING, which is how papers were ending up asking a candidate
+    to design something for one mark.
+
+    Returned as (head_column, head_marks, tail_column, tail_marks), preferring
+    the largest head - the same preference as before, now among the cuts that
+    leave two answerable questions rather than among all of them.
+    """
+    options = []
+    for column, head in enumerate(demand):
+        if not _need(column) <= head <= marks - 1:
+            continue
+        tail = marks - head
+        remaining = list(demand)
+        remaining[column] = 0
+        landing = _best_whole(remaining, tail)
+        if tail < _need(landing):
+            continue
+        options.append((column, head, landing, tail))
+    if not options:
+        return None
+    return max(options, key=lambda o: (o[1], -o[0]))
+
+
+def check_items(allocations: Sequence[Allocation]) -> List[Problem]:
+    """Items too small for the verb their Bloom level allows.
+
+    `_respect_minimums` and `_split_at` between them stop these being made,
+    and on realistic weightings none appear at all. They can still survive a
+    CAT stretched over more performance criteria than it has marks for, where
+    a PC allocates to one or two marks whatever anyone does with it - and the
+    trainer needs to be told that here, looking at the distribution table,
+    rather than after paying for a generation that could not have been written.
+    """
+    out: List[Problem] = []
+    for a in allocations:
+        need = marks_per_response(a.bloom)
+        if a.bloom and a.marks < need:
+            out.append(Problem(
+                message=(f"PC {a.pc_number} is set at {a.bloom} for "
+                         f"{a.marks} mark(s), but a {a.bloom} question asks "
+                         f"for a developed answer and cannot be marked out of "
+                         f"less than {need}. Select fewer performance criteria "
+                         f"or raise the total marks."),
+                blocking=True, where=f"PC {a.pc_number}"))
+    return out
+
+
+def _respect_minimums(demand: List[int]) -> List[int]:
+    """Make every column able to carry a whole question, keeping the total.
+
+    A column asking for one mark at ANALYSING is a question nobody can write:
+    the bank gives the item "analyse", and one mark buys one point, so the
+    paper ends up asking a candidate to analyse something for a single mark.
+    Published CDACC papers never do this - a one-mark item is always recall.
+
+    So a deficient column BORROWS rather than closing. A mark is taken from
+    the richest column that can still carry a question without it, until the
+    deficient one is viable. Borrowing is tried first because closing the
+    column costs the paper a whole Bloom level, and a CAT is expected to reach
+    all six; only when nobody can lend does the column give its marks up, to
+    the highest column that is already viable so the paper does not slide down
+    the taxonomy.
+
+    Runs from CREATING down to KNOWLEDGE, so a column topped up by a borrow is
+    never revisited and the sweep terminates. KNOWLEDGE needs one mark and so
+    is never deficient. The element's total is unchanged either way, which is
+    what keeps the table of specifications adding up along its rows.
+    """
+    need = [marks_per_response(level) for level in BLOOM_LEVELS]
+    spill = 0
+    for i in reversed(range(len(BLOOM_LEVELS))):
+        while 0 < demand[i] < need[i]:
+            lenders = [j for j in range(len(BLOOM_LEVELS))
+                       if j != i and demand[j] - 1 >= need[j]]
+            if not lenders:
+                break
+            richest = max(lenders, key=lambda j: (demand[j], -j))
+            demand[richest] -= 1
+            demand[i] += 1
+        if 0 < demand[i] < need[i]:
+            spill += demand[i]
+            demand[i] = 0
+    if spill:
+        home = next((i for i in reversed(range(len(BLOOM_LEVELS)))
+                     if demand[i] >= need[i]), 0)
+        demand[home] += spill
+    return demand
 
 
 def _place(allocations: List[Allocation],
@@ -260,23 +370,24 @@ def _place(allocations: List[Allocation],
     that could go in it therefore stays empty - on the tour-guide practical,
     CREATING asks for one mark per element and the smallest PC there is worth
     three.
+
+    A cut that would leave a piece too small for the column it lands in is not
+    made at all; the PC goes somewhere whole instead. See `_split_at`.
     """
     out: Dict[str, List[Allocation]] = {}
     for a in sorted(allocations,
                     key=lambda x: (-x.marks, _pc_sort_key(x.pc_number))):
         marks = a.marks
-        exact = next((i for i, d in enumerate(demand) if d == marks and d > 0),
-                     None)
-        fillable = [i for i, d in enumerate(demand) if 1 <= d <= marks - 1]
+        exact = next((i for i, d in enumerate(demand)
+                      if d == marks and d > 0 and marks >= _need(i)), None)
+        cut = (_split_at(demand, marks)
+               if exact is None and marks > SPLIT_ITEM_THRESHOLD else None)
         if exact is not None:
             demand[exact] -= marks
             pieces = [(exact, marks)]
-        elif marks > SPLIT_ITEM_THRESHOLD and fillable:
-            first = min(fillable, key=lambda i: (-demand[i], i))
-            head = demand[first]
-            demand[first] = 0
-            rest = marks - head
-            second = _best_whole(demand, rest)
+        elif cut is not None:
+            first, head, second, rest = cut
+            demand[first] -= head
             demand[second] -= rest
             pieces = sorted([(first, head), (second, rest)])
         else:
@@ -333,8 +444,9 @@ def assign_bloom(allocations: List[Allocation], knqf_level: str,
 
     out: List[Allocation] = []
     for index, element in enumerate(order):
-        demand = _largest_remainder(grid[index], rows[element],
-                                    list(range(len(BLOOM_LEVELS))))
+        demand = _respect_minimums(
+            _largest_remainder(grid[index], rows[element],
+                               list(range(len(BLOOM_LEVELS)))))
         out.extend(_place([a for a in allocations
                            if a.element_number == element], demand))
     return out

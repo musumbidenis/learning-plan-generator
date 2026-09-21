@@ -10,7 +10,8 @@ import random
 
 import assessment_allocation as alloc
 from assessment_config import (MAX_TOTAL_MARKS, MIN_MARKS_PER_PC,
-                               SPLIT_ITEM_THRESHOLD, VIABLE_MARKS_PER_PC)
+                               SPLIT_ITEM_THRESHOLD, VIABLE_MARKS_PER_PC,
+                               marks_per_response)
 from assessment_models import (BLOOM_LEVELS, PRACTICAL, THEORY, CatDefinition,
                                UnitWeighting, WeightedElement, WeightedPC)
 
@@ -259,17 +260,100 @@ def test_the_theory_paper_reaches_all_six_levels():
     assert {a.bloom for a in entries} == set(BLOOM_LEVELS)
 
 
-def test_a_column_no_pc_can_fill_is_left_empty_rather_than_forced():
-    """The practical's CREATING cell is one mark per element, while the
-    lightest PC on it is worth three and none of the twelve clears the split
-    threshold. Nothing can be cut to fill that cell, so it stays empty - the
-    alternative is a 3-mark cell in a 1-mark column, which throws the whole
-    row out."""
+def test_a_column_too_small_to_hold_a_question_borrows_until_it_can():
+    """The practical's CREATING cell came out at one mark per element, and the
+    lightest PC on it is worth three. That cell used to be left empty, costing
+    the paper a whole Bloom level; now it borrows from the richest column that
+    can spare a mark until it can hold a real question, and the 3-mark PC goes
+    in. The element's total is untouched either way - that is what keeps the
+    table of specifications adding up along its rows."""
     entries = _bloomed(PRACTICAL, 40)
 
-    assert all(a.marks <= SPLIT_ITEM_THRESHOLD for a in entries)
-    assert {a.bloom for a in entries} < set(BLOOM_LEVELS)
+    assert {a.bloom for a in entries} == set(BLOOM_LEVELS)
     assert sum(a.marks for a in entries) == 40
+
+
+def test_no_item_is_worth_less_than_one_answer_at_its_own_level():
+    """"Design a maintenance routine. (1 mark)" is not a hard question, it is
+    an unanswerable one. A one-mark item is always recall."""
+    for assessment_type, total in ((THEORY, 50), (PRACTICAL, 40),
+                                   (THEORY, 30), (THEORY, 20)):
+        for a in _bloomed(assessment_type, total):
+            assert a.marks >= marks_per_response(a.bloom), (
+                f"{a.pc_number} at {a.bloom} for {a.marks}")
+
+
+# --------------------------------------------------------------------------- #
+# Keeping every column answerable
+# --------------------------------------------------------------------------- #
+def test_a_deficient_column_borrows_from_the_richest_one():
+    #      know und app ana eva cre
+    assert alloc._respect_minimums([3, 8, 4, 4, 1, 0]) == [3, 7, 4, 4, 2, 0]
+
+
+def test_borrowing_never_leaves_the_lender_unable_to_hold_a_question():
+    out = alloc._respect_minimums([0, 2, 2, 2, 1, 0])
+    assert all(v == 0 or v >= 2 for v in out[1:])
+    assert sum(out) == 7
+
+
+def test_a_column_nobody_can_lend_to_gives_its_marks_up():
+    """Three columns of exactly two have nothing spare, so the odd mark at
+    CREATING cannot be topped up and goes to the highest column that is
+    already viable rather than sliding the paper down to recall."""
+    out = alloc._respect_minimums([0, 2, 2, 2, 0, 1])
+    assert sum(out) == 7
+    assert out[5] == 0
+    assert all(v == 0 or v >= 2 for v in out[1:])
+
+
+def test_knowledge_is_never_deficient():
+    assert alloc._respect_minimums([1, 4, 4, 0, 0, 0]) == [1, 4, 4, 0, 0, 0]
+
+
+def test_respecting_the_minimums_never_changes_the_total():
+    import random
+    random.seed(11)
+    for _ in range(300):
+        row = [random.randint(0, 6) for _ in range(6)]
+        assert sum(alloc._respect_minimums(list(row))) == sum(row)
+
+
+# --------------------------------------------------------------------------- #
+# Splitting
+# --------------------------------------------------------------------------- #
+def test_a_spare_mark_goes_to_knowledge_rather_than_to_creating():
+    """The fault this replaced: a 6-mark PC cut into 5 and 1, with the 1
+    landing on CREATING because that column happened to have room - a paper
+    asking the candidate to design something for one mark. One mark is a
+    recall mark, so the tail goes to KNOWLEDGE."""
+    #                       know und app ana eva cre
+    cut = alloc._split_at([0, 5, 0, 0, 0, 4], 6)
+
+    assert cut is not None
+    head_column, head, tail_column, tail = cut
+    assert (head_column, head) == (1, 5)
+    assert (tail_column, tail) == (0, 1)
+
+
+def test_a_cut_with_no_answerable_shape_is_not_made_at_all():
+    """Nothing to cut against: the PC goes somewhere whole instead."""
+    assert alloc._split_at([0, 0, 0, 0, 0, 0], 6) is None
+
+
+def test_neither_half_of_a_cut_is_ever_too_small_for_where_it_lands():
+    import random
+    random.seed(5)
+    for _ in range(500):
+        demand = [random.randint(0, 8) for _ in range(6)]
+        marks = random.randint(6, 12)
+        cut = alloc._split_at(list(demand), marks)
+        if cut is None:
+            continue
+        head_column, head, tail_column, tail = cut
+        assert head + tail == marks
+        assert head >= marks_per_response(BLOOM_LEVELS[head_column])
+        assert tail >= marks_per_response(BLOOM_LEVELS[tail_column])
 
 
 def _split_paper():
@@ -406,3 +490,23 @@ def test_bloom_assignment_never_loses_a_mark_over_random_papers():
             assert len(parts) <= 2
             assert len(parts) == 1 or (sum(parts) > SPLIT_ITEM_THRESHOLD
                                        and min(parts) >= 1)
+
+
+def test_an_unwritable_item_is_reported_before_anything_is_generated():
+    """The trainer fixes this by changing the selection, so they are told at
+    the distribution table rather than after paying for a generation."""
+    from assessment_models import Allocation
+    problems = alloc.check_items([
+        Allocation(element_number="1", element_title="E1", pc_number="1.1",
+                   pc_text="c", weight=4, marks=1, bloom="analysing"),
+        Allocation(element_number="1", element_title="E1", pc_number="1.2",
+                   pc_text="c", weight=4, marks=1, bloom="knowledge"),
+    ])
+
+    assert len(problems) == 1
+    assert problems[0].where == "PC 1.1"
+    assert problems[0].blocking
+
+
+def test_a_sound_distribution_reports_nothing():
+    assert alloc.check_items(_bloomed(THEORY, 50)) == []

@@ -1,4 +1,4 @@
-"""The ten checks a generated assessment tool has to pass, and one repair pass.
+"""The eleven checks a generated tool has to pass, and one repair pass.
 
 The model writes prose under tight constraints and mostly holds to them; these
 checks are for the times it does not. They fall into two kinds, and the
@@ -7,8 +7,9 @@ difference is the whole design of this file:
     NOT REPAIRABLE  the paper is wrong in a way no rewording can fix - a PC
                     that was never assessed, an item written to the wrong
                     marks, a total that does not reconcile, a level the
-                    allocation could never reach, a checklist of the wrong
-                    length. The fix is upstream (allocate again) or by hand.
+                    allocation could never reach, an item worth less than one
+                    answer at its own level, a checklist of the wrong length.
+                    The fix is upstream (allocate again) or by hand.
 
     REPAIRABLE      the wording is wrong - the lead verb sits in another
                     level's bank, a stem gives away another item's key, a stem
@@ -42,7 +43,8 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                ITEM_INDEPENDENCE_OVERLAP,
                                ITEM_VS_PC_SIMILARITY, MAX_CHECKLIST_ITEMS,
                                MAX_REPAIR_PASSES, MIN_CHECKLIST_ITEMS,
-                               REPAIR_TEMPERATURE, VERB_BANK, level_of_verb)
+                               REPAIR_TEMPERATURE, VERB_BANK, level_of_verb,
+                               marks_per_response)
 from assessment_models import (BLOOM_LEVELS, AssessmentTool, ChecklistItem,
                                Item, MarkingPoint, Problem)
 
@@ -57,9 +59,12 @@ STEM_CLUE = "stem_clue"
 PRACTICAL_ITEM_COUNT = "practical_item_count"
 ITEM_NOT_PC = "item_not_pc"
 FORMAT_COMPLIANCE = "format_compliance"
+MARKS_FIT_VERB = "marks_fit_verb"
 
 # The five a model can be asked to fix by rewriting the offending item. The
-# other five are arithmetic or coverage: rewording cannot change them.
+# other six are arithmetic, coverage or allocation: rewording cannot change
+# them - an item too small for its own Bloom level needs more marks, not
+# better words.
 REPAIRABLE_CHECKS = frozenset({BLOOM_CONFORMANCE, ITEM_INDEPENDENCE, STEM_CLUE,
                                ITEM_NOT_PC, FORMAT_COMPLIANCE})
 
@@ -545,10 +550,36 @@ def _check_format(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+def _check_marks_fit_verb(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """11. An item is worth at least one answer at its own Bloom level.
+
+    "Explain the fire triangle. (1 mark)" is not a hard question, it is an
+    unanswerable one: the verb asks for a developed answer and the marks buy a
+    single named thing. Published CDACC papers never do it - a one-mark item
+    is always recall.
+
+    Rewording cannot clear this, so it blocks. `assessment_allocation` is
+    where it is prevented, and `check_items` says so at the distribution table
+    before anything is generated; this catches an item the model wrote to a
+    mark its allocation did not give it.
+    """
+    out: List[AssessmentProblem] = []
+    for item in tool.items:
+        need = marks_per_response(item.bloom)
+        if item.bloom and 0 < item.marks < need:
+            out.append(_problem(
+                MARKS_FIT_VERB,
+                f"item {item.number} is at {item.bloom} for {item.marks} "
+                f"mark(s); a {item.bloom} question cannot be marked out of "
+                f"less than {need}",
+                where=f"item {item.number}", item_number=item.number))
+    return out
+
+
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_bloom_completeness,
            _check_independence, _check_stem_clues, _check_practical_count,
-           _check_item_not_pc, _check_format)
+           _check_item_not_pc, _check_format, _check_marks_fit_verb)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:

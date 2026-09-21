@@ -69,6 +69,40 @@ def level_of_verb(verb: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# What one response is worth
+# --------------------------------------------------------------------------- #
+# Published CDACC papers are consistent about this, and it is the difference
+# between a question that can be answered and one that cannot:
+#
+#     "State FOUR methods of identifying communication needs."      4 marks
+#     "Outline FOUR steps to be followed."                          4 marks
+#     "Explain FOUR relevant sources you would harness."            8 marks
+#     "Discuss FIVE factors that support implementation."          10 marks
+#     "Describe three recognized stages of fire."                   6 marks
+#
+# A recall verb buys one mark a point - the candidate names a thing. A verb
+# asking for a developed answer buys two, because each point needs a sentence
+# of substance behind it. Keyed by Bloom level rather than by verb because
+# every verb in a level's bank makes the same demand.
+#
+# It is also the floor on an item: an item must afford at least one response,
+# so "Explain ... (1 mark)" is not a hard question, it is an unanswerable one.
+MARKS_PER_RESPONSE: Dict[str, int] = {
+    KNOWLEDGE: 1,
+    UNDERSTANDING: 2,
+    APPLYING: 2,
+    ANALYSING: 2,
+    EVALUATING: 2,
+    CREATING: 2,
+}
+
+
+def marks_per_response(level: str) -> int:
+    """What one point is worth at `level`, and so the smallest item it allows."""
+    return MARKS_PER_RESPONSE.get((level or "").strip().lower(), 1)
+
+
+# --------------------------------------------------------------------------- #
 # Thresholds
 # --------------------------------------------------------------------------- #
 # A PC allocated more than this may be split into two items at different

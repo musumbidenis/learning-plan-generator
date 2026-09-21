@@ -1,4 +1,4 @@
-"""The ten checks, in both directions, and the bounded repair loop.
+"""The eleven checks, in both directions, and the bounded repair loop.
 
 ZERO real API calls: the repair pass's `_chat_json` is monkeypatched and the
 HTTP layer under it is stubbed as well, so a missed patch fails loudly rather
@@ -763,3 +763,37 @@ def test_a_contextual_item_passes_bloom_conformance_end_to_end():
 
     assert [p for p in av.validate(tool)
             if p.check == av.BLOOM_CONFORMANCE and p.item_number == 1] == []
+
+
+# --------------------------------------------------------------------------- #
+# 11. An item is worth at least one answer at its own level
+# --------------------------------------------------------------------------- #
+def test_a_developed_verb_on_a_single_mark_is_caught():
+    """"Explain the fire triangle. (1 mark)" is not a hard question, it is an
+    unanswerable one: the verb asks for a developed answer and one mark buys a
+    single named thing."""
+    tool = _written()
+    tool.items[1].bloom = UNDERSTANDING
+    tool.items[1].marks = 1
+    tool.items[1].marking_scheme = [MarkingPoint(text="Sparks reach the eyes",
+                                                 marks=1)]
+
+    found = [p for p in av.validate(tool) if p.check == av.MARKS_FIT_VERB]
+
+    assert [p.item_number for p in found] == [2]
+    assert found[0].blocking          # more marks, not better words
+
+
+def test_a_single_mark_at_knowledge_is_fine():
+    """Recall is exactly what a one-mark item is for."""
+    tool = _written()
+    tool.items[0].bloom = KNOWLEDGE
+    tool.items[0].marks = 1
+    tool.items[0].marking_scheme = [MarkingPoint(text="Spanner set", marks=1)]
+
+    assert [p for p in av.validate(tool) if p.check == av.MARKS_FIT_VERB] == []
+
+
+def test_the_clean_paper_says_nothing_about_marks_and_verbs():
+    assert [p for p in av.validate(_written())
+            if p.check == av.MARKS_FIT_VERB] == []

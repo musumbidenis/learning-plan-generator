@@ -416,6 +416,26 @@ EVALUATING or CREATING, and the candidate has to bring the taught content to
 bear on something. Ask directly at KNOWLEDGE and UNDERSTANDING, where the
 situation would be decoration. Judge it item by item.
 
+MARKS AND THE NUMBER ASKED FOR
+The marks say how much answer is wanted, and the number you ask for must come
+out of them. Published papers are consistent:
+
+- A recall verb - list, state, name, identify, select, outline - buys ONE mark
+  a point. "State FOUR methods of identifying communication needs." is 4 marks.
+  "Outline FOUR steps to be followed." is 4 marks.
+- A verb asking for a developed answer - describe, explain, discuss, analyse,
+  evaluate, justify, design - buys TWO marks a point, because each point needs
+  a sentence of substance behind it and not just a name. "Explain FOUR
+  relevant sources you would harness." is 8 marks. "Discuss FIVE factors that
+  support implementation." is 10 marks. "Describe three recognized stages of
+  fire." is 6 marks.
+
+So the count you ask for is the item's marks divided by what its verb buys,
+and the marking scheme carries exactly that many points, each worth that much.
+An item of 4 marks at UNDERSTANDING asks for TWO things, not four. Never ask
+for four things and then write four one-mark points under a verb that cannot
+be answered in one mark.
+
 THE ASK
 - Begins with the allowed verb for that row's Bloom level. Where a situation
   comes first, the verb opens the sentence that asks the question.

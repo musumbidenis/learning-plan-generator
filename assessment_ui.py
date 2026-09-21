@@ -202,6 +202,10 @@ def _distribution_step(weighting: UnitWeighting,
         use_container_width=True, hide_index=True)
     st.caption(f"Total {sum(a.marks for a in allocations)} of "
                f"{cat.total_marks} marks")
+    # Said here rather than after generating: an item too small for its own
+    # Bloom level is fixed by changing the selection, not by rewriting a
+    # question, and the trainer is looking at the selection right now.
+    _show(alloc.check_items(allocations))
     return allocations
 
 
