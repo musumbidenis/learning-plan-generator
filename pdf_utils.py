@@ -191,7 +191,7 @@ def _load_pdf_pages_fitz(path: str) -> List[Page]:
     `top`, and x0/x1 are the same physical PDF coordinates the column parsers
     already expect - no re-tuning needed.
     """
-    import fitz  # PyMuPDF - already a dependency (also used by splitter.py)
+    import fitz  # PyMuPDF - already a dependency
 
     pages: List[Page] = []
     total_words = 0
