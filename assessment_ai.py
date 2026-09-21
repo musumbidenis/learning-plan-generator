@@ -376,7 +376,55 @@ Before returning the JSON, verify that:
 11. No question depends on another question for its answer.
 12. No scenario has been added merely to connect unrelated questions.
 13. No total has been stated or calculated anywhere.
-14. The final response contains only the required JSON object."""
+14. The final response contains only the required JSON object.
+
+## 16. HOW A QUESTION IS FRAMED - THE HOUSE STYLE
+
+Sections 1 to 15 say what a question must satisfy. This section says what one
+looks like on the page. It is taken from published TVET CDACC written
+assessment papers and does not relax any rule above it.
+
+A question is built as:
+
+    [optional one-clause workplace situation]. [VERB] [COUNT] [what is wanted].
+
+Published examples, to copy the shape of and not the subject:
+
+- "Mr. M has experienced conflict among workmates during working hours.
+  Identify FOUR ways in which he can address conflict in the organization."
+- "Njeri would like to do a presentation on barriers of communication. State
+  FOUR effective communication techniques she is likely to use."
+- "Highlight FOUR importance of holding meetings in an organization."
+- "As the safety coordinator in your organisation, outline FOUR steps to be
+  followed to establish work safety procedures."
+
+THE SITUATION
+- Name the person or the organisation: Mr. M, Njeri, Jane a supervisor at
+  Company X, WXYZ Limited, a garage in Nakuru. Kenyan names, and workplaces of
+  a size a trainee will recognise.
+- ONE clause, or one short sentence. Never a paragraph, never a set of facts
+  to be worked through, and never anything the candidate must read twice.
+- It sets up the question. It never contains, hints at or narrows the answer.
+- It is drawn from the CONTENT TAUGHT, and introduces no equipment, standard
+  or term the content does not have.
+
+WHEN TO USE ONE
+Not on every question. A paper where every item opens with a little story
+reads as contrived, and one where none does reads as a list of definitions.
+Use a situation where it does work - where the item is at APPLYING, ANALYSING,
+EVALUATING or CREATING, and the candidate has to bring the taught content to
+bear on something. Ask directly at KNOWLEDGE and UNDERSTANDING, where the
+situation would be decoration. Judge it item by item.
+
+THE ASK
+- Begins with the allowed verb for that row's Bloom level. Where a situation
+  comes first, the verb opens the sentence that asks the question.
+- The count is spelled out in capitals: FOUR, THREE, FIVE.
+- One sentence.
+- Do NOT write the marks into the stem. The marks are printed beside every
+  question by the document itself, and a stem carrying "(4 marks)" prints them
+  twice.
+- Do not number the item in the stem. The numbering is printed for you."""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.

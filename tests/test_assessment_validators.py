@@ -696,3 +696,70 @@ def test_a_repair_answer_speaks_the_same_field_names_as_the_paper():
                      {1: ["wrong format"]})
 
     assert tool.items[0].item_format == "extended_response"
+
+
+# --------------------------------------------------------------------------- #
+# Where the ask begins
+# --------------------------------------------------------------------------- #
+def _bank(level):
+    from assessment_config import VERB_BANK
+    return VERB_BANK[level]
+
+
+def test_a_situation_before_the_verb_does_not_fail_the_item():
+    """Published CDACC questions set a one-clause situation and then ask:
+    "Mr. M has experienced conflict among workmates. Identify FOUR ways..."
+    The verb carrying the Bloom level is the one opening the ASK."""
+    stem = ("Mr. M has experienced conflict among workmates. Identify FOUR "
+            "ways in which he can address it.")
+
+    assert av.bloom_verb(stem, _bank(KNOWLEDGE)) == "identify"
+
+
+def test_a_role_before_the_verb_does_not_fail_it_either():
+    """"As the safety coordinator in your organisation, outline FOUR steps"
+    is one sentence with the verb after a comma."""
+    stem = ("As the safety coordinator in your organisation, outline FOUR "
+            "steps to be followed.")
+
+    assert av.bloom_verb(stem, _bank(KNOWLEDGE)) == "outline"
+
+
+def test_a_verb_buried_deep_in_the_stem_is_not_hunted_out():
+    """Three openings are looked at and no more. Accepting a bank verb from
+    anywhere would pass any item that happened to contain one."""
+    stem = ("The supervisor asked the team to consider whether they should "
+            "state their concerns, and the matter was left there.")
+
+    assert av.bloom_verb(stem, _bank(KNOWLEDGE)) != "state"
+
+
+def test_a_failing_item_is_told_the_verb_its_question_opens_with():
+    """Not the first word of the stem: telling the repair pass the question
+    opens with 'the' when it opens with 'write' sends it looking in the wrong
+    place."""
+    stem = "The firm keeps records. Write FOUR notes about them."
+
+    assert av.bloom_verb(stem, _bank(KNOWLEDGE)) == "write"
+
+
+def test_a_decimal_point_does_not_end_a_sentence():
+    stem = "Mr. M has 1.5 kg of stock. State FOUR storage rules."
+
+    assert av.bloom_verb(stem, _bank(KNOWLEDGE)) == "state"
+
+
+def test_a_direct_question_still_reads_the_same_way():
+    assert av.bloom_verb("State FOUR types of malware.",
+                         _bank(KNOWLEDGE)) == "state"
+    assert av.lead_verb("1. State FOUR types of malware.") == "state"
+
+
+def test_a_contextual_item_passes_bloom_conformance_end_to_end():
+    tool = _written()
+    tool.items[0].bloom = KNOWLEDGE
+    tool.items[0].stem = ("Njeri is preparing the bay for a service. State "
+                          "FOUR tools she is issued with.")
+
+    assert [p for p in av.validate(tool)
+            if p.check == av.BLOOM_CONFORMANCE and p.item_number == 1] == []

@@ -158,21 +158,74 @@ def overlap(needle: Set[str], haystack: Set[str]) -> float:
 # The lead verb
 # --------------------------------------------------------------------------- #
 _RE_LEAD = re.compile(r"^\s*(?:\(?[a-z0-9]{1,3}[.)]\s*)*(.*)$", re.I | re.S)
+# Sentence end, not decimal point: "1.1" and "Mr." must not split a stem.
+_RE_SENTENCE = re.compile(r"(?<![A-Z0-9])[.!?]+\s+")
 
 
-def lead_verb(stem: str) -> str:
-    """The verb a stem opens with, two words first ('carry out', 'break down').
-
-    Any item numbering the model put in front of its own stem is stepped over,
-    so '1. State FOUR...' is read the same as 'State FOUR...'.
-    """
-    body = _RE_LEAD.match(stem or "").group(1)
-    words = _RE_WORD.findall(body.lower())
+def _verb_at(text: str) -> str:
+    """The verb `text` opens with, two words first ('carry out', 'break down')."""
+    words = _RE_WORD.findall((text or "").lower())
     if not words:
         return ""
     if len(words) > 1 and level_of_verb(f"{words[0]} {words[1]}"):
         return f"{words[0]} {words[1]}"
     return words[0]
+
+
+def _openings(stem: str) -> List[str]:
+    """Where the ask could begin, best candidate first.
+
+    A CDACC question often sets a one-clause situation before it asks
+    anything - "Mr. M has experienced conflict among workmates. Identify FOUR
+    ways..." - and the verb that carries the Bloom level is the one opening
+    the ASK, not the one opening the stem. Published papers also put a role
+    before it inside the same sentence: "As the safety coordinator in your
+    organisation, outline FOUR steps...".
+
+    So three places are looked at and no more: the start of the stem, the
+    start of its last sentence, and the point after that sentence's first
+    comma. Hunting for a bank verb anywhere in the stem would pass any item
+    that happened to contain one and gut the check.
+    """
+    body = _RE_LEAD.match(stem or "").group(1).strip()
+    if not body:
+        return []
+    out = [body]
+    sentences = [p for p in _RE_SENTENCE.split(body) if p.strip()]
+    if len(sentences) > 1:
+        out.append(sentences[-1].strip())
+    head, comma, rest = out[-1].partition(",")
+    if comma and rest.strip() and len(_RE_WORD.findall(head)) <= 12:
+        out.append(rest.strip())
+    return out
+
+
+def lead_verb(stem: str) -> str:
+    """The verb the stem opens with.
+
+    Kept for the message a failing item is given, which names what the item
+    actually starts with. `bloom_verb` is what decides whether it passes.
+    """
+    openings = _openings(stem)
+    return _verb_at(openings[0]) if openings else ""
+
+
+def bloom_verb(stem: str, bank: Sequence[str]) -> str:
+    """The verb this stem offers for `bank`, or its opening verb if none fits.
+
+    An item is conformant when the ask opens with a verb from its own level's
+    bank, wherever the ask begins.
+    """
+    openings = _openings(stem)
+    for opening in openings:
+        verb = _verb_at(opening)
+        if verb in bank:
+            return verb
+    # Nothing fits, so report the verb where the ask most likely begins rather
+    # than the first word of the stem. On "The firm keeps records. Write FOUR
+    # notes about them." the useful thing to tell the repair pass is that the
+    # question opens with 'write', not with 'the'.
+    return _verb_at(openings[-1]) if openings else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +404,7 @@ def _check_bloom_conformance(tool: AssessmentTool) -> List[AssessmentProblem]:
                 f"which is not a Bloom level",
                 where=f"item {item.number}", item_number=item.number))
             continue
-        verb = lead_verb(item.stem)
+        verb = bloom_verb(item.stem, bank)
         if verb in bank:
             continue
         found = level_of_verb(verb)
@@ -359,8 +412,8 @@ def _check_bloom_conformance(tool: AssessmentTool) -> List[AssessmentProblem]:
                 else f"'{verb or '(none)'}' is in no verb bank")
         out.append(_problem(
             BLOOM_CONFORMANCE,
-            f"item {item.number} is at {item.bloom} but opens with "
-            f"{sits}; open it with one of: {', '.join(bank)}",
+            f"item {item.number} is at {item.bloom} but its ask opens with "
+            f"{sits}; open the question with one of: {', '.join(bank)}",
             where=f"item {item.number}", item_number=item.number))
     return out
 
