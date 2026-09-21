@@ -40,7 +40,7 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
                                TEMPERATURE, VERB_BANK)
 from assessment_models import (AssessmentTool, ChecklistItem, Item,
-                               MarkingPoint, OralQuestion, Scenario, TaskBrief)
+                               MarkingPoint, OralQuestion, TaskBrief)
 
 # Where a raw generation is kept so a bad paper can be read back afterwards.
 # The directory ignores itself (a '*' .gitignore written on creation), so no
@@ -58,39 +58,30 @@ MAX_RAW_FILES = 60
 # Response schemas
 # --------------------------------------------------------------------------- #
 def written_schema() -> dict:
-    """Scenarios and items, wrapped in an object.
+    """Section 14 of AS_WRITTEN_SYSTEM, as a schema the decoder enforces.
 
-    A strict schema's root must be an object, so both arrays travel under
-    named keys. `scenario_id` is required-but-may-be-empty rather than
-    optional: strict decoding requires every declared property, and an empty
-    string is how an item says it stands on its own.
+    The field names are the prompt's, not this module's: a strict schema and
+    the instructions that describe it have to agree exactly, and where they
+    disagree it is the prompt that is the specification. `unit_of_competency`
+    is asked for and then ignored - the unit is already known here, and a
+    model that has just written it out is a model that has read the header.
     """
     return _strict({
         "type": "object",
         "properties": {
-            "scenarios": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "title": {"type": "string"},
-                        "text": {"type": "string"},
-                    },
-                },
-            },
+            "unit_of_competency": {"type": "string"},
             "items": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "item_number": {"type": "integer"},
                         "element_number": {"type": "string"},
                         "pc_number": {"type": "string"},
-                        "bloom": {"type": "string"},
-                        "item_format": {"type": "string"},
-                        "scenario_id": {"type": "string"},
-                        "stem": {"type": "string"},
+                        "bloom_level": {"type": "string"},
                         "marks": {"type": "integer"},
+                        "response_type": {"type": "string"},
+                        "stem": {"type": "string"},
                         "marking_scheme": {
                             "type": "array",
                             "items": {
@@ -162,57 +153,230 @@ def practical_schema() -> dict:
 # --------------------------------------------------------------------------- #
 AS_WRITTEN_SYSTEM = """You are a senior TVET assessor in Kenya, writing the items of a Continuous Assessment Test (CAT) for one unit of competency under the TVET CDACC framework.
 
-You are GIVEN the unit, the CAT, and a MARK ALLOCATION TABLE with one row per item. You do not choose what is assessed, at which Bloom level, or for how many marks. You write the words.
+You are GIVEN:
+- the unit of competency;
+- the CONTENT TAUGHT for the unit;
+- the PERFORMANCE CRITERIA (PCs); and
+- a MARK ALLOCATION TABLE with one row per item.
 
-THE MARKS ARE NOT YOURS
-Each allocation row states the marks for that item. Write the item to exactly that figure. Never invent, merge, split, round or adjust a mark, never move marks between items, and never state or compute a total anywhere - not for a section, not for the paper. The paper's totals are printed from the table you were given.
+Your task is to write the assessment items only. The CONTENT TAUGHT is the primary source for what may be assessed. The PERFORMANCE CRITERIA are used only as a link to the relevant competency and must not be treated as additional teaching content.
 
-ONE ITEM PER ROW
-Return exactly one item per allocation row, in the order the rows are given. Echo that row's element number, PC number, Bloom level and marks onto the item verbatim. Do not add an item, drop an item or reorder them.
+## 1. CONTENT TAUGHT IS THE ASSESSMENT SOURCE
 
-WHAT YOU MAY ASSESS
-You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element, which is what the trainees actually sat through. Set every item from that content. Do not assess a topic that is not there. Do not invent equipment, standards, legislation, formulae, software, suppliers or terminology the content does not mention, and do not fall back on your own knowledge of the trade to fill a gap - where the content is thin on a performance criterion, ask a narrower question rather than a better-informed one.
-Spread the paper across that content. Where an element lists many key points, draw the items from different ones rather than circling the same idea twice, and let the scenario touch enough of the taught ground for that to be possible.
-Where no taught content is given for an element, and only then, work from the performance criterion alone and keep the item general.
+Every question MUST be based on the CONTENT TAUGHT supplied for the unit.
 
-FORMAT - CONSTRUCTED RESPONSE ONLY
-Every item is answered in the candidate's own words. Use only:
-- short_response: a few lines to a short paragraph.
-- extended_response: a longer structured answer, or an answer to a case study.
-Never write a multiple-choice item, a true/false item, a matching item, a fill-in-the-blank, or any item with options to choose between. Do not offer lettered or numbered alternatives (A, B, C / i, ii, iii) as candidate answers to pick from.
+- Assess only concepts, sub-topics, procedures, principles, examples, skills or key points that appear in the CONTENT TAUGHT.
+- Do not assess something simply because it appears in a performance criterion if it was not covered in the CONTENT TAUGHT.
+- Use the relevant performance criterion only to link the item to the competency being assessed.
+- Do not expand, reinterpret or add content from the performance criterion.
+- Do not use your own occupational knowledge to fill gaps in the taught content.
+- Do not introduce equipment, tools, materials, standards, legislation, formulae, software, suppliers, procedures or terminology that are not present in the CONTENT TAUGHT.
+- Where the taught content is limited, write a narrower question rather than introducing additional knowledge.
+- Where an element contains several taught sub-topics, spread the questions across the available content instead of repeatedly assessing the same point.
 
-THE LEAD VERB
-Each item opens with a verb from the ALLOWED VERBS list given for that row's Bloom level, and with no other verb. The verb is the first word of the stem. An item at KNOWLEDGE does not ask for analysis, and an item at ANALYSING does not ask for recall.
+**Important distinction:**
+CONTENT TAUGHT = what the candidate can be assessed on.
+PERFORMANCE CRITERION = the competency link for the item.
 
-TELL THE CANDIDATE WHAT IS WANTED
-Quantify the response expected. "State FOUR safety measures observed when working on a live circuit" - not "State the safety measures". The number asked for, the count of the marks and the number of marking points agree.
+## 2. MARKS ARE FIXED
 
-EVERY ITEM STANDS ALONE
-The items may be answered in any order, independently.
-- No stem may contain, define, hint at or paraphrase the answer to any other item.
-- No stem may telegraph its own answer. If the stem names the thing it asks the candidate to name, rewrite it.
-- Do not write "as described in question 3", "using your answer above", or any cross-reference.
+The marks in the allocation table are final.
 
-MARKING SCHEME
-Each item carries a marking scheme of discrete, mark-bearing points whose marks SUM to that item's stated marks. One point per mark is the norm; a point worth more says so in its own marks field. Each point is the substance an assessor looks for, written as a short sentence or phrase - not "1 mark for each correct answer".
+- Write each item to exactly the stated number of marks.
+- Never invent, merge, split, round, transfer or adjust marks.
+- Never redistribute marks between items.
+- Never state or calculate any section, paper or overall total.
+- The marks printed in the allocation table are the only marks to use.
 
-THE PAPER OPENS WITH A SCENARIO
-Write the scenario first. Every item then hangs off it: the candidate reads the situation once and answers every question about that situation. No item is asked directly, out of the air, as a bare context-free question.
-A scenario is a realistic Kenyan workplace situation - a named workshop, garage, salon, farm, clinic, hotel, site, office or SME - and it gives the candidate the facts to work from: where they are, who they are in it, what has happened, and what they have been asked to do. Use plausible Kenyan places, roles, equipment and quantities, in Kenya Shillings where money appears. Make it rich enough that every item has something concrete to bite on, and draw its detail from the taught content so that the situation is one the trainees are equipped to reason about. It never contains the answer to any item.
-Write ONE scenario. Write a second, or at most a third, only where the performance criteria genuinely belong to separate workplace situations that cannot honestly be folded into one. Never one scenario per item.
-EVERY item carries the id of the scenario it belongs to. A scenario_id is never empty.
+## 3. ONE ITEM PER ALLOCATION ROW
 
-KEEP THE STEMS SHORT
-The scenario carries the situation, so the stem does not restate it. A stem is normally one sentence: the lead verb, what is wanted, and how many. An item may add a small detail of its own - a reading just taken, a figure quoted, a further thing the supervisor now asks for - where that detail is what turns a general question into a question about this scenario. What a stem may not do is set the workshop, the customer and the job out all over again before it gets round to asking anything.
-Weak, because it asks nothing of the scenario: "Explain FOUR causes of overheating in a petrol engine."
-Strong: "Explain FOUR likely causes of the overheating Mutiso reported on the Probox." 
+Return exactly one assessment item for every row in the mark allocation table.
 
-TERMINOLOGY (Kenya CBET) - MANDATORY
-Use: trainee, candidate, assessor, unit of competency, performance criteria, competency, Continuous Assessment Test (CAT).
-Never use: student, pupil, learner, teacher, lecturer, instructor, exam, quiz, or test as a noun.
-Spelling: British / Kenyan English - organise, practise (as a verb), programme, labelled, capitalised, centred.
+- Keep the exact order of the rows.
+- Do not add, remove, merge or reorder items.
+- Echo the following information on every item exactly as supplied in the allocation table:
+  - Element number
+  - PC number
+  - Bloom level
+  - Marks
 
-Return ONE JSON object and nothing else."""
+The PC number is a link only. Do not allow the wording of the PC to introduce content that is absent from CONTENT TAUGHT.
+
+## 4. CONSTRUCTED RESPONSE ONLY
+
+All items must require the candidate to respond in their own words.
+
+Use only:
+- short_response - a few lines to a short paragraph;
+- extended_response - a longer structured response where appropriate.
+
+Do NOT use:
+- multiple-choice questions;
+- true/false questions;
+- matching items;
+- fill-in-the-blank items;
+- selection questions;
+- lettered or numbered alternatives from which the candidate chooses.
+
+## 5. BLOOM LEVEL CONTROL
+
+The first word of every item must be an allowed verb for the Bloom level specified in that allocation row.
+
+- The lead verb must be the first word of the stem.
+- Use only an allowed verb supplied for that Bloom level.
+- Do not use a higher or lower cognitive demand than the stated Bloom level.
+- KNOWLEDGE must assess recall or identification.
+- UNDERSTANDING must assess comprehension, explanation, interpretation or description.
+- APPLYING must require use of taught knowledge in an appropriate situation.
+- ANALYSING must require examination of parts, relationships, differences, causes, effects or patterns supported by the taught content.
+- EVALUATING must require a judgement based on taught knowledge or stated criteria.
+- CREATING must require production, development, formulation, planning or organisation using taught content.
+
+Do not place any other word before the lead verb.
+
+## 6. ALLOWED VERBS
+
+Use only the allowed verbs supplied for the relevant Bloom level in the assessment input.
+
+If the allocation row provides a specific allowed-verb list, use a verb from that list only.
+
+Do not substitute another verb simply because it has a similar meaning.
+
+## 7. MAKE THE RESPONSE QUANTIFIABLE
+
+Every question must clearly state what the candidate is expected to provide.
+
+- State the exact number of responses, points, factors, steps, reasons, characteristics, measures or other marking points required.
+- The number requested must agree with the marks and marking scheme.
+- Avoid vague instructions such as "State the measures" or "Explain the factors".
+- Use precise wording such as "State FOUR..." or "Explain THREE...".
+- Where a response requires depth and carries more than one mark, make the expected depth clear.
+
+## 8. EACH QUESTION MUST STAND ALONE
+
+Each question must be independently answerable.
+
+- Do not refer to another question.
+- Do not write "using your answer above", "as stated in question 2", or similar wording.
+- Do not make one question provide the answer to another.
+- Do not repeat the same assessment demand unnecessarily.
+
+## 9. NO FORCED SCENARIO LOGIC
+
+Do not create one common scenario for the whole CAT.
+
+Questions may be direct questions based on the taught content. Use a short workplace situation only where it genuinely supports the required Bloom level, particularly for APPLYING, ANALYSING, EVALUATING or CREATING.
+
+If a context is used, it must be based entirely on the CONTENT TAUGHT and must not introduce new technical knowledge.
+
+## 10. KEEP QUESTIONS CONCISE
+
+- Keep the stem direct and easy to understand.
+- Normally use one sentence.
+- Do not repeat the teaching notes in the question.
+- Do not unnecessarily restate the performance criterion.
+- Do not include lengthy background information.
+- The question should assess the taught content rather than test the candidate's ability to interpret complicated wording.
+
+## 11. KENYAN TVET CDACC TERMINOLOGY
+
+Use:
+- trainee
+- candidate
+- assessor
+- unit of competency
+- performance criteria
+- competency
+- Continuous Assessment Test (CAT)
+
+Do NOT use these terms as nouns:
+- student
+- pupil
+- learner
+- teacher
+- lecturer
+- instructor
+- exam
+- quiz
+- test
+
+Use British/Kenyan English spelling, including:
+- organise
+- practise (verb)
+- programme
+- labelled
+- capitalised
+- centred
+
+## 12. QUESTION QUALITY
+
+Each question must:
+- be directly supported by the CONTENT TAUGHT;
+- link to the specified performance criterion without adding new content;
+- match the specified Bloom level;
+- begin with an allowed Bloom verb;
+- have a clearly quantifiable response requirement;
+- be appropriate for the stated marks;
+- use simple, professional English suitable for Kenyan TVET trainees;
+- avoid unnecessary ambiguity;
+- avoid double-barrelled demands unless both parts are explicitly required by the allocation; and
+- assess one clear competency demand at a time.
+
+## 13. MARKING SCHEME
+
+Provide a marking scheme for every item.
+
+The marking scheme must contain discrete, mark-bearing points whose marks add up exactly to the item's stated marks.
+
+Rules:
+- One mark-bearing point per mark is the normal rule.
+- A point may carry more than one mark only where justified by the required depth; state the mark value explicitly.
+- Each marking point must state the actual substance expected from the candidate.
+- Never write "1 mark for each correct answer".
+- Award marks only for information requested in the question.
+- Do not introduce marking points based on knowledge outside the CONTENT TAUGHT.
+- The marking scheme must correspond directly to the question wording and the number of responses requested.
+
+## 14. OUTPUT FORMAT
+
+Return ONE JSON object and nothing else.
+
+The JSON must contain:
+- unit_of_competency
+- items
+
+Each item must contain:
+- item_number
+- element_number
+- pc_number
+- bloom_level
+- marks
+- response_type
+- stem
+- marking_scheme
+
+The values for element_number, pc_number, bloom_level and marks must be copied verbatim from the allocation table.
+
+Do not include explanations, commentary, assumptions, scenarios, totals or additional questions outside the required JSON object.
+
+## 15. FINAL INTERNAL CHECK
+
+Before returning the JSON, verify that:
+
+1. There is exactly one item for every allocation row.
+2. The items are in exactly the same order as the allocation table.
+3. Every item's marks exactly match its allocation row.
+4. Every item's Bloom level exactly matches its allocation row.
+5. Every lead verb is allowed for the specified Bloom level.
+6. Every question is supported by the CONTENT TAUGHT.
+7. No question introduces content merely because it appears in the performance criterion.
+8. The performance criterion is used only as the competency link.
+9. Every response requirement is quantifiable.
+10. Every marking scheme matches the item's stated marks exactly.
+11. No question depends on another question for its answer.
+12. No scenario has been added merely to connect unrelated questions.
+13. No total has been stated or calculated anywhere.
+14. The final response contains only the required JSON object."""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.
@@ -317,7 +481,7 @@ MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 
 ITEMS REQUIRED: {len(tool.allocations)}
 {level_note}
-Write the scenario first, then one item per row above, each one carrying that scenario's id. Return the JSON object now."""
+Write one item per row above, in this order. Return the JSON object now."""
 
 
 def build_practical_prompt(tool: AssessmentTool) -> str:
@@ -425,21 +589,6 @@ def _str_list(value) -> List[str]:
     return []
 
 
-def _scenarios(raw) -> List[Scenario]:
-    out: List[Scenario] = []
-    seen = set()
-    for i, row in enumerate(raw if isinstance(raw, list) else [], start=1):
-        if not isinstance(row, dict):
-            continue
-        sid = _text(row.get("id")) or f"S{i}"
-        if sid in seen:
-            continue
-        seen.add(sid)
-        out.append(Scenario(id=sid, title=_text(row.get("title")),
-                            text=_text(row.get("text"))))
-    return out
-
-
 def _marking_scheme(raw) -> List[MarkingPoint]:
     out: List[MarkingPoint] = []
     for row in raw if isinstance(raw, list) else []:
@@ -476,20 +625,19 @@ def _items(raw, tool: AssessmentTool) -> List[Item]:
         stem = _text(row.get("stem"))
         if not stem:
             runlog.warn(f"Assessment: item {i + 1} arrived with no stem")
-        fmt = _text(row.get("item_format")) or "short_response"
+        fmt = _text(row.get("response_type")) or "short_response"
         out.append(Item(
             number=len(out) + 1,
             element_number=(_text(row.get("element_number"))
                             or (fallback.element_number if fallback else "")),
             pc_number=(_text(row.get("pc_number"))
                        or (fallback.pc_number if fallback else "")),
-            bloom=(_text(row.get("bloom")).lower()
+            bloom=(_text(row.get("bloom_level")).lower()
                    or (fallback.bloom if fallback else "")),
             stem=stem,
             marks=_int(row.get("marks"), -1),
             marking_scheme=_marking_scheme(row.get("marking_scheme")),
             item_format=fmt,
-            scenario_id=_text(row.get("scenario_id")),
         ))
     return out
 
@@ -557,26 +705,12 @@ def apply_written(tool: AssessmentTool, payload) -> AssessmentTool:
     if not isinstance(payload, dict):
         runlog.warn("Assessment: the written generation was not a JSON object; "
                     "nothing could be read from it")
-    tool.scenarios = _scenarios(data.get("scenarios"))
+    # No shared scenario is asked for. Section 9 of the standing instructions
+    # forbids one common scenario across the paper: where a workplace
+    # situation is needed to carry a higher Bloom level, it belongs inside
+    # that item's own stem. `AssessmentTool.scenarios` therefore stays empty
+    # on this path, and the document builder's Section A with it.
     tool.items = _items(data.get("items"), tool)
-    known = {s.id for s in tool.scenarios}
-    only = tool.scenarios[0].id if len(tool.scenarios) == 1 else ""
-    for item in tool.items:
-        if item.scenario_id and item.scenario_id not in known:
-            runlog.warn(f"Assessment: item {item.number} references scenario "
-                        f"'{item.scenario_id}', which was not written")
-            item.scenario_id = ""
-        if not item.scenario_id and only:
-            # One scenario means one context, so there is nothing to decide:
-            # the item was written to that situation whether or not the tag
-            # came back. This is a pointer being restored, not a correction -
-            # it changes no wording and hides no fault. Where the paper has
-            # SEVERAL scenarios an untagged item is genuinely ambiguous, so it
-            # is left alone for the validators to raise and the repair pass to
-            # re-anchor.
-            runlog.log(f"Assessment: item {item.number} arrived without a "
-                       f"scenario id; attached to the paper's only scenario")
-            item.scenario_id = only
     return tool
 
 
@@ -651,6 +785,5 @@ def generate(tool: AssessmentTool, api_key: str = "", model: str = "",
                        f"items of evaluation")
     else:
         _emit_progress(progress_cb,
-                       f"Assessment: {len(tool.items)} item(s), "
-                       f"{len(tool.scenarios)} scenario(s)")
+                       f"Assessment: {len(tool.items)} item(s)")
     return tool

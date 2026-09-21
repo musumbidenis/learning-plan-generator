@@ -22,7 +22,8 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
 from assessment_models import (ANALYSING, APPLYING, CAT_1, CREATING,
                                EVALUATING, KNOWLEDGE, PRACTICAL, THEORY,
                                UNDERSTANDING, Allocation, AssessmentTool,
-                               CatDefinition, ChecklistItem, Item, MarkingPoint,
+                               CatDefinition, ChecklistItem, ContentTopic,
+                               ElementContent, Item, MarkingPoint,
                                OralQuestion, Problem, Scenario, TaskBrief)
 
 
@@ -660,86 +661,38 @@ def test_the_helpers_split_the_problems_the_way_the_ui_needs():
 
 
 # --------------------------------------------------------------------------- #
-# 11. Every question is asked about a scenario
+# What a repair is allowed to know
 # --------------------------------------------------------------------------- #
-def _grounding(tool):
-    return [p for p in av.validate(tool)
-            if getattr(p, "check", "") == av.SCENARIO_GROUNDING]
-
-
-def test_an_item_belonging_to_no_scenario_is_caught():
-    """A CDACC written CAT sets the situation once and questions it. An item
-    asked out of the air tests recall of a syllabus, not competence."""
+def test_a_repair_is_shown_the_taught_content():
+    """Otherwise the rewrite is made from the model's own knowledge of the
+    trade - the exact fault the content was introduced to prevent, at the one
+    point where nobody reads the wording again afterwards."""
     tool = _written()
-    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot",
-                                   text="A second bay takes the overflow."))
-    tool.items[2].scenario_id = ""
+    tool.content = [ElementContent(
+        element_number="1", element_title="Prepare for servicing",
+        topics=[ContentTopic(number="1.1", title="Servicing tools",
+                             key_points=["Torque wrench calibration"])])]
 
-    found = _grounding(tool)
+    prompt = av.build_repair_prompt(tool, {1: ["wrong verb"]})
 
-    assert len(found) == 1
-    assert found[0].item_number == 3
+    assert "CONTENT TAUGHT" in prompt
+    assert "Torque wrench calibration" in prompt
 
 
-def test_an_orphaned_item_is_repairable_rather_than_fatal():
-    """Re-anchoring is a rewrite the model can do, so it does not stop the
-    documents - it goes round the repair loop like any other wording fault."""
+def test_a_repair_without_any_content_still_builds_a_prompt():
+    prompt = av.build_repair_prompt(_written(), {1: ["wrong verb"]})
+
+    assert "CONTENT TAUGHT" not in prompt
+    assert "ITEMS TO CORRECT" in prompt
+
+
+def test_a_repair_answer_speaks_the_same_field_names_as_the_paper():
+    """`response_type`, not `item_format`: the repair schema and the written
+    schema describe the same item to the same model."""
     tool = _written()
-    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot", text="..."))
-    tool.items[2].scenario_id = ""
 
-    found = _grounding(tool)
+    av._apply_repair(tool, {"items": [{"number": 1, "stem": "State FOUR tools.",
+                                       "response_type": "extended_response"}]},
+                     {1: ["wrong format"]})
 
-    assert found[0].repairable
-    assert not found[0].blocking
-
-
-def test_an_item_pointing_at_a_scenario_that_is_not_there_is_caught():
-    tool = _written()
-    tool.items[1].scenario_id = "S9"
-
-    assert [p.item_number for p in _grounding(tool)] == [2]
-
-
-def test_a_paper_with_no_scenario_at_all_is_reported_but_not_withheld():
-    """There is nothing to anchor the items to, so no rewrite fixes it and
-    the trainer has to generate again. Withholding the documents over it would
-    help nobody: they can see it at a glance."""
-    tool = _written()
-    tool.scenarios = []
-    for item in tool.items:
-        item.scenario_id = ""
-
-    found = _grounding(tool)
-
-    assert len(found) == 1                     # once for the paper, not per item
-    assert not found[0].blocking
-    assert "generate it again" in found[0].message
-
-
-def test_a_practical_tool_is_not_asked_for_scenarios():
-    assert _grounding(_practical()) == []
-
-
-def test_a_repair_may_move_an_item_onto_a_scenario(monkeypatch):
-    """The repair prompt shows every scenario, so re-anchoring is within what
-    the pass can return - and only onto one that exists."""
-    tool = _written()
-    tool.scenarios.append(Scenario(id="S2", title="Kisii Depot", text="..."))
-    tool.items[2].scenario_id = ""
-
-    av._apply_repair(tool, {"items": [{"number": 3, "stem": tool.items[2].stem,
-                                       "scenario_id": "S2"}]}, {3: ["orphan"]})
-
-    assert tool.items[2].scenario_id == "S2"
-
-
-def test_a_repair_cannot_invent_a_scenario_to_anchor_to():
-    """An id nobody wrote would leave the item orphaned and look filled in."""
-    tool = _written()
-    tool.items[0].scenario_id = ""
-
-    av._apply_repair(tool, {"items": [{"number": 1, "stem": tool.items[0].stem,
-                                       "scenario_id": "S7"}]}, {1: ["orphan"]})
-
-    assert tool.items[0].scenario_id == ""
+    assert tool.items[0].item_format == "extended_response"

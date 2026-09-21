@@ -96,19 +96,20 @@ def _tool(assessment_type=THEORY, total=20):
 
 
 WRITTEN_PAYLOAD = {
-    "scenarios": [{"id": "S1", "title": "Mwea Garage",
-                   "text": "A saloon car is booked in for a routine service."}],
+    "unit_of_competency": "Perform Basic Vehicle Servicing",
     "items": [
-        {"element_number": "1", "pc_number": "1.1", "bloom": KNOWLEDGE,
-         "item_format": "short_response", "scenario_id": "S1",
+        {"item_number": 1,
+         "element_number": "1", "pc_number": "1.1", "bloom_level": KNOWLEDGE,
+         "response_type": "short_response",
          "stem": "State FOUR hand tools issued for the routine service.",
          "marks": 4,
          "marking_scheme": [{"text": "Spanner set", "marks": 1},
                             {"text": "Torque wrench", "marks": 1},
                             {"text": "Trolley jack", "marks": 1},
                             {"text": "Feeler gauge", "marks": 1}]},
-        {"element_number": "1", "pc_number": "1.2", "bloom": UNDERSTANDING,
-         "item_format": "short_response", "scenario_id": "",
+        {"item_number": 2,
+         "element_number": "1", "pc_number": "1.2",
+         "bloom_level": UNDERSTANDING, "response_type": "short_response",
          "stem": "Explain FOUR reasons a technician wears the gear issued "
                  "before grinding.",
          "marks": 4,
@@ -249,11 +250,19 @@ def test_the_practical_path_uses_its_own_schema_and_instructions(monkeypatch):
         "oral_questions"}
 
 
-def test_the_written_path_asks_for_scenarios_and_items(monkeypatch):
+def test_the_written_schema_is_the_one_the_instructions_describe(monkeypatch):
+    """Section 14 of the standing instructions and the strict schema are two
+    statements of one contract. Drift between them tells the model to return
+    one shape and decodes it as another."""
     _, rec = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
     call = rec.calls[0]
+    item = call["schema"]["properties"]["items"]["items"]["properties"]
+
     assert call["schema_name"] == "assessment_written"
-    assert set(call["schema"]["properties"]) == {"scenarios", "items"}
+    assert set(call["schema"]["properties"]) == {"unit_of_competency", "items"}
+    assert set(item) == {"item_number", "element_number", "pc_number",
+                         "bloom_level", "marks", "response_type", "stem",
+                         "marking_scheme"}
     # strict decoding: every declared property required, no extras
     assert call["schema"]["additionalProperties"] is False
 
@@ -261,13 +270,22 @@ def test_the_written_path_asks_for_scenarios_and_items(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Reading the answer
 # --------------------------------------------------------------------------- #
-def test_a_written_generation_becomes_scenarios_and_numbered_items(monkeypatch):
+def test_a_written_generation_becomes_numbered_items(monkeypatch):
     tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
-    assert [s.id for s in tool.scenarios] == ["S1"]
     assert [i.number for i in tool.items] == [1, 2]
     assert tool.items[0].marks == 4
+    assert tool.items[0].bloom == KNOWLEDGE
+    assert tool.items[0].item_format == "short_response"
     assert [p.text for p in tool.items[0].marking_scheme][0] == "Spanner set"
-    assert tool.items[0].scenario_id == "S1"
+
+
+def test_the_written_paper_carries_no_shared_scenario(monkeypatch):
+    """Section 9: no one common scenario across the CAT. Where a situation is
+    needed to carry a higher Bloom level it goes inside that item's own stem,
+    so there is nothing for the paper to collect at the top."""
+    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
+
+    assert tool.scenarios == []
 
 
 def test_a_practical_generation_becomes_a_brief_and_two_checklists(monkeypatch):
@@ -289,36 +307,6 @@ def test_a_mark_the_model_changed_is_kept_not_quietly_corrected(monkeypatch):
     tool, _ = _run(monkeypatch, _tool(), payload)
     assert tool.items[0].marks == 6
     assert tool.allocations[0].marks == 4
-
-
-def test_an_item_naming_a_scenario_that_was_never_written_loses_it(monkeypatch):
-    """A dangling reference never survives - the paper has no S9 to print."""
-    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
-    payload["scenarios"].append({"id": "S2", "title": "Kisii Depot",
-                                 "text": "A second workshop takes overflow."})
-    payload["items"][1]["scenario_id"] = "S9"
-    tool, _ = _run(monkeypatch, _tool(), payload)
-    assert tool.items[1].scenario_id == ""
-
-
-def test_an_untagged_item_joins_the_papers_only_scenario(monkeypatch):
-    """One scenario is one context, so there is nothing to decide. The model
-    dropping the tag must not leave a question that reads as if it were asked
-    out of the air."""
-    tool, _ = _run(monkeypatch, _tool(), WRITTEN_PAYLOAD)
-
-    assert [i.scenario_id for i in tool.items] == ["S1", "S1"]
-
-
-def test_an_untagged_item_is_left_alone_where_there_is_a_choice(monkeypatch):
-    """Two scenarios and no tag is a real ambiguity: guessing would put the
-    question under the wrong situation, so it is left for the validators."""
-    payload = json.loads(json.dumps(WRITTEN_PAYLOAD))
-    payload["scenarios"].append({"id": "S2", "title": "Kisii Depot",
-                                 "text": "A second workshop takes overflow."})
-    tool, _ = _run(monkeypatch, _tool(), payload)
-
-    assert tool.items[1].scenario_id == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -471,12 +459,20 @@ def test_a_unit_with_no_curriculum_read_still_gets_a_prompt():
 
 
 def test_the_standing_instructions_forbid_assessing_what_was_not_taught():
-    assert "Do not assess a topic that is not there" in         assessment_ai.AS_WRITTEN_SYSTEM
+    written = assessment_ai.AS_WRITTEN_SYSTEM
+    assert "CONTENT TAUGHT IS THE ASSESSMENT SOURCE" in written
+    assert "Do not use your own occupational knowledge" in written
     assert "never taught" in assessment_ai.AS_PRACTICAL_SYSTEM
 
 
-def test_the_paper_is_told_to_open_with_a_scenario():
-    prompt = assessment_ai.build_written_prompt(_tool())
+def test_a_performance_criterion_is_a_link_not_a_source():
+    """The distinction the instructions turn on: a PC says which competency an
+    item belongs to; it does not licence assessing its wording."""
+    assert "PERFORMANCE CRITERION = the competency link for the item" in \
+        assessment_ai.AS_WRITTEN_SYSTEM
 
-    assert "Write the scenario first" in prompt
-    assert "A scenario_id is never empty" in assessment_ai.AS_WRITTEN_SYSTEM
+
+def test_the_paper_is_not_told_to_invent_a_common_scenario():
+    assert "Do not create one common scenario for the whole CAT" in \
+        assessment_ai.AS_WRITTEN_SYSTEM
+    assert "scenario" not in assessment_ai.build_written_prompt(_tool())
