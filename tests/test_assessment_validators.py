@@ -598,7 +598,10 @@ def test_only_repairable_faults_are_sent_to_the_model(monkeypatch):
     assert rep.prompts == []
 
 
-def test_a_practical_tools_faults_are_left_for_hand_editing(monkeypatch):
+def test_a_practical_tools_items_of_evaluation_are_repaired_too(monkeypatch):
+    """An item that restates its PC is the commonest thing wrong with a CDACC
+    checklist, and the whole reason the check exists. Reporting it for hand
+    editing would leave the tool failing the rule it was written to enforce."""
     rep = Repairer()
     monkeypatch.setattr(av, "_chat_json", rep)
     tool = _practical()
@@ -606,8 +609,45 @@ def test_a_practical_tools_faults_are_left_for_hand_editing(monkeypatch):
         "Tools and equipment are identified according to workplace procedures")
     problems = av.validate(tool)
     assert av.ITEM_NOT_PC in _checks(problems)
+
     av.repair(tool, problems, api_key="k", model="m")
-    assert rep.prompts == []
+
+    assert rep.prompts, "the failing item was never sent back"
+    assert "WHAT IS WRONG" in rep.prompts[0]
+
+
+def test_a_repaired_item_of_evaluation_keeps_its_marks_and_its_pcs(monkeypatch):
+    """The rewrite may change what the assessor READS, never what they are
+    told to inspect or what it is worth."""
+    tool = _practical()
+    tool.observation_checklist[0].text = (
+        "Tools and equipment are identified according to workplace procedures")
+    marks = tool.observation_checklist[0].marks
+    pcs = list(tool.observation_checklist[0].pc_numbers)
+    number = tool.observation_checklist[0].number
+
+    landed = av._apply_practical_repair(
+        tool, {"items": [{"number": number, "item": "Selects the spanner set "
+                                                    "and torque wrench before "
+                                                    "starting"}]},
+        {number: ["repeats its PC"]})
+
+    assert landed == 1
+    assert tool.observation_checklist[0].marks == marks
+    assert tool.observation_checklist[0].pc_numbers == pcs
+    assert "spanner" in tool.observation_checklist[0].text
+
+
+def test_an_item_of_evaluation_nobody_asked_about_is_not_rewritten():
+    """A model that decides to improve a frozen item cannot."""
+    tool = _practical()
+    frozen = tool.product_checklist[0].text
+    number = tool.product_checklist[0].number
+
+    av._apply_practical_repair(
+        tool, {"items": [{"number": number, "item": "something else"}]}, {})
+
+    assert tool.product_checklist[0].text == frozen
 
 
 def test_the_helpers_split_the_problems_the_way_the_ui_needs():

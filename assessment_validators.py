@@ -35,7 +35,8 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import runlog
-from ai_client import AIError, _chat_json, _emit_progress, _strict
+from ai_client import (AIError, _chat_json, _emit_progress, _strict,
+                       load_api_key, load_model_name, resolve_model)
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                ITEM_INDEPENDENCE_OVERLAP,
                                ITEM_VS_PC_SIMILARITY, MAX_CHECKLIST_ITEMS,
@@ -520,6 +521,124 @@ RULES
 Return ONE JSON object and nothing else."""
 
 
+PRACTICAL_REPAIR_SYSTEM = """You are a senior TVET assessor in Kenya, correcting individual items of evaluation on a practical assessment checklist that has already been written and approved in every other respect.
+
+An item of evaluation is NOT a performance criterion. A performance criterion is general and comes from the occupational standard. An item of evaluation is specific to the task the candidate was set, and says what the assessor will actually watch them do or inspect in the finished work.
+
+Rewrite ONLY the items you are given. For each one, keep the same observable behaviour or outcome, the same marks, and the same performance criteria - change the WORDING so it describes what is seen during THIS task rather than repeating the standard's general statement. Return every item you were given, by its number, and nothing else."""
+
+
+def _practical_repair_schema() -> dict:
+    return _strict({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "number": {"type": "integer"},
+                        "item": {"type": "string"},
+                    },
+                    "required": ["number", "item"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    })
+
+
+def _checklist_items(tool: AssessmentTool) -> List[ChecklistItem]:
+    return list(tool.observation_checklist) + list(tool.product_checklist)
+
+
+def build_practical_repair_prompt(tool: AssessmentTool,
+                                  faults: Dict[int, List[str]]) -> str:
+    """The failing items of evaluation, with every other one frozen."""
+    by_number = {c.number: c for c in _checklist_items(tool)}
+    failing = []
+    for number in sorted(faults):
+        item = by_number.get(number)
+        if item is None:
+            continue
+        pcs = ", ".join(
+            f"{n} ({_pc_text(tool, n)})" for n in item.pc_numbers) or "(none)"
+        failing.append(
+            f"ITEM {item.number} - {item.marks} mark(s)\n"
+            f"   traces to: {pcs}\n"
+            f"   wording: {item.text}\n"
+            f"   WHAT IS WRONG:\n"
+            + "\n".join(f"     - {why}" for why in faults[number]))
+    frozen = "\n".join(f"   {c.number}. {c.text}"
+                        for c in _checklist_items(tool)
+                        if c.number not in faults)
+    return (f"TASK: {tool.task_brief.task if tool.task_brief else ''}\n\n"
+            f"REWRITE THESE ITEMS OF EVALUATION:\n\n"
+            + "\n\n".join(failing)
+            + f"\n\nEVERY OTHER ITEM IS FIXED AND MUST NOT BE REPEATED OR "
+              f"CONTRADICTED:\n{frozen or '   (none)'}\n")
+
+
+def _pc_text(tool: AssessmentTool, number: str) -> str:
+    return next((a.pc_text for a in tool.allocations
+                 if a.pc_number == number), "")
+
+
+def _apply_practical_repair(tool: AssessmentTool, payload,
+                            faults: Dict[int, List[str]]) -> int:
+    """Put corrected wordings back. Marks and PC tracing are never touched."""
+    rows = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        runlog.warn("Assessment: the repair answer had no items in it")
+        return 0
+    by_number = {c.number: c for c in _checklist_items(tool)}
+    landed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            number = int(row.get("number"))
+        except (TypeError, ValueError):
+            continue
+        text = str(row.get("item") or "").strip()
+        item = by_number.get(number)
+        if not text or item is None or number not in faults:
+            continue
+        item.text = text
+        landed += 1
+    return landed
+
+
+def _repair_practical(tool: AssessmentTool, faults: Dict[int, List[str]],
+                      api_key: str, model: str, progress_cb) -> AssessmentTool:
+    """The written path's loop, on items of evaluation."""
+    if not _checklist_items(tool):
+        return tool
+    for attempt in range(1, MAX_REPAIR_PASSES + 1):
+        _emit_progress(progress_cb,
+                       f"Assessment: repairing {len(faults)} item(s) of "
+                       f"evaluation, pass {attempt} of {MAX_REPAIR_PASSES}")
+        try:
+            payload = _chat_json(build_practical_repair_prompt(tool, faults),
+                                 api_key, model, _practical_repair_schema(),
+                                 "assessment_practical_repair",
+                                 progress_cb=progress_cb,
+                                 temperature=TEMPERATURE,
+                                 system=PRACTICAL_REPAIR_SYSTEM)
+        except AIError as e:
+            runlog.error(f"Assessment: repair pass {attempt} failed, keeping "
+                         f"the items as they are: {e}")
+            return tool
+        if not _apply_practical_repair(tool, payload, faults):
+            return tool
+        faults = _faults_by_item(validate(tool))
+        if not faults:
+            return tool
+    return tool
+
+
 def _repair_schema() -> dict:
     return _strict({
         "type": "object",
@@ -671,18 +790,29 @@ def repair(tool: AssessmentTool, problems: Sequence[Problem], api_key: str = "",
 
     At most MAX_REPAIR_PASSES passes. Whatever is still wrong after that is
     left in place for the user to edit by hand - call `validate` again on the
-    returned tool to see it. Practical tools are returned untouched: the
-    repairable faults there (an item of evaluation restating its PC) are
-    reported for hand editing rather than machine-rewritten, because moving a
-    checklist item's wording moves what the assessor is told to inspect.
-    """
-    if tool.is_practical:
-        runlog.log("Assessment: a practical tool's faults are reported for "
-                   "hand editing rather than repaired by the model")
-        return tool
+    returned tool to see it.
 
+    A practical tool is repaired the same way, on its items of evaluation. The
+    one repairable fault it produces is an item that restates its performance
+    criterion, which is the commonest thing wrong with a CDACC checklist and
+    the whole reason the check exists - reporting it for hand editing would
+    leave the tool failing the rule it was written to enforce. What the rewrite
+    may not change is what the assessor is told to inspect, or the marks, so
+    both are frozen and re-checked after the pass.
+    """
     faults = _faults_by_item(problems)
-    if not faults or not tool.items:
+    if not faults:
+        return tool
+    # The caller hands us what the UI had, which is usually nothing: the model
+    # was settled inside `generate` and never came back out. Settling it again
+    # here costs one lookup and is the difference between a repair pass and a
+    # request to a model named ''.
+    if not model:
+        api_key = api_key or load_api_key()
+        model = resolve_model(api_key, load_model_name(), progress_cb)
+    if tool.is_practical:
+        return _repair_practical(tool, faults, api_key, model, progress_cb)
+    if not tool.items:
         return tool
 
     for attempt in range(1, MAX_REPAIR_PASSES + 1):
