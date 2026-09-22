@@ -46,8 +46,21 @@ from models import Unit
 ss = st.session_state
 
 _STATE = dict(at_weighting=None, at_raw="", at_tool=None, at_problems=[])
-for _k, _v in _STATE.items():
-    ss.setdefault(_k, _v)
+
+
+def _ensure_state() -> None:
+    """Put the defaults in place for whichever session is running now.
+
+    This module is imported once per server process, but session state belongs
+    to a browser session. Setting the defaults at import time serves the first
+    session to arrive and nobody else: the next visitor, or the same one after
+    a state reset, reaches `_weighting_step` with no `at_raw` and Streamlit
+    raises AttributeError. `app.py` gets away with the import-time loop because
+    it is the entry script and is re-executed on every rerun; an imported
+    module is not, so it has to seed its own keys on each pass.
+    """
+    for key, default in _STATE.items():
+        ss.setdefault(key, default)
 
 _CAT_ORDER = [CAT_1, CAT_2, CAT_3, FINAL_CAT]
 _TYPE_LABEL = {THEORY: "Written (theory)", PRACTICAL: "Practical"}
@@ -312,6 +325,7 @@ def _documents(weighting: UnitWeighting, tool: AssessmentTool) -> None:
 
 def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     """The whole path, top to bottom."""
+    _ensure_state()
     st.subheader("Assessment tool")
     weighting = _weighting_step(os_unit)
     if weighting is None:
