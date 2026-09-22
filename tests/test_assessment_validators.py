@@ -941,3 +941,136 @@ def test_a_selected_response_format_is_never_quietly_relabelled():
     assert tool.items[0].item_format == "multiple_choice"
     assert [p for p in av.validate(tool)
             if p.check == av.FORMAT_COMPLIANCE] != []
+
+
+# --------------------------------------------------------------------------- #
+# 14. the question asks about the trade, not about the course
+# --------------------------------------------------------------------------- #
+def test_a_stem_that_points_at_the_course_is_caught():
+    """Seen live, four items out of six in one run, and in runs both with and
+    without reference notes."""
+    tool = _written()
+    tool.items[0].stem = "List FOUR ICT security threats covered in the unit."
+
+    found = [p for p in av.validate(tool)
+             if getattr(p, "check", "") == "course_reference"]
+
+    assert len(found) == 1
+    assert found[0].item_number == 1
+    assert found[0].repairable
+
+
+@pytest.mark.parametrize("stem", [
+    "Name FOUR types of malware described in the unit.",
+    "State THREE controls as taught in this module.",
+    "Outline FOUR steps discussed during the course.",
+    "Identify FOUR tools listed in the curriculum.",
+    "Describe THREE elements of a password policy as per the syllabus.",
+    "Identify FOUR key terms defined in the unit.",
+    "Name FOUR controls explained in this module.",
+])
+def test_the_ways_a_stem_points_at_the_course(stem):
+    tool = _written()
+    tool.items[0].stem = stem
+
+    assert any(getattr(p, "check", "") == "course_reference"
+               for p in av.validate(tool))
+
+
+@pytest.mark.parametrize("stem", [
+    "List FOUR ICT security threats.",
+    "State FOUR safety measures observed in the workshop.",
+    "Outline FOUR steps in the servicing procedure.",
+    "Describe THREE checks carried out during a road test.",
+])
+def test_an_ordinary_stem_is_not_caught(stem):
+    tool = _written()
+    tool.items[0].stem = stem
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "course_reference"]
+
+
+# --------------------------------------------------------------------------- #
+# 15. the answer is not already printed in the curriculum
+# --------------------------------------------------------------------------- #
+def _with_content(tool, key_points):
+    tool.content = [ElementContent(
+        element_number="1", element_title="Identify ICT security threats",
+        topics=[ContentTopic("1.1", "Threats", list(key_points))])]
+    return tool
+
+
+def test_an_item_answered_by_one_key_point_is_caught():
+    """"Types of malware: virus, worm, trojan, ransomware" answers "List FOUR
+    types of malware" before the candidate picks up a pen."""
+    tool = _written()
+    _with_content(tool, ["Types of malware: virus, worm, trojan, ransomware"])
+    tool.items[0].stem = "List FOUR types of malware."
+    tool.items[0].marking_scheme = [
+        MarkingPoint(text="Virus", marks=1),
+        MarkingPoint(text="Worm", marks=1),
+        MarkingPoint(text="Trojan", marks=1),
+        MarkingPoint(text="Ransomware", marks=1)]
+
+    found = [p for p in av.validate(tool)
+             if getattr(p, "check", "") == "syllabus_recitation"]
+
+    assert len(found) == 1
+    assert found[0].item_number == 1
+    assert found[0].repairable
+
+
+def test_recall_the_syllabus_does_not_spell_out_is_left_alone():
+    """The check is against reciting the handout, not against recall. A key
+    point that names no examples asks for knowledge of the trade."""
+    tool = _written()
+    _with_content(tool, ["Insider threats and their indicators"])
+    tool.items[0].stem = "State FOUR indicators of an insider threat."
+    tool.items[0].marking_scheme = [
+        MarkingPoint(text="Unusual access to files outside their role", marks=1),
+        MarkingPoint(text="Repeated failed logins on other accounts", marks=1),
+        MarkingPoint(text="Copying large volumes to removable media", marks=1),
+        MarkingPoint(text="Working unexplained hours without approval", marks=1)]
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "syllabus_recitation"]
+
+
+def test_a_question_that_goes_deeper_on_the_same_key_point_passes():
+    """The repair this check asks for: same key point, same level, same marks,
+    asked about instead of read out."""
+    tool = _written()
+    _with_content(tool, ["Types of malware: virus, worm, trojan, ransomware"])
+    tool.items[0].stem = "State FOUR ways malware reaches a workstation."
+    tool.items[0].marking_scheme = [
+        MarkingPoint(text="Infected removable media carried between machines",
+                     marks=1),
+        MarkingPoint(text="Attachment opened from a phishing message", marks=1),
+        MarkingPoint(text="Drive-by download from a compromised website",
+                     marks=1),
+        MarkingPoint(text="Software installed from an unofficial source",
+                     marks=1)]
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "syllabus_recitation"]
+
+
+def test_a_two_point_scheme_is_too_small_to_judge():
+    """Two points that happen to match a key point is a coincidence; four is
+    a pattern."""
+    tool = _written()
+    _with_content(tool, ["Types of malware: virus, worm"])
+    tool.items[0].marking_scheme = [MarkingPoint(text="Virus", marks=2),
+                                    MarkingPoint(text="Worm", marks=2)]
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "syllabus_recitation"]
+
+
+def test_with_no_curriculum_read_nothing_can_be_recited():
+    tool = _written()
+    tool.content = []
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "syllabus_recitation"]

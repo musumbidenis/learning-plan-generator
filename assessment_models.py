@@ -248,6 +248,34 @@ class ElementContent:
 
 
 @dataclass
+class KnowledgeNote:
+    """What a taught key point actually contains, read from a reference source.
+
+    DEPTH on a topic the curriculum already lists, never a new topic. The
+    curriculum writes "Vulnerability scanning tools" and stops; the note
+    carries what a scanner is, the dimensions the subject is normally broken
+    down along, and the names a practitioner uses - which is the difference
+    between asking a trainee to repeat a heading and asking them to use what
+    they were taught. Gathered in `assessment_knowledge`.
+
+    It stays attached to its key point so it can never be read as permission
+    to assess something outside the taught scope.
+    """
+    key_point: str                   # the curriculum line this backs
+    element_number: str = ""
+    topic_number: str = ""           # the sub-topic it sits under, '1.2'
+    summary: str = ""                # a few sentences of real substance
+    covers: List[str] = field(default_factory=list)   # the topic's dimensions
+    named: List[str] = field(default_factory=list)    # tools, standards, cases
+    source_title: str = ""
+    source_url: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.source_title or ""
+
+
+@dataclass
 class Exemplar:
     """One real question from a real past paper, kept with its source.
 
@@ -347,6 +375,10 @@ class AssessmentTool:
     # follow. Empty when nothing was found or the repositories were down,
     # which costs the paper its exemplars and not its generation.
     exemplars: List[Exemplar] = field(default_factory=list)
+    # Reference notes on the taught key points, giving the model something to
+    # be deep ABOUT. Empty when nothing was reachable, which costs the paper
+    # its depth and not its generation.
+    knowledge: List[KnowledgeNote] = field(default_factory=list)
     # written
     scenarios: List[Scenario] = field(default_factory=list)
     items: List[Item] = field(default_factory=list)

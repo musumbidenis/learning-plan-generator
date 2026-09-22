@@ -1,4 +1,4 @@
-"""The twelve checks a generated tool has to pass, and one repair pass.
+"""The fourteen checks a generated tool has to pass, and one repair pass.
 
 The model writes prose under tight constraints and mostly holds to them; these
 checks are for the times it does not. They fall into two kinds, and the
@@ -61,14 +61,17 @@ FORMAT_COMPLIANCE = "format_compliance"
 MARKS_FIT_VERB = "marks_fit_verb"
 PLACEHOLDER_KEY = "placeholder_key"
 UNFUNDED_ITEM = "unfunded_item"
+COURSE_REFERENCE = "course_reference"
+SYLLABUS_RECITATION = "syllabus_recitation"
 
-# The five a model can be asked to fix by rewriting the offending item. The
-# other six are arithmetic, coverage or allocation: rewording cannot change
-# them - an item too small for its own Bloom level needs more marks, not
-# better words.
+# The ones a model can be asked to fix by rewriting the offending item. The
+# rest are arithmetic, coverage or allocation: rewording cannot change them -
+# an item too small for its own Bloom level needs more marks, not better
+# words.
 REPAIRABLE_CHECKS = frozenset({BLOOM_CONFORMANCE, ITEM_INDEPENDENCE, STEM_CLUE,
                                ITEM_NOT_PC, FORMAT_COMPLIANCE,
-                               PLACEHOLDER_KEY})
+                               PLACEHOLDER_KEY, COURSE_REFERENCE,
+                               SYLLABUS_RECITATION})
 
 
 @dataclass(eq=False)
@@ -619,6 +622,122 @@ def _check_placeholder_key(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+# A stem that points at the course instead of asking about the trade:
+# "covered in the unit", "as described in this module", "listed in the
+# curriculum".
+_RE_COURSE_REFERENCE = re.compile(
+    r"\b(?:covered|taught|discussed|described|studied|learnt|learned|listed|"
+    r"outlined|given|mentioned|stated|presented|introduced|defined|named|"
+    r"explained|identified|shown|provided|supplied|included|encountered|"
+    r"examined|addressed|highlighted|set out)\s+"
+    r"(?:in|during)\s+(?:the|this|your)\s+"
+    r"(?:unit|course|module|class|lesson|curriculum|content|syllabus|"
+    r"training|programme|program|topic)"
+    r"|\b(?:as\s+per|according\s+to)\s+(?:the|this|your)\s+"
+    r"(?:unit|course|module|lesson|curriculum|syllabus)\b", re.I)
+
+
+def _check_course_reference(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """14. A question asks about the trade, never about the course.
+
+    "List FOUR ICT security threats covered in the unit" is a different and
+    much easier question than "List FOUR ICT security threats": it tells the
+    candidate the answer is a list they were given, and it tells them the
+    marking scheme is that list. A competent tradesperson who never sat this
+    particular course could not answer it, which is the test of whether an
+    item assesses competence or attendance.
+
+    The standing instructions forbid it in as many words and the model does it
+    anyway - four of six items in one live run, and in runs both with and
+    without reference notes, so it is not something the notes introduced. It
+    is a wording fault, which makes it repairable: deleting the phrase is
+    almost always the whole fix.
+    """
+    out: List[AssessmentProblem] = []
+    for item in tool.items:
+        found = _RE_COURSE_REFERENCE.search(item.stem or "")
+        if not found:
+            continue
+        out.append(_problem(
+            COURSE_REFERENCE,
+            f"item {item.number} asks about the course rather than the trade "
+            f"(\"{found.group(0)}\"); a candidate who knows the work should "
+            f"be able to answer without having sat this unit - ask the "
+            f"question directly",
+            where=f"item {item.number}", item_number=item.number))
+    return out
+
+
+KEY_POINT_ECHO_SHARE = 0.8
+MIN_ECHOED_POINTS = 3
+
+
+def _key_point_texts(tool: AssessmentTool) -> List[Set[str]]:
+    """Every taught key point, as a set of its content words."""
+    out: List[Set[str]] = []
+    for block in tool.content:
+        for topic in block.topics:
+            for point in topic.key_points:
+                words = tokens(point)
+                if words:
+                    out.append(words)
+    return out
+
+
+def _check_syllabus_recitation(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """15. The answer is not already printed in the key point it came from.
+
+    This is the shallowness fault, stated precisely enough to catch.
+
+    A curriculum key point often lists its own examples - "Types of malware:
+    virus, worm, trojan, ransomware". Ask "List FOUR types of malware" and the
+    marking scheme is that line, word for word. The candidate is being tested
+    on whether they can read a heading, and the question could have been
+    written by the syllabus itself. It is the single commonest way a generated
+    paper comes out thin, and no other check sees it: the marks add up, the
+    verb is right for the level, the item sits on its PC and nothing is
+    placeholder.
+
+    Caught by asking whether one key point contains nearly the whole marking
+    scheme. Knowledge items are not the target - recall is a legitimate thing
+    to assess, and "Name FOUR indicators of an insider threat" is recall the
+    syllabus does not spell out. What is caught is recall of the SYLLABUS
+    rather than of the trade.
+
+    Repairable, because it is a question-writing fault: the same key point,
+    asked about rather than read out, gives a better question at the same
+    level and the same marks.
+    """
+    key_points = _key_point_texts(tool)
+    if not key_points:
+        return []                         # no curriculum read; nothing to echo
+    out: List[AssessmentProblem] = []
+    for item in tool.items:
+        answers = [tokens(p.text) for p in item.marking_scheme]
+        answers = [a for a in answers if a]
+        if len(answers) < MIN_ECHOED_POINTS:
+            continue
+        for point in key_points:
+            echoed = sum(1 for a in answers if overlap(a, point) >= 0.7)
+            if echoed / len(answers) < KEY_POINT_ECHO_SHARE:
+                continue
+            listed = ", ".join(sorted(point)[:6])
+            out.append(_problem(
+                SYLLABUS_RECITATION,
+                f"item {item.number} is answered by one line of the "
+                f"curriculum: {echoed} of its {len(answers)} marking points "
+                f"are already printed in the key point it came from "
+                f"({listed}), so the question tests reading the syllabus "
+                f"rather than knowing the work. Change WHAT IS ASKED, not "
+                f"the wording - the new marking scheme must contain "
+                f"different answers from those words. Ask what a worker has "
+                f"to know ABOUT those things: how one is told from another, "
+                f"how each arrives or is used, what is done about it",
+                where=f"item {item.number}", item_number=item.number))
+            break
+    return out
+
+
 def _check_unfunded_items(tool: AssessmentTool) -> List[AssessmentProblem]:
     """13. Every item of evaluation carries at least one mark.
 
@@ -654,7 +773,8 @@ def _check_unfunded_items(tool: AssessmentTool) -> List[AssessmentProblem]:
 _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_independence, _check_stem_clues, _check_practical_count,
            _check_item_not_pc, _check_format, _check_marks_fit_verb,
-           _check_placeholder_key, _check_unfunded_items)
+           _check_placeholder_key, _check_unfunded_items,
+           _check_course_reference, _check_syllabus_recitation)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:
@@ -689,6 +809,10 @@ RULES
 - Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item. Give response_type as exactly "short_response" or "extended_response".
 - Keep the item on its own performance criterion, and assess only what the CONTENT TAUGHT covers. Never introduce equipment, standards, terminology or procedures that are not in it.
 - Keep the stem concise - normally one sentence - and state exactly how many responses are wanted.
+- Ask about the trade, never about the course. No "covered in the unit", "as described in this module", "listed in the curriculum". Delete the phrase and ask the question directly.
+- Never set the question a curriculum key point already answers. Where a fault says the marking scheme is printed in the key point, rewriting the stem is NOT the fix: the corrected item must have a DIFFERENT marking scheme, holding answers that do not appear in that line. Stay on the same key point, the same Bloom level and the same marks, and ask what a competent worker has to know ABOUT those things - how one is told from another, how each arrives or is used, what is done about it.
+  Wrong fix: "Identify FOUR types of malware covered in the unit" becomes "Identify FOUR common types of malware". The answer is still virus, worm, trojan, ransomware.
+  Right fix: "State FOUR ways malware reaches a workstation" - infected removable media, an attachment from a phishing message, a drive-by download, software from an unofficial source.
 - Every marking point states the answer the assessor looks for. Never a blank, a numbered slot ("Way 1", "Step 2"), or "1 mark for each correct answer".
 - Do not add a scenario to connect the item to any other item.
 

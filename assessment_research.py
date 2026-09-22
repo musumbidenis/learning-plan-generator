@@ -56,10 +56,17 @@ BUNDLES_PATH = "/server/api/core/items/%s/bundles"
 SEARCH_TIMEOUT = 25
 DOWNLOAD_TIMEOUT = 60
 
-# How many papers to open for one unit, and how many questions to keep. Both
-# deliberately small: the point is to show a pattern, not to supply a bank.
-MAX_PAPERS = 3
+# How many papers to open for one unit, and how many questions to keep. The
+# pool is searched wide and read narrow: many papers are found, the best few
+# are downloaded, and only a handful of questions survive ranking. The point
+# is to show a pattern, not to supply a bank.
+MAX_PAPERS = 6
 MAX_EXEMPLARS = 10
+
+# Extra searches run on the unit's own topics, and papers taken per search.
+# See `_papers_for`.
+TOPIC_QUERIES = 4
+PAPERS_PER_QUERY = 5
 
 # A question shorter than this is a fragment the extraction mis-split; longer
 # than this is usually a whole section that lost its numbering.
@@ -187,6 +194,39 @@ _RE_FURNITURE = re.compile(
     r"page \d+ of \d+|for official use only|scoring grid|"
     r"this is the last printed page|turn over", re.I)
 
+# A selected-response stem. These papers are full of them and this project's
+# are not: no sections and no MCQs is a settled decision. Showing the model a
+# multiple-choice stem as an example of house style teaches it the one shape
+# it is forbidden to write, so they are dropped before ranking rather than
+# left to lose on relevance.
+_RE_SELECTED = re.compile(
+    r"^(which (one )?of the following|which of these|all of the following|"
+    r"the following.{0,30}except|choose the|select the|tick |circle |"
+    r"true or false|state whether the following)", re.I)
+
+# A command verb, which is how a constructed-response question opens. A line
+# that does not start with one is usually a stray sentence the extraction
+# picked up, or a question whose alternatives lived on the next line.
+_RE_COMMAND = re.compile(
+    r"^(state|list|outline|explain|describe|define|identify|discuss|"
+    r"differentiate|distinguish|compare|contrast|analyse|analyze|evaluate|"
+    r"justify|illustrate|demonstrate|highlight|give|name|mention|draw|"
+    r"sketch|calculate|determine|develop|design|prepare|plan|classify|"
+    r"summarise|summarize|interpret|apply|assess|examine|investigate|"
+    r"suggest|recommend|propose|discuss|with the aid|using|study|"
+    r"you are required)", re.I)
+
+# One mark buys one word. A one-mark item in these papers is nearly always a
+# multiple-choice stem whose options were on the following line.
+MIN_EXEMPLAR_MARKS = 2
+
+
+def is_constructed(exemplar: Exemplar) -> bool:
+    """True when this is the kind of question this project actually writes."""
+    return (exemplar.marks >= MIN_EXEMPLAR_MARKS
+            and not _RE_SELECTED.match(exemplar.text)
+            and bool(_RE_COMMAND.match(exemplar.text)))
+
 
 def questions(text: str) -> List[Exemplar]:
     """Every numbered, mark-bearing question in a paper's text."""
@@ -290,6 +330,40 @@ def _remember(unit_title: str, exemplars: Sequence[Exemplar]) -> None:
 # --------------------------------------------------------------------------- #
 # What the rest of the module calls
 # --------------------------------------------------------------------------- #
+def _papers_for(unit_title: str,
+                topics: Sequence[str] = ()) -> List[Dict[str, str]]:
+    """Papers worth opening for this unit, searched by title AND by topic.
+
+    Searching the unit title alone is how this started, and on a specialist
+    unit it finds almost nothing: the colleges that publish past papers are
+    individual institutions, and "Manage ICT security" is not the name of any
+    module a health college teaches. Its SUBJECTS are, though - a search for
+    malware or access control reaches their general ICT papers, which carry
+    real questions on exactly those subjects.
+
+    Measured on one unit: title alone reached 3 papers and about ten usable
+    questions; adding three topic queries reached 18 papers and eighty. The
+    relevance ranking still decides what is shown, so a wider net costs
+    nothing but a few seconds of searching.
+    """
+    pooled: Dict[str, Dict[str, str]] = {}
+    queries = [unit_title]
+    for topic in topics[:TOPIC_QUERIES]:
+        subject = " ".join(sorted(_tokens(topic))[:3])
+        if subject:
+            queries.append(subject)
+    for query in queries:
+        for hit in search(query, size=PAPERS_PER_QUERY):
+            pooled.setdefault(hit["uuid"], hit)
+    if not pooled:
+        # The full title rarely matches; its distinctive words often do.
+        words = sorted(_tokens(unit_title))[:4]
+        if words:
+            for hit in search(" ".join(words), size=PAPERS_PER_QUERY):
+                pooled.setdefault(hit["uuid"], hit)
+    return list(pooled.values())
+
+
 def exemplars_for(unit_title: str, topics: Sequence[str] = (),
                   limit: int = MAX_EXEMPLARS,
                   progress_cb=None) -> List[Exemplar]:
@@ -309,12 +383,7 @@ def exemplars_for(unit_title: str, topics: Sequence[str] = (),
 
     if progress_cb:
         progress_cb(f"Research: looking for real papers on '{unit_title}'")
-    hits = search(unit_title)
-    if not hits:
-        # The full title rarely matches; its distinctive words often do.
-        words = [w for w in _tokens(unit_title)]
-        if words:
-            hits = search(" ".join(sorted(words)[:4]))
+    hits = _papers_for(unit_title, topics)
     if not hits:
         runlog.log(f"Research: no past papers found for '{unit_title}'")
         _remember(unit_title, [])
@@ -325,11 +394,12 @@ def exemplars_for(unit_title: str, topics: Sequence[str] = (),
         if progress_cb:
             progress_cb(f"Research: reading '{hit['title'][:60]}'")
         found = questions(paper_text(hit["base"], hit["uuid"]))
-        for ex in found:
+        usable = [ex for ex in found if is_constructed(ex)]
+        for ex in usable:
             ex.source, ex.repository = hit["title"], hit["repository"]
-        collected.extend(found)
-        runlog.log(f"Research: {len(found)} question(s) from "
-                   f"'{hit['title']}'")
+        collected.extend(usable)
+        runlog.log(f"Research: {len(usable)} usable of {len(found)} "
+                   f"question(s) from '{hit['title']}'")
 
     best = rank(collected, list(topics) + [unit_title])[:limit]
     _remember(unit_title, best)

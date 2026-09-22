@@ -8,13 +8,23 @@ actually happens in:
     3  paste the unit's PC weighting table, and correct what the paste lost
     4  read the computed distribution - every mark is final at this point
     5  read the curriculum content the paper will be set from
-    6  generate, validate, repair
-    7  download
+    6  read what that content actually contains, scouted from reference
+       sources, and the real questions other papers have asked on it
+    7  generate, validate, repair
+    8  download
 
 The performance criteria say what is assessed; the curriculum says what was
 taught. Both go to the model, because a PC on its own is one general line and
 a paper written from it alone is written from the model's own knowledge of the
 trade - plausible, and about things nobody covered.
+
+Neither of them, though, says what the taught topics actually CONTAIN. A
+curriculum key point is a heading: "Types of malware: virus, worm, trojan".
+Step 6 goes and reads about those headings, and brings back the substance a
+question can be built on - what the thing is, how the subject is normally
+broken down, what a practitioner names. That is the difference between asking
+a trainee to repeat a heading and asking them to use it. It never widens what
+may be assessed; the curriculum still decides that.
 
 Steps 4 and 5 are kept apart on purpose. All the arithmetic happens in step 4,
 in `assessment_allocation`, in plain code. By the time the model is called it
@@ -32,6 +42,7 @@ import streamlit as st
 import assessment_allocation as alloc
 import assessment_content as content_builder
 import assessment_docs as docs
+import assessment_knowledge as knowledge
 import assessment_ledger as ledger_store
 import assessment_research as research
 import assessment_validators as validators
@@ -40,7 +51,7 @@ import runlog
 from assessment_models import (CAT_1, CAT_2, CAT_3, CAT_LABELS, FINAL_CAT,
                                PRACTICAL, THEORY, Allocation, AssessmentTool,
                                CatDefinition, ElementContent, Exemplar,
-                               Problem, UnitWeighting)
+                               KnowledgeNote, Problem, UnitWeighting)
 from models import Unit
 
 ss = st.session_state
@@ -266,6 +277,51 @@ def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
     return content
 
 
+def _knowledge_step(unit_title: str,
+                    content: List[ElementContent]) -> List[KnowledgeNote]:
+    """Real substance on the taught key points, read from reference sources.
+
+    Shown for the same reason the content is shown: the trainer is the only
+    person who can see at a glance that a key point has drawn the wrong
+    article. A note that is plainly about the wrong subject is a warning that
+    the questions built on it will be too.
+
+    Scouted once per unit and cached, like the exemplars.
+    """
+    if not content:
+        return []
+    cached = knowledge._cached(unit_title) is not None
+    if cached:
+        notes = knowledge.notes_for(unit_title, content)
+    else:
+        with st.spinner("Reading up on the taught topics..."):
+            notes = knowledge.notes_for(unit_title, content)
+
+    st.markdown("#### 6. What the questions are set from, in depth")
+    if not notes:
+        st.caption("No reference notes were found for these topics, so the "
+                   "questions are written from the curriculum's key points "
+                   "alone. They will be shallower for it.")
+        return []
+    st.caption(knowledge.summarise(notes)
+               + " - depth on what was taught, never a new topic.")
+    with st.expander(f"{len(notes)} reference note(s)", expanded=False):
+        for note in notes:
+            label = " ".join(x for x in (note.topic_number, note.key_point)
+                             if x)
+            st.markdown(f"**{label}**")
+            st.markdown(note.summary)
+            if note.covers:
+                st.caption("Normally broken down as: "
+                           + " | ".join(note.covers))
+            if note.named:
+                st.caption("Named in practice: " + ", ".join(note.named))
+            if note.source_url:
+                st.caption(f"[{note.source_title}]({note.source_url})")
+            st.divider()
+    return notes
+
+
 def _research_step(unit_title: str,
                    content: List[ElementContent]) -> List[Exemplar]:
     """Real questions from published CDACC papers on this unit.
@@ -335,15 +391,16 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
         return
     allocations = _distribution_step(weighting, cat)
     content = _content_step(os_unit, curr_unit, weighting, allocations)
-    exemplars = _research_step(weighting.unit_title or os_unit.unit_title,
-                               content)
+    unit_title = weighting.unit_title or os_unit.unit_title
+    notes = _knowledge_step(unit_title, content)
+    exemplars = _research_step(unit_title, content)
 
     if st.button("Generate assessment tool", type="primary", key="at_go"):
         tool = AssessmentTool(
             unit_title=weighting.unit_title, cdacc_code=weighting.cdacc_code,
             isced_code=weighting.isced_code, knqf_level=weighting.knqf_level,
             programme=programme, cat=cat, allocations=allocations,
-            content=content, exemplars=exemplars)
+            content=content, exemplars=exemplars, knowledge=notes)
         messages: List[str] = []
         box = st.empty()
 
@@ -370,7 +427,7 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     tool = ss.at_tool
     if tool is None:
         return
-    st.markdown("#### 6. Result")
+    st.markdown("#### 7. Result")
     remaining = validators.blocking(ss.at_problems)
     warnings = [p for p in ss.at_problems if not p.blocking]
     if remaining:

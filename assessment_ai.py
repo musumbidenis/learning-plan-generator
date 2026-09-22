@@ -39,6 +39,7 @@ from ai_client import (AIError, _chat_json, _emit_progress, _strict,
                        load_api_key, load_model_name, resolve_model)
 from assessment_allocation import _largest_remainder
 import assessment_content
+import assessment_knowledge
 import assessment_research
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
@@ -176,7 +177,9 @@ WORK WITHIN THE SCOPE
 - Where a performance criterion names something the CONTENT TAUGHT does not cover at all, that criterion is still only the competency link. Do not assess the uncovered thing.
 
 GO DEEPER THAN THE LINE IN FRONT OF YOU
+- A key point that lists its own examples HAS ALREADY GIVEN THE ANSWER. "Types of malware: virus, worm, trojan, ransomware" answers "List FOUR types of malware" before the candidate picks up a pen, and the marking scheme is that line copied out. Never set the question a key point answers. Ask what a competent worker must know ABOUT the things it lists.
 - A key point reading "Types of malware: virus, worm, trojan" opens up how each one propagates, what damage it does, how it is detected, what is done about it and how they are told apart - not only a request to name them.
+- Where a key point names no examples - "Insider threats and their indicators", "Vulnerability scanning tools" - recall is a fair question, because the answer is knowledge of the trade rather than of the handout.
 - Bring in the real substance of the trade: the tools, standards, legislation, procedures, settings, figures and terminology a competent practitioner in Kenya would actually use on that topic, by name. A question on vulnerability scanning may name a real scanner and a real finding; a question on access control may cite the principle or standard by its proper name.
 - Draw on how this competency is really assessed - in the workplace, and in comparable TVET and industry assessments of the same skill - so the paper tests what an assessor in the field would test, at the depth they would test it.
 - Prefer a question that makes the candidate USE the taught content over one that asks them to repeat it.
@@ -494,7 +497,31 @@ THE ASK
   paper already knows which unit it is. They are also a claim that everything
   asked for was taught, which stops being true the moment you go deeper than
   the syllabus line. Ask the question directly - "State FOUR types of
-  malware." - and leave the course out of it."""
+  malware." - and leave the course out of it.
+
+## 17. REFERENCE NOTES - THE DEPTH, NOT THE SCOPE
+
+Each REFERENCE NOTE is attached to a key point already in the CONTENT TAUGHT,
+and carries three things:
+
+- a SUMMARY, which fixes WHICH sense of the topic was taught.
+- "normally broken down as" - the dimensions the subject is ordinarily divided
+  along: how it spreads, how it is detected, how it is prevented, what it is
+  classified by. These are the dimensions an assessor questions along, and
+  they are what turns "name three types" into "state how each one spreads".
+  Reach for these first when a question feels shallow.
+- "named in practice" - the tools, standards and real cases a practitioner
+  names. Use them so the question and its marking scheme are concrete: a real
+  scanner, a real standard, never "a suitable tool".
+
+A note is depth on a topic that was already taught. It is never a new topic,
+and a heading inside a note is not permission to assess that heading if the
+CONTENT TAUGHT does not cover it. The notes also come from a general reference
+and can be wrong or dated: you are the assessor, and anything you take from
+one must be correct enough to mark a candidate against.
+
+Never mention the notes or any reference work in a question or a marking
+scheme."""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.
@@ -510,6 +537,9 @@ WHAT THE TASK MAY REQUIRE
 You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. It sets the SCOPE of the task: every skill the candidate is asked to perform sits on a topic that appears there.
 
 Within that scope, set a real job rather than a rehearsal of the syllabus. Use the tools, materials, settings, standards and quantities a Kenyan workplace would really use for that work, by name, and make the items of evaluation say what a competent assessor would actually watch for - the things that separate work done properly from work that merely got finished.
+
+REFERENCE NOTES
+Where REFERENCE NOTES are supplied, each is attached to a key point already in the CONTENT TAUGHT and was read from a public reference source. Use them for the names and the specifics - the real tools, standards, settings and classifications that make a task brief concrete and an item of evaluation checkable. They give DEPTH on what was taught; they never add a topic, and where a note runs past the taught scope the taught scope wins. They can also be wrong or dated: you are the assessor, and anything you take from one must be correct enough to judge a candidate against. Never mention the notes or their source in the brief, the checklists or the oral questions.
 
 The line is the same as the scope: more realism on a taught skill is wanted, a skill nobody covered is not. A task requiring a technique the trainees were never taught is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
 
@@ -570,7 +600,39 @@ def _content_block(tool: AssessmentTool) -> str:
             "lines themselves:\n" + rendered)
 
 
-def _exemplar_block(tool: AssessmentTool) -> str:
+def _knowledge_block(tool: AssessmentTool, budget: int = 0) -> str:
+    """Real substance on the taught key points, or nothing.
+
+    The companion to `_content_block` and the answer to its weakness. The
+    content block says what may be assessed and is made of headings; this says
+    what those headings actually contain, so the model has something to be
+    deep ABOUT. Absent, the paper is written the way it was before - from the
+    headings - which is shallower and is exactly what this exists to fix.
+
+    `budget` caps the notes in characters: 0 means the module's own default
+    and a negative number means leave them out altogether. `_fit` lowers it
+    when a prompt would otherwise be too large to send.
+    """
+    if budget < 0:
+        return ""
+    rendered = (assessment_knowledge.render(tool.knowledge, budget) if budget
+                else assessment_knowledge.render(tool.knowledge))
+    if not rendered:
+        return ""
+    return ("\n\nREFERENCE NOTES on the taught key points - real substance to "
+            "question on, read from published reference sources. Each note is "
+            "attached to a key point that is already in the CONTENT TAUGHT "
+            "above:\n" + rendered
+            + "\n\nThese give you DEPTH on what was taught. They do not widen "
+              "what may be assessed: the CONTENT TAUGHT still sets the scope, "
+              "and a heading inside a note is not a topic you may assess. Use "
+              "the breakdowns to find the angle a question takes, and the "
+              "named tools, standards and cases to make the question and its "
+              "marking scheme concrete. Never name the notes or their source "
+              "in a question or a marking scheme.")
+
+
+def _exemplar_block(tool: AssessmentTool, limit: int = 0) -> str:
     """Real questions from real papers, or nothing.
 
     Handed over with the warning that matters: the repositories that publish
@@ -578,7 +640,10 @@ def _exemplar_block(tool: AssessmentTool) -> str:
     health school and be full of clinics. The shape is what is wanted. The
     subject never is.
     """
-    rendered = assessment_research.render(tool.exemplars)
+    if limit < 0:
+        return ""
+    shown = tool.exemplars[:limit] if limit else tool.exemplars
+    rendered = assessment_research.render(shown)
     if not rendered:
         return ""
     return ("\n\nHOW REAL TVET CDACC QUESTIONS ARE WRITTEN - actual questions "
@@ -607,7 +672,58 @@ def _header(tool: AssessmentTool) -> str:
             f"DURATION: {cat.duration_minutes} minutes")
 
 
-def build_written_prompt(tool: AssessmentTool) -> str:
+# The largest request this tier will accept, in characters of prompt, system
+# instructions included.
+#
+# Groq's on-demand tier allows 8000 tokens a minute for one request and
+# REFUSES anything larger outright - HTTP 413, no paper at all. This text runs
+# at about 3.1 characters to the token, so 8000 tokens is roughly 24,800
+# characters; the ceiling sits below that with room for a unit whose content
+# is fatter than the one it was measured on.
+#
+# The standing instructions are about 18,300 characters of that before
+# anything of the unit's is added, which leaves less room than it first
+# appears. Optional material therefore has to be able to give way.
+PROMPT_CHAR_CEILING = 23200
+
+# What gives way, in order. The allocation table, the taught content and the
+# standing instructions are not on this list: without them there is no paper.
+# The reference notes go first only because they are the newest and the
+# easiest to trim by degrees - both they and the exemplars improve a paper
+# that would still be valid without either.
+_FIT_STEPS = ((2000, 8), (1400, 6), (900, 4), (500, 3), (-1, 2),
+              (-1, -1))
+
+
+def _fit(assemble, system: str) -> str:
+    """The prompt, trimmed until the provider will accept it.
+
+    `assemble(notes_budget, exemplar_limit)` builds a candidate prompt, and
+    `system` is the standing instructions it will be sent with - they count
+    towards the same limit, and they are the larger half.
+
+    The concessions are walked in order and the first that fits is returned.
+    If none does, the smallest is sent anyway: a prompt still too large with
+    no notes and no exemplars is one whose taught content alone is oversized,
+    and the honest outcome there is the provider's own error rather than a
+    paper quietly written from half a curriculum.
+    """
+    smallest = ""
+    for notes_budget, exemplar_limit in ((0, 0),) + _FIT_STEPS:
+        smallest = assemble(notes_budget, exemplar_limit)
+        if len(system) + len(smallest) <= PROMPT_CHAR_CEILING:
+            if (notes_budget, exemplar_limit) != (0, 0):
+                runlog.log(f"Assessment: the prompt was trimmed to fit - "
+                           f"{notes_budget} characters of reference notes "
+                           f"and {exemplar_limit} exemplar(s)")
+            return smallest
+    runlog.warn("Assessment: the prompt is over the provider's size limit "
+                "even with no reference notes and no exemplars")
+    return smallest
+
+
+def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
+                         exemplar_limit: int = 0) -> str:
     """The per-paper half: the allocation table and nothing standing.
 
     The allowed verbs are printed per row rather than as one bank, because the
@@ -630,7 +746,8 @@ def build_written_prompt(tool: AssessmentTool) -> str:
         level_note = ("\nThis is a KNQF level %s paper: every item is "
                       "constructed response. Selected-response formats are "
                       "not used at this level at all.\n" % tool.knqf_level)
-    return f"""{_header(tool)}{_content_block(tool)}{_exemplar_block(tool)}
+    def assemble(notes_budget: int, exemplar_limit: int) -> str:
+        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 {table}
@@ -639,8 +756,13 @@ ITEMS REQUIRED: {len(tool.allocations)}
 {level_note}
 Write one item per row above, in this order. Return the JSON object now."""
 
+    if (notes_budget, exemplar_limit) != (0, 0):
+        return assemble(notes_budget, exemplar_limit)
+    return _fit(assemble, AS_WRITTEN_SYSTEM)
 
-def build_practical_prompt(tool: AssessmentTool) -> str:
+
+def build_practical_prompt(tool: AssessmentTool, notes_budget: int = 0,
+                           exemplar_limit: int = 0) -> str:
     """The per-task half: what each PC is worth, and nothing standing."""
     by_pc: Dict[str, int] = tool.marks_by_pc()
     seen: List[str] = []
@@ -659,7 +781,8 @@ def build_practical_prompt(tool: AssessmentTool) -> str:
                  if methods else "")
     # One line per PC, in the order the rows were built, so a PC split across
     # two allocations is budgeted once and at its combined figure.
-    return f"""{_header(tool)}{_content_block(tool)}{_exemplar_block(tool)}{suggested}
+    def assemble(notes_budget: int, exemplar_limit: int) -> str:
+        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
@@ -670,6 +793,10 @@ Each criterion's marks are shared out across the items you write for it, in prop
 TIME ALLOWED: {tool.cat.duration_minutes} minutes
 
 Write the candidate's task brief, then the observation checklist, then the product checklist, then any oral questions. Return the JSON object now."""
+
+    if (notes_budget, exemplar_limit) != (0, 0):
+        return assemble(notes_budget, exemplar_limit)
+    return _fit(assemble, AS_PRACTICAL_SYSTEM)
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,6 +1127,48 @@ def apply_practical(tool: AssessmentTool, payload) -> AssessmentTool:
 # --------------------------------------------------------------------------- #
 # The call
 # --------------------------------------------------------------------------- #
+def _send(tool: AssessmentTool, practical: bool, api_key: str, model: str,
+          schema: dict, name: str, system: str, progress_cb):
+    """The request, made smaller and retried if the provider says it is too big.
+
+    `_fit` already keeps the prompt under a size that has been measured to
+    work, but it is measuring characters and the provider is counting tokens -
+    and counting the schema and its own framing alongside them, by a formula
+    that is not published and does not hold still. A character ceiling is
+    therefore a good guess and never a guarantee.
+
+    So the refusal itself is used as the measurement. HTTP 413 means only that
+    this request was too large, and the honest response is to give something
+    up and ask again rather than to fail a paper over a rate limit. What is
+    given up is the optional material, in the order `_FIT_STEPS` sets, and
+    only then does the error stand.
+    """
+    build = build_practical_prompt if practical else build_written_prompt
+    attempts = [build(tool)]
+    for notes_budget, exemplar_limit in _FIT_STEPS:
+        attempts.append(build(tool, notes_budget, exemplar_limit))
+
+    last: Optional[AIError] = None
+    for index, prompt in enumerate(attempts):
+        if index and prompt == attempts[index - 1]:
+            continue                       # this concession changed nothing
+        try:
+            return _chat_json(prompt, api_key, model, schema, name,
+                              progress_cb=progress_cb,
+                              temperature=TEMPERATURE, system=system)
+        except AIError as e:
+            if "413" not in str(e) and "too large" not in str(e).lower():
+                raise
+            last = e
+            runlog.warn(f"Assessment: the provider refused the request as too "
+                        f"large; trying again with less reference material "
+                        f"({len(attempts) - index - 1} step(s) left)")
+            _emit_progress(progress_cb,
+                           "Assessment: the request was too large - trying "
+                           "again with less reference material")
+    raise last if last else AIError("The assessment could not be written.")
+
+
 def generate(tool: AssessmentTool, api_key: str = "", model: str = "",
              progress_cb=None) -> AssessmentTool:
     """Write one assessment tool: ONE request, for THIS CAT alone.
@@ -1026,8 +1195,6 @@ def generate(tool: AssessmentTool, api_key: str = "", model: str = "",
 
     model = resolve_model(api_key, model or load_model_name(), progress_cb)
     practical = tool.is_practical
-    prompt = (build_practical_prompt(tool) if practical
-              else build_written_prompt(tool))
     schema = practical_schema() if practical else written_schema()
     name = "assessment_practical" if practical else "assessment_written"
     system = AS_PRACTICAL_SYSTEM if practical else AS_WRITTEN_SYSTEM
@@ -1037,9 +1204,8 @@ def generate(tool: AssessmentTool, api_key: str = "", model: str = "",
                    f"({tool.cat.assessment_type}) - "
                    f"{len(tool.allocations)} allocation(s)")
 
-    payload = _chat_json(prompt, api_key, model, schema, name,
-                         progress_cb=progress_cb, temperature=TEMPERATURE,
-                         system=system)
+    payload = _send(tool, practical, api_key, model, schema, name, system,
+                    progress_cb)
 
     path = save_raw(tool, payload)
     if path:

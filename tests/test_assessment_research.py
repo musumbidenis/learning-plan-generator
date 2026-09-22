@@ -199,3 +199,52 @@ def test_the_block_carries_the_marks_each_question_was_worth():
 
 def test_nothing_found_renders_to_nothing_at_all():
     assert research.render([]) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Only the kind of question this project writes
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("text,marks,kept", [
+    ("Outline FOUR benefits of using cloud storage", 4, True),
+    ("Distinguish between hardware and software", 5, True),
+    ("Highlight four examples of computer virus", 4, True),
+    ("Which of the following is a cybersecurity risk?", 1, False),
+    ("Which one of the following is NOT a type of malware?", 2, False),
+    ("What is a major role of ICT in service delivery?", 1, False),
+    ("State two key considerations for online safety", 2, True),
+    ("Define \"Firewall\" in the context of computer security", 1, False),
+])
+def test_only_constructed_response_questions_are_kept(text, marks, kept):
+    """These repositories are full of multiple choice. Showing the model an
+    MCQ stem as an example of house style teaches it the one shape it is
+    forbidden to write - no sections and no MCQs is settled."""
+    assert research.is_constructed(Exemplar(text=text, marks=marks)) is kept
+
+
+def test_papers_are_searched_by_topic_as_well_as_by_unit_title(monkeypatch):
+    """A health college teaches no module called "Manage ICT security", but
+    its general ICT papers carry real questions on malware and access
+    control."""
+    asked = []
+
+    def fake_search(query, size=8):
+        asked.append(query)
+        return [{"repository": "r", "base": "b", "uuid": query, "title": query}]
+
+    monkeypatch.setattr(research, "search", fake_search)
+
+    found = research._papers_for("Manage ICT security",
+                                 ["Types of malware", "Access controls"])
+
+    assert "Manage ICT security" in asked
+    assert len(asked) >= 2
+    assert len(found) == len(asked)      # one paper per distinct query
+
+
+def test_the_same_paper_found_twice_is_opened_once(monkeypatch):
+    monkeypatch.setattr(research, "search", lambda query, size=8: [
+        {"repository": "r", "base": "b", "uuid": "same", "title": "One paper"}])
+
+    found = research._papers_for("Unit", ["Topic A", "Topic B"])
+
+    assert len(found) == 1

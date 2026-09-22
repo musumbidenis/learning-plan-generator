@@ -655,3 +655,112 @@ def test_apportionment_never_loses_or_invents_a_mark():
         assert len(shares) == len(weights)
         assert sum(shares) == max(0, total)
         assert all(x >= 0 for x in shares)
+
+
+# --------------------------------------------------------------------------- #
+# Reference notes, and the size of the request
+# --------------------------------------------------------------------------- #
+def _notes(count=6, summary_chars=300):
+    from assessment_models import KnowledgeNote
+    return [KnowledgeNote(key_point=f"Key point {n}", topic_number="1.1",
+                          element_number="1", summary="S" * summary_chars,
+                          covers=["Propagation", "Detection"],
+                          named=["NIST", "CVE"], source_title="Article")
+            for n in range(count)]
+
+
+def test_the_written_prompt_carries_the_reference_notes():
+    tool = _tool_with_content()
+    tool.knowledge = _notes(2, 80)
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "REFERENCE NOTES" in prompt
+    assert "normally broken down as: Propagation | Detection" in prompt
+    assert "named in practice: NIST, CVE" in prompt
+
+
+def test_the_notes_are_framed_as_depth_and_not_as_scope():
+    tool = _tool_with_content()
+    tool.knowledge = _notes(1, 80)
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "do not widen" in prompt.lower()
+
+
+def test_a_unit_with_no_notes_gets_no_notes_section():
+    prompt = assessment_ai.build_written_prompt(_tool_with_content())
+
+    assert "REFERENCE NOTES" not in prompt
+
+
+def test_an_oversized_prompt_is_trimmed_to_fit():
+    """Groq's tier refuses a request over its limit outright - HTTP 413, no
+    paper at all - so the optional material has to be able to give way."""
+    tool = _tool_with_content()
+    tool.knowledge = _notes(30, 900)
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert (len(assessment_ai.AS_WRITTEN_SYSTEM) + len(prompt)
+            <= assessment_ai.PROMPT_CHAR_CEILING)
+    assert "MARK ALLOCATION TABLE" in prompt      # never the part that goes
+
+
+def test_trimming_gives_up_the_notes_before_the_taught_content():
+    tool = _tool_with_content()
+    tool.knowledge = _notes(30, 900)
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "CONTENT TAUGHT" in prompt
+    assert "Torque wrench and its calibration" in prompt
+
+
+def test_the_budgets_can_be_asked_for_explicitly():
+    tool = _tool_with_content()
+    tool.knowledge = _notes(4, 200)
+
+    none_at_all = assessment_ai.build_written_prompt(tool, -1, -1)
+
+    assert "REFERENCE NOTES" not in none_at_all
+    assert "MARK ALLOCATION TABLE" in none_at_all
+
+
+def test_a_request_refused_as_too_large_is_tried_again_smaller(monkeypatch):
+    """The character ceiling is a guess: the provider counts tokens, and the
+    schema and its own framing alongside them. The refusal is the measurement
+    that actually counts."""
+    tool = _tool_with_content()
+    tool.knowledge = _notes(6, 300)
+    sizes = []
+
+    def fake_chat(prompt, *a, **kw):
+        sizes.append(len(prompt))
+        if len(sizes) < 3:
+            raise AIError("openai/gpt-oss-120b: HTTP 413 Request too large")
+        return {"items": []}
+
+    monkeypatch.setattr(assessment_ai, "_chat_json", fake_chat)
+
+    assessment_ai._send(tool, False, "k", "m", {}, "n", "sys", None)
+
+    assert len(sizes) == 3
+    assert sizes[1] < sizes[0] and sizes[2] < sizes[1]
+
+
+def test_an_error_that_is_not_about_size_is_not_retried(monkeypatch):
+    calls = []
+
+    def fake_chat(prompt, *a, **kw):
+        calls.append(1)
+        raise AIError("openai/gpt-oss-120b: HTTP 401 invalid api key")
+
+    monkeypatch.setattr(assessment_ai, "_chat_json", fake_chat)
+
+    with pytest.raises(AIError, match="401"):
+        assessment_ai._send(_tool_with_content(), False, "k", "m", {}, "n",
+                            "sys", None)
+
+    assert len(calls) == 1
