@@ -43,8 +43,10 @@ from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                ITEM_INDEPENDENCE_OVERLAP,
                                ITEM_VS_PC_SIMILARITY, MAX_CHECKLIST_ITEMS,
                                MAX_REPAIR_PASSES, MIN_CHECKLIST_ITEMS,
-                               REPAIR_TEMPERATURE, VERB_BANK, level_of_verb,
-                               marks_per_response, response_type)
+                               REPAIR_TEMPERATURE, VERB_BANK,
+                               MAX_VERB_WORDS, allowed_verbs,
+                               level_of_verb, marks_per_response,
+                               response_type, sector_for)
 from assessment_models import (BLOOM_LEVELS, AssessmentTool, ChecklistItem,
                                Item, MarkingPoint, Problem)
 
@@ -174,12 +176,21 @@ _RE_SENTENCE = re.compile(r"(?<![A-Z0-9])[.!?]+\s+")
 
 
 def _verb_at(text: str) -> str:
-    """The verb `text` opens with, two words first ('carry out', 'break down')."""
+    """The verb `text` opens with, longest phrase first.
+
+    'carry out' and 'break down' are two words; the sector house style adds
+    longer ones - 'illustrate and label', 'describe with the aid of a sketch',
+    and the Health Sciences opening 'what do you understand by', which is five
+    and whose first word is not a verb at all. Taking the longest prefix that
+    resolves is what lets those be recognised without a special case each.
+    """
     words = _RE_WORD.findall((text or "").lower())
     if not words:
         return ""
-    if len(words) > 1 and level_of_verb(f"{words[0]} {words[1]}"):
-        return f"{words[0]} {words[1]}"
+    for size in range(min(MAX_VERB_WORDS, len(words)), 1, -1):
+        phrase = " ".join(words[:size])
+        if level_of_verb(phrase):
+            return phrase
     return words[0]
 
 
@@ -404,10 +415,18 @@ def _check_totals(tool: AssessmentTool) -> List[AssessmentProblem]:
 
 
 def _check_bloom_conformance(tool: AssessmentTool) -> List[AssessmentProblem]:
-    """4. The lead verb comes from the bank for the item's own level."""
+    """4. The lead verb comes from the bank for the item's own level.
+
+    The bank is the generic one PLUS whatever this sector's published papers
+    actually open with at that level - so an Electrical paper may say
+    "Calculate the current" and a Mechanical one "Inscribe a circle" without
+    being reported for it. See `assessment_config.allowed_verbs`.
+    """
+    sector = sector_for(tool.programme, tool.unit_title)
     out: List[AssessmentProblem] = []
     for item in tool.items:
-        bank = VERB_BANK.get(item.bloom)
+        bank = allowed_verbs(item.bloom, sector) if item.bloom in VERB_BANK \
+            else None
         if bank is None:
             out.append(_problem(
                 BLOOM_CONFORMANCE,
@@ -1051,12 +1070,13 @@ def _content_section(tool: AssessmentTool) -> str:
 def build_repair_prompt(tool: AssessmentTool,
                         faults: Dict[int, List[str]]) -> str:
     """The failing items and their faults, with every other item frozen."""
+    sector = sector_for(tool.programme, tool.unit_title)
     failing = []
     for number in sorted(faults):
         item = _item_by_number(tool, number)
         if item is None:
             continue
-        verbs = ", ".join(VERB_BANK.get(item.bloom, [])) or "(any)"
+        verbs = ", ".join(allowed_verbs(item.bloom, sector)) or "(any)"
         scheme = "\n".join(f"     * {p.text} [{p.marks}]"
                            for p in item.marking_scheme)
         failing.append(

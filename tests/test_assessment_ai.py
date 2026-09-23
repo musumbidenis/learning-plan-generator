@@ -820,3 +820,32 @@ def test_an_error_that_is_not_about_size_is_not_retried(monkeypatch):
                             "sys", None)
 
     assert len(calls) == 1
+
+
+def test_the_allocation_rows_carry_the_sector_verbs():
+    """An Electrical paper may open an APPLYING item with "Calculate"."""
+    tool = _tool_with_content()
+    tool.programme = "Electrical Installation Level 5"
+    tool.allocations[0].bloom = APPLYING
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "calculate" in prompt.split("MARK ALLOCATION TABLE")[1]
+    assert "Electrical & Electronic Engineering" in prompt
+
+
+def test_a_programme_in_no_sector_gets_no_house_style_note():
+    tool = _tool_with_content()
+    tool.programme = "Something Else Entirely"
+
+    assert assessment_ai._sector_note(tool) == ""
+
+
+def test_the_row_verbs_still_win_over_the_sector_habits():
+    """The note is the sector's habits, not a licence to cross a level."""
+    tool = _tool_with_content()
+    tool.programme = "Mechanical Production Level 5"
+
+    note = assessment_ai._sector_note(tool)
+
+    assert "that list wins" in note

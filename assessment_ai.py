@@ -44,7 +44,8 @@ import assessment_research
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
                                SHORT_RESPONSE, TEMPERATURE, VERB_BANK,
-                               marks_per_response, response_type)
+                               allowed_verbs, marks_per_response,
+                               response_type, sector_for)
 from assessment_models import (AssessmentTool, ChecklistItem, Item,
                                MarkingPoint, OralQuestion, TaskBrief)
 
@@ -473,10 +474,13 @@ THE ASK
   question by the document itself, and a stem carrying "(4 marks)" prints them
   twice.
 - Do not number the item in the stem. The numbering is printed for you.
-- Do not mention the course inside the stem. "State FOUR types of malware
-  covered in the unit", "as taught in this unit", "from the content covered" -
-  these belong to a syllabus, not to a question, and the candidate already
-  knows which unit they are sitting. Ask directly and leave the course out.
+- Do not mention the course OR your notes inside the stem. "State FOUR types
+  of malware covered in the unit", "as taught in this unit", "described in the
+  notes", "as mentioned in the teaching notes" - these belong to a syllabus,
+  not to a question. The candidate already knows which unit they are sitting,
+  and they have never seen your notes. Ask directly and leave both out:
+  "Identify FOUR earthing measures", not "Identify FOUR earthing measures
+  described in the notes".
 """
 
 
@@ -585,8 +589,11 @@ def _knowledge_block(tool: AssessmentTool, budget: int = 0) -> str:
               "question from a performance criterion. The notes go deeper "
               "into the taught topics and never add one, so where a note "
               "wanders outside the TOPICS TAUGHT, leave that part alone. They "
-              "can also be wrong or dated - you are the assessor. Never name "
-              "a note or its source in a question or a marking scheme.")
+              "can also be wrong or dated - you are the assessor.\n\nThe "
+              "candidate has never seen these notes. A stem that says "
+              "\"described in the notes\" or \"as mentioned in the teaching "
+              "notes\" is pointing them at a document they were never given. "
+              "Ask the question directly.")
 
 
 def _exemplar_block(tool: AssessmentTool, limit: int = 0) -> str:
@@ -615,6 +622,26 @@ def _exemplar_block(tool: AssessmentTool, limit: int = 0) -> str:
               "it still names the answer an assessor looks for - never "
               "\"Threat 1 description\", never \"First tool\". Give the scheme "
               "the same attention as the question.")
+
+
+def _sector_note(tool: AssessmentTool) -> str:
+    """How this trade's own setters phrase a question, or nothing.
+
+    The per-row verb list already carries the permission; this says where it
+    came from, which is what lets the model reach for the rest of the idiom -
+    a Mechanical paper says "with the aid of a sketch" and a Health one asks
+    "What do you understand by", and neither is a verb list.
+    """
+    sector = sector_for(tool.programme, tool.unit_title)
+    if sector is None or not sector.verbs:
+        return ""
+    return ("\n\nSECTOR HOUSE STYLE - this unit sits in " + sector.name
+            + ", and published CDACC papers in this sector open their "
+              "questions with: " + ", ".join(sector.verbs)
+            + ".\nWrite in that idiom. Each allocation row still lists the "
+              "verbs allowed at ITS level, and that list wins - these are the "
+              "sector's habits, not a licence to use a verb from another "
+              "level.")
 
 
 def _notes_per_row(tool: AssessmentTool, budget: int) -> Dict[int, List[str]]:
@@ -752,6 +779,11 @@ def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
                       "constructed response. Selected-response formats are "
                       "not used at this level at all.\n" % tool.knqf_level)
 
+    # The verbs this trade's own papers open with - see
+    # `assessment_config.allowed_verbs`. None when the programme matches no
+    # sector, and the generic bank is then used unchanged.
+    sector = sector_for(tool.programme, tool.unit_title)
+
     def rows_for(notes_budget: int) -> str:
         # Built per candidate prompt, because the notes a row may cite are
         # the notes that survived THAT prompt's budget.
@@ -761,7 +793,7 @@ def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
                            if b.pc_number == a.pc_number) > 1}
         rows = []
         for n, a in enumerate(tool.allocations, start=1):
-            verbs = ", ".join(VERB_BANK.get(a.bloom, []))
+            verbs = ", ".join(allowed_verbs(a.bloom, sector))
             per_point = marks_per_response(a.bloom)
             asked = max(1, a.marks // per_point)
             # Which notes this row is written from. Without it the model has
@@ -785,7 +817,7 @@ def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
         return "\n".join(rows)
 
     def assemble(notes_budget: int, exemplar_limit: int) -> str:
-        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}
+        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 {rows_for(notes_budget)}
@@ -820,7 +852,7 @@ def build_practical_prompt(tool: AssessmentTool, notes_budget: int = 0,
     # One line per PC, in the order the rows were built, so a PC split across
     # two allocations is budgeted once and at its combined figure.
     def assemble(notes_budget: int, exemplar_limit: int) -> str:
-        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{suggested}
+        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
