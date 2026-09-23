@@ -41,6 +41,7 @@ from assessment_allocation import _largest_remainder
 import assessment_content
 import assessment_knowledge
 import assessment_research
+import assessment_resources
 from assessment_config import (CONSTRUCTED_RESPONSE_ONLY_LEVELS,
                                MAX_CHECKLIST_ITEMS, MIN_CHECKLIST_ITEMS,
                                SHORT_RESPONSE, TEMPERATURE, VERB_BANK,
@@ -160,42 +161,84 @@ def practical_schema() -> dict:
 # --------------------------------------------------------------------------- #
 AS_WRITTEN_SYSTEM = """You are a senior TVET assessor in Kenya, writing the items of a Continuous Assessment Test (CAT) for one unit of competency under the TVET CDACC framework.
 
-You are GIVEN:
+You are GIVEN some or all of:
 - the unit of competency;
-- the TEACHING NOTES the trainer teaches this unit from;
+- RESOURCES FROM THE TRAINER - their own notes, slides or recording;
+- TEACHING NOTES, read from published sources for the gaps;
 - the TOPICS TAUGHT, from the curriculum;
-- the PERFORMANCE CRITERIA (PCs); and
-- a MARK ALLOCATION TABLE with one row per item.
+- the PERFORMANCE CRITERIA (PCs);
+- a MARK ALLOCATION TABLE with one row per item; and
+- FURTHER INSTRUCTIONS from the trainer for this particular paper.
 
-Your task is to write the assessment items only. The TEACHING NOTES are what the questions are made of. The TOPICS TAUGHT say which topics are in scope. The PERFORMANCE CRITERIA are the competency link and the source of the marks and the Bloom level, and are never content.
+Your task is to write the assessment items only. The trainer's RESOURCES are the first source of every question; the TEACHING NOTES fill the gaps they leave; the TOPICS TAUGHT say which topics are in scope; and the PERFORMANCE CRITERIA are the competency link and the source of the marks and the Bloom level, and are never content.
 
 ## 1. WHERE THE CONTENT OF A QUESTION COMES FROM
 
-Three sources are supplied and they do three different jobs. Confusing them is the single commonest way a paper comes out wrong.
+Four sources may be supplied and they do four different jobs. Confusing them
+is the single commonest way a paper comes out wrong. They rank, and the
+ranking is not a preference - it is the order in which a candidate could
+fairly have met the material.
 
-**TEACHING NOTES - this is what the questions are made of.**
-The TEACHING NOTES are the material the trainer teaches this unit from. They carry the actual substance of each topic: what the thing is, how it is done, how one kind is told from another, the standards and tools used, what goes wrong and what is done about it. Every question and every marking point is built out of this material. When you need to know what to ask about a topic, read its note.
+**1. RESOURCES FROM THE TRAINER - the first source, when they are there.**
+The trainer's own notes, slides or recording of this unit. This is what the
+trainees actually sat through, so it is what they can fairly be asked about.
+When RESOURCES are supplied, every question that can come from them DOES come
+from them: read the passage, ask something it answers, and write the marking
+scheme out of it. Prefer a question grounded in the trainer's own material to
+a better-phrased one that is not.
 
-**TOPICS TAUGHT - this is the list of topics, not their content.**
-It names the sub-topics and key points the unit covers. It says WHICH topics are in scope. It does not say what is in them - that is what the notes are for - and its lines are headings, not answers.
+**2. TEACHING NOTES - for the gaps, and only the gaps.**
+Read from published reference sources for the taught topics the RESOURCES do
+not reach. Use one only where the resources are silent on that topic. Where
+both speak, THE RESOURCES WIN - if a note says something the trainer's
+material contradicts or does not mention, follow the trainer.
 
-**PERFORMANCE CRITERIA - these are NOT content.**
-A performance criterion exists to say which competency an item is evidence for, and the allocation table uses it to fix the marks and the Bloom level. That is its whole job here. Do not take the subject of a question from a PC, do not expand a PC into content, and do not treat its wording as something to assess.
+**3. TOPICS TAUGHT - the list of topics, not their content.**
+Which sub-topics and key points are in scope. Headings, not answers. Nothing
+outside them may be assessed, whatever a resource or a note wanders onto.
+
+**4. PERFORMANCE CRITERIA - these are NOT content.**
+A performance criterion says which competency an item is evidence for, and
+the allocation table uses it to fix the marks and the Bloom level. That is its
+whole job. Do not take the subject of a question from a PC, do not expand a PC
+into content, and do not treat its wording as something to assess.
 
 HOW TO WRITE AN ITEM
-1  Read the allocation row. It gives you the PC to link to, the Bloom level, the marks and how many responses to ask for. These are fixed.
-2  Find the TEACHING NOTES for that row's topic. Read what they actually say.
-3  Ask a question whose answer is in those notes, at that level, for those marks. The marking scheme names the real answer, taken from the notes.
+1  Read the allocation row: the PC to link to, the Bloom level, the marks, how
+   many responses to ask for, and the verbs it may open with. All fixed.
+2  Find the material for that row's topic - the RESOURCES first, then the
+   TEACHING NOTES if the resources do not cover it.
+3  Ask a question that material answers, at that level, for those marks. The
+   marking scheme names the real answer, taken from that material.
+
+BE CONCRETE
+Whatever the source, use the real substance of the trade as it names it - the
+tools, standards, settings, figures and terminology a competent practitioner
+in Kenya would actually use on that topic, by name. A question on vulnerability
+scanning names a real scanner and a real finding; a question on access control
+cites the standard by its proper name; a question on cable sizing names the
+factor, not "a suitable factor". Never write "a suitable tool" where the
+material in front of you names one.
 
 WHAT NOT TO DO
-- Do not ask a question the notes cannot answer. If you cannot write the marking scheme from the material in front of you, ask a different question on the same topic that you can.
-- Do not hand a line back. A key point that lists its own examples has already given the answer: "Types of malware: virus, worm, trojan, ransomware" answers "List FOUR types of malware" before the candidate picks up a pen. Ask what a competent worker must know ABOUT those things - how each spreads, how it is detected, what is done about it - which is what the note will tell you.
-- Do not assess a topic that is not in the TOPICS TAUGHT. The notes go deeper into the taught topics; they never add new ones. If a note wanders onto something the unit does not cover, leave that part alone.
-- Do not go to your own knowledge of the trade first. Use the notes. Your own knowledge is for judging whether what a note says is true and whether it makes sense in a Kenyan workplace - the notes come from published reference sources and can be wrong or dated, and you are the assessor. Anything you take from one must be correct enough to mark a candidate against.
-- Never mention the notes, their source, the unit or the course in a question or a marking scheme.
-
-WHERE A TOPIC HAS NO NOTE
-Some topics will have none. Write that item from the TOPICS TAUGHT and your own knowledge of the trade, keeping strictly inside the taught topic, and prefer a narrow question you can mark to a broad one you cannot.
+- Do not ask a question your material cannot answer. If you cannot write the
+  marking scheme from what is in front of you, ask a different question on the
+  same topic that you can.
+- Do not hand a line back. A key point that lists its own examples has already
+  given the answer: "Types of malware: virus, worm, trojan, ransomware"
+  answers "List FOUR types of malware" before the candidate picks up a pen.
+  Ask what a competent worker must know ABOUT those things - how each spreads,
+  how it is detected, what is done about it.
+- Do not assess a topic that is not in the TOPICS TAUGHT. Resources and notes
+  go deeper into the taught topics; they never add new ones. If either wanders
+  onto something the unit does not cover, leave that part alone.
+- Do not reach for your own knowledge of the trade first. Use what you were
+  given. Your own knowledge is for judging whether it is true and whether it
+  makes sense in a Kenyan workplace, and for the topics nothing supplied
+  reaches at all - in which case keep strictly inside the taught topic and
+  prefer a narrow question you can mark to a broad one you cannot.
+- Never mention the resources, the notes, the unit or the course in a question
+  or a marking scheme. The candidate is being assessed on the work.
 
 ## 2. MARKS ARE FIXED
 
@@ -560,6 +603,72 @@ def _content_block(tool: AssessmentTool) -> str:
             "IN them is in the TEACHING NOTES below:\n" + rendered)
 
 
+def _resource_block(tool: AssessmentTool, budget: int = 0) -> str:
+    """The trainer's own material, or nothing.
+
+    First in the prompt and first in the ranking, because it is the only
+    source that is not an approximation: the curriculum lists headings, the
+    occupational standard lists criteria, and the teaching notes are a
+    reference work's account of the subject. This is what the trainees
+    actually sat through.
+
+    `budget` caps it in characters: 0 means the module's own default and a
+    negative number means leave it out. It is the LAST thing `_fit` gives up.
+    """
+    if budget < 0:
+        return ""
+    chosen = (assessment_resources.fit(tool.resources, budget) if budget
+              else tool.resources)
+    rendered = assessment_resources.render(chosen)
+    if not rendered:
+        return ""
+    return ("\n\nRESOURCES FROM THE TRAINER - their own notes, slides or "
+            "recording for this unit. THIS IS WHAT THE TRAINEES WERE ACTUALLY "
+            "TAUGHT FROM, and it is the first source of every question:\n"
+            + rendered
+            + "\n\nWork from this material wherever it reaches. Read the "
+              "passage for your row's topic, ask something it answers, and "
+              "write the marking scheme out of it. Where this material and a "
+              "TEACHING NOTE disagree, follow this - the trainer taught it. "
+              "Where it is silent on a topic, the teaching notes below fill "
+              "that gap."
+              "\n\nTHE CANDIDATE IS NOT SITTING AN EXAM ON THIS DOCUMENT. "
+              "They are being assessed on the work. So no question and no "
+              "marking point may mention it - not the file, not a slide, not "
+              "a page, and not \"the notes\", \"the class notes\", \"the "
+              "handout\" or \"the unit\". Use the material; never refer to "
+              "it.\n"
+              "  WRITE:     \"List FOUR types of malware.\"\n"
+              "  NOT:       \"List FOUR types of malware covered in the class "
+              "notes.\"\n"
+              "  WRITE:     \"Describe THREE components of role-based access "
+              "control.\"\n"
+              "  NOT:       \"...as outlined in the notes.\"")
+
+
+def _instructions_block(tool: AssessmentTool) -> str:
+    """What the trainer asked for on top, in their own words.
+
+    Passed through as written rather than summarised or interpreted. It is
+    placed LAST, after everything else, because it is the trainer speaking
+    about this particular paper and should be read in the light of all of it -
+    and because a late instruction is the one a model is most likely to still
+    be holding when it starts writing.
+    """
+    said = (tool.extra_instructions or "").strip()
+    if not said:
+        return ""
+    return ("\n\nFURTHER INSTRUCTIONS FROM THE TRAINER for this paper, in "
+            "their own words:\n" + said
+            + "\n\nFollow these within the rules above. They may steer what a "
+              "question is about, how hard it is, or which topics to favour. "
+              "They cannot change the marks, the Bloom level or the number of "
+              "items - those are fixed in the allocation table - and they "
+              "cannot put a topic in scope that the TOPICS TAUGHT leave out. "
+              "If an instruction cannot be followed without breaking one of "
+              "those, follow the rule and write the paper anyway.")
+
+
 def _knowledge_block(tool: AssessmentTool, budget: int = 0) -> str:
     """Real substance on the taught key points, or nothing.
 
@@ -729,8 +838,21 @@ PROMPT_CHAR_CEILING = 30000
 #
 # The allocation table, the topics taught and the standing instructions are
 # not on this list at all. Without them there is no paper.
-_FIT_STEPS = ((5200, 6), (4200, 4), (3400, 2), (2600, -1),
-              (1800, -1), (1200, -1), (-1, -1))
+# (characters of the trainer's resources, characters of teaching notes,
+#  exemplars shown).
+#
+# The order of surrender follows the order of authority. The exemplars go
+# first and go almost entirely - most of what they teach is already written
+# into section 16. Then the teaching notes, which only fill gaps. The
+# trainer's own material is last, because it is the only source that is not an
+# approximation of what was taught, and a paper written without it is a paper
+# written about a different course.
+#
+# The allocation table, the topics taught and the standing instructions are
+# not on this list at all. Without them there is no paper.
+_FIT_STEPS = ((6000, 5200, 5), (6000, 4200, 3), (6000, 3400, -1),
+              (6000, 2000, -1), (5000, 1200, -1), (4000, -1, -1),
+              (2800, -1, -1), (1600, -1, -1), (-1, -1, -1))
 
 
 def _fit(assemble, system: str) -> str:
@@ -752,20 +874,22 @@ def _fit(assemble, system: str) -> str:
     paper quietly written from half a curriculum.
     """
     smallest = ""
-    for notes_budget, exemplar_limit in ((0, 0),) + _FIT_STEPS:
-        smallest = assemble(notes_budget, exemplar_limit)
+    for step in ((0, 0, 0),) + _FIT_STEPS:
+        smallest = assemble(*step)
         if len(system) + len(smallest) <= PROMPT_CHAR_CEILING:
-            if (notes_budget, exemplar_limit) != (0, 0):
+            if step != (0, 0, 0):
                 runlog.log(f"Assessment: the prompt was trimmed to fit - "
-                           f"{notes_budget} characters of reference notes "
-                           f"and {exemplar_limit} exemplar(s)")
+                           f"{step[0]} characters of the trainer's resources, "
+                           f"{step[1]} of teaching notes and {step[2]} "
+                           f"exemplar(s)")
             return smallest
     runlog.warn("Assessment: the prompt is over the provider's size limit "
                 "even with no reference notes and no exemplars")
     return smallest
 
 
-def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
+def build_written_prompt(tool: AssessmentTool, resource_budget: int = 0,
+                         notes_budget: int = 0,
                          exemplar_limit: int = 0) -> str:
     """The per-paper half: the allocation table and nothing standing.
 
@@ -816,22 +940,24 @@ def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
                 f"allowed verbs: {verbs or '(any)'}{pointer}")
         return "\n".join(rows)
 
-    def assemble(notes_budget: int, exemplar_limit: int) -> str:
-        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}
+    def assemble(resource_budget: int, notes_budget: int,
+                 exemplar_limit: int) -> str:
+        return f"""{_header(tool)}{_resource_block(tool, resource_budget)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
 {rows_for(notes_budget)}
 
 ITEMS REQUIRED: {len(tool.allocations)}
 {level_note}
-Write one item per row above, in this order. Return the JSON object now."""
+Write one item per row above, in this order. Return the JSON object now.{_instructions_block(tool)}"""
 
-    if (notes_budget, exemplar_limit) != (0, 0):
-        return assemble(notes_budget, exemplar_limit)
+    if (resource_budget, notes_budget, exemplar_limit) != (0, 0, 0):
+        return assemble(resource_budget, notes_budget, exemplar_limit)
     return _fit(assemble, AS_WRITTEN_SYSTEM)
 
 
-def build_practical_prompt(tool: AssessmentTool, notes_budget: int = 0,
+def build_practical_prompt(tool: AssessmentTool, resource_budget: int = 0,
+                           notes_budget: int = 0,
                            exemplar_limit: int = 0) -> str:
     """The per-task half: what each PC is worth, and nothing standing."""
     by_pc: Dict[str, int] = tool.marks_by_pc()
@@ -851,8 +977,9 @@ def build_practical_prompt(tool: AssessmentTool, notes_budget: int = 0,
                  if methods else "")
     # One line per PC, in the order the rows were built, so a PC split across
     # two allocations is budgeted once and at its combined figure.
-    def assemble(notes_budget: int, exemplar_limit: int) -> str:
-        return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}{suggested}
+    def assemble(resource_budget: int, notes_budget: int,
+                 exemplar_limit: int) -> str:
+        return f"""{_header(tool)}{_resource_block(tool, resource_budget)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}{_sector_note(tool)}{suggested}
 
 PERFORMANCE CRITERIA ASSESSED, with the marks fixed for each:
 {chr(10).join(rows)}
@@ -862,10 +989,10 @@ Each criterion's marks are shared out across the items you write for it, in prop
 
 TIME ALLOWED: {tool.cat.duration_minutes} minutes
 
-Write the candidate's task brief, then the observation checklist, then the product checklist, then any oral questions. Return the JSON object now."""
+Write the candidate's task brief, then the observation checklist, then the product checklist, then any oral questions. Return the JSON object now.{_instructions_block(tool)}"""
 
-    if (notes_budget, exemplar_limit) != (0, 0):
-        return assemble(notes_budget, exemplar_limit)
+    if (resource_budget, notes_budget, exemplar_limit) != (0, 0, 0):
+        return assemble(resource_budget, notes_budget, exemplar_limit)
     return _fit(assemble, AS_PRACTICAL_SYSTEM)
 
 
@@ -1215,8 +1342,8 @@ def _send(tool: AssessmentTool, practical: bool, api_key: str, model: str,
     """
     build = build_practical_prompt if practical else build_written_prompt
     attempts = [build(tool)]
-    for notes_budget, exemplar_limit in _FIT_STEPS:
-        attempts.append(build(tool, notes_budget, exemplar_limit))
+    for step in _FIT_STEPS:
+        attempts.append(build(tool, *step))
 
     last: Optional[AIError] = None
     for index, prompt in enumerate(attempts):

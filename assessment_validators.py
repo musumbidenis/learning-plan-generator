@@ -609,6 +609,22 @@ _RE_ORDINAL_SLOT = re.compile(
     r"eighth|ninth|tenth)\s+(?:\w+\s+){0,2}(?:" + _SLOT_NOUN + r")\b",
     re.I)
 
+# The lettered form, and the one that survives having real words after it:
+# "Finding A - Likelihood: Medium, Impact: High". The rating is genuine and
+# the finding is not there at all, so the earlier patterns - which both need
+# the slot to be the WHOLE point - let it through. An assessor holding this
+# cannot tell whether a candidate's finding is the one that was wanted,
+# because no finding was ever named.
+#
+# Only a bare letter or digit counts as the label. "Finding AB1234 on the
+# payroll server" names something; "Finding A" names a position.
+# The noun is matched without regard to case; the LABEL is not. A lower-case
+# letter there is a word - "component c of the mixture" - and an upper-case
+# one is a placeholder.
+_RE_LABELLED_SLOT = re.compile(
+    r"^\s*(?i:(?:the\s+)?(?:" + _SLOT_NOUN + r"))"
+    r"\s+[A-Z0-9]\s*(?:[:\-–—]|$)")
+
 
 def is_placeholder(text: str) -> bool:
     """A marking point that names a slot instead of stating the answer."""
@@ -616,7 +632,8 @@ def is_placeholder(text: str) -> bool:
     if not body:
         return False
     return bool(_RE_BLANK.search(body) or _RE_SLOT.match(body)
-                or _RE_ORDINAL_SLOT.match(body))
+                or _RE_ORDINAL_SLOT.match(body)
+                or _RE_LABELLED_SLOT.match(body))
 
 
 def _check_placeholder_key(tool: AssessmentTool) -> List[AssessmentProblem]:

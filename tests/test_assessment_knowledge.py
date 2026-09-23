@@ -428,3 +428,57 @@ def test_key_points_are_spread_across_the_sub_topics():
 
     assert topics.count("1.2") == 2
     assert topics.count("1.1") == 2
+
+
+# --------------------------------------------------------------------------- #
+# The lookup fills gaps, once the trainer has supplied something
+# --------------------------------------------------------------------------- #
+def test_a_key_point_the_trainer_covers_is_not_looked_up(monkeypatch):
+    """Two accounts of the same thing is one for the model to choose between,
+    and the trainer's is the one that was taught."""
+    asked = []
+
+    def fake(key_point, vocab, element="", topic=""):
+        asked.append(key_point)
+        return KnowledgeNote(key_point=key_point, summary="s" * 40)
+
+    monkeypatch.setattr(know, "note_for", fake)
+    monkeypatch.setattr(know, "_remember", lambda unit, notes: None)
+
+    know.notes_for("Manage ICT security", _ict_content(),
+                   covered=lambda point: "malware" in point.lower())
+
+    assert asked
+    assert not any("malware" in p.lower() for p in asked)
+
+
+def test_everything_covered_means_nothing_is_looked_up(monkeypatch):
+    monkeypatch.setattr(know, "note_for",
+                        lambda *a, **k: pytest.fail("should not be called"))
+
+    assert know.notes_for("Unit", _ict_content(), covered=lambda p: True) == []
+
+
+def test_a_gap_filling_lookup_is_not_cached(tmp_path, monkeypatch):
+    """What the gaps are depends on what the trainer brought THIS time, so
+    storing it under the unit's name would hand those gaps to the next CAT."""
+    monkeypatch.setattr(know, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(know, "note_for",
+                        lambda point, vocab, element="", topic="":
+                        KnowledgeNote(key_point=point, summary="s" * 40))
+
+    know.notes_for("Manage ICT security", _ict_content(),
+                   covered=lambda point: False)
+
+    assert know._cached("Manage ICT security") is None
+
+
+def test_a_whole_unit_lookup_is_still_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(know, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(know, "note_for",
+                        lambda point, vocab, element="", topic="":
+                        KnowledgeNote(key_point=point, summary="s" * 40))
+
+    know.notes_for("Manage ICT security", _ict_content())
+
+    assert know._cached("Manage ICT security")

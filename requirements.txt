@@ -2,6 +2,7 @@ streamlit>=1.57       # dataframe row selection + width= (use_container_width is
 pdfplumber>=0.11
 pymupdf>=1.24        # fast PDF word extraction (fitz); pdfplumber is the fallback
 python-docx>=1.1
+python-pptx>=1.0        # read a trainer's slide deck, speaker notes and all
 olefile>=0.46        # read legacy Word 97-2003 (.doc) binaries
 python-dotenv>=1.0
 requests>=2.31

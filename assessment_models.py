@@ -248,6 +248,28 @@ class ElementContent:
 
 
 @dataclass
+class ResourceChunk:
+    """One piece of something the trainer attached - notes, slides, a talk.
+
+    The first source of a question when resources are supplied. Everything
+    else in this module is an approximation of what was taught; this is the
+    thing itself, so it outranks them. Carries where it came from because a
+    trainer reading a question must be able to find the page or slide it was
+    written from. Gathered in `assessment_resources`.
+    """
+    source: str = ""                 # the file's name, as the trainer knows it
+    where: str = ""                  # "slide 4", "page 12", "spoken"
+    heading: str = ""
+    text: str = ""
+
+    @property
+    def label(self) -> str:
+        bits = [b for b in (self.source, self.where) if b]
+        head = f" - {self.heading}" if self.heading else ""
+        return " ".join(bits) + head
+
+
+@dataclass
 class KnowledgeNote:
     """What a taught key point actually contains, read from a reference source.
 
@@ -384,6 +406,13 @@ class AssessmentTool:
     # be deep ABOUT. Empty when nothing was reachable, which costs the paper
     # its depth and not its generation.
     knowledge: List[KnowledgeNote] = field(default_factory=list)
+    # What the trainer attached: their own notes, slides or recording. When
+    # this is non-empty it is the FIRST source of every question, ahead of the
+    # curriculum and ahead of anything looked up.
+    resources: List[ResourceChunk] = field(default_factory=list)
+    # Anything else the trainer typed for this paper - "focus on the practical
+    # side", "they struggled with earthing". Passed to the model as given.
+    extra_instructions: str = ""
     # written
     scenarios: List[Scenario] = field(default_factory=list)
     items: List[Item] = field(default_factory=list)

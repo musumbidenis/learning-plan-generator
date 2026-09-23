@@ -712,22 +712,46 @@ def _remember(unit_title: str, notes: Sequence[KnowledgeNote]) -> None:
 # What the rest of the module calls
 # --------------------------------------------------------------------------- #
 def notes_for(unit_title: str, content: Sequence[ElementContent],
-              limit: int = MAX_NOTES, progress_cb=None) -> List[KnowledgeNote]:
+              limit: int = MAX_NOTES, progress_cb=None,
+              covered=None) -> List[KnowledgeNote]:
     """Reference notes on this unit's taught key points. Never raises.
 
+    `covered(key_point) -> bool` marks the points the trainer's own attached
+    material already answers. Those are skipped: this exists to FILL GAPS in
+    what was supplied, and a key point the trainer has notes on does not need
+    an encyclopaedia's version as well - which would be a second, slightly
+    different account of the same thing for the model to choose between.
+
+    With nothing attached, `covered` is None and every key point is looked up,
+    which is what this did before resources existed.
+
     Cached per unit: the first CAT on a unit pays for the reading and every
-    later one takes it off disk.
+    later one takes it off disk. The cache is keyed on the unit alone, so it
+    is only read when nothing is attached - what the gaps are depends on what
+    the trainer brought THIS time.
     """
     if not content:
         return []
-    remembered = _cached(unit_title)
-    if remembered is not None:
-        runlog.log(f"Knowledge: {len(remembered)} note(s) for '{unit_title}' "
-                   f"read from the cache")
-        return remembered[:limit]
+    if covered is None:
+        remembered = _cached(unit_title)
+        if remembered is not None:
+            runlog.log(f"Knowledge: {len(remembered)} note(s) for "
+                       f"'{unit_title}' read from the cache")
+            return remembered[:limit]
 
     vocab = vocabulary(unit_title, content)
     wanted = key_points(content, limit)
+    if covered is not None:
+        before = len(wanted)
+        wanted = [row for row in wanted if not covered(row[2])]
+        runlog.log(f"Knowledge: the attached resources already cover "
+                   f"{before - len(wanted)} of {before} key point(s); looking "
+                   f"up the remaining {len(wanted)}")
+        if not wanted:
+            if progress_cb:
+                progress_cb("Reference: the attached resources cover every "
+                            "topic; nothing to look up")
+            return []
     if progress_cb:
         progress_cb(f"Reference: reading up on {len(wanted)} taught topic(s)")
 
@@ -745,7 +769,12 @@ def notes_for(unit_title: str, content: Sequence[ElementContent],
 
     runlog.log(f"Knowledge: {len(notes)} of {len(wanted)} taught topic(s) "
                f"found a reference for '{unit_title}'")
-    _remember(unit_title, notes)
+    if covered is None:
+        # Only a whole-unit lookup is worth keeping. A gap-filling one is
+        # shaped by what the trainer attached this time, and storing it under
+        # the unit's name would hand those gaps to the next CAT, which may
+        # have been given different material or none.
+        _remember(unit_title, notes)
     return notes
 
 

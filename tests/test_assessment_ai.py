@@ -466,7 +466,7 @@ def test_the_topics_bound_the_paper_and_the_notes_fill_it():
 
     assert "WHERE THE CONTENT OF A QUESTION COMES FROM" in written
     assert "Do not assess a topic that is not in the TOPICS TAUGHT" in written
-    assert "this is what the questions are made of" in written.lower()
+    assert "the first source of every question" in written
     assert "Do not hand a line back" in written
 
 
@@ -485,7 +485,8 @@ def test_a_topic_nobody_covered_is_still_out_of_bounds():
 def test_the_paper_is_told_to_name_real_tools_and_standards():
     written = assessment_ai.AS_WRITTEN_SYSTEM
 
-    assert "the standards and tools used" in written
+    assert "BE CONCRETE" in written
+    assert "by name" in written
     assert "the real tools, standards" in assessment_ai.AS_PRACTICAL_SYSTEM
 
 
@@ -849,3 +850,102 @@ def test_the_row_verbs_still_win_over_the_sector_habits():
     note = assessment_ai._sector_note(tool)
 
     assert "that list wins" in note
+
+
+# --------------------------------------------------------------------------- #
+# The trainer's own resources, and their extra instructions
+# --------------------------------------------------------------------------- #
+def _chunks(n=2):
+    from assessment_models import ResourceChunk
+    return [ResourceChunk(source="Class notes.md", where=f"page {i + 1}",
+                          heading=f"Topic {i + 1}",
+                          text=f"What the trainer taught about topic {i + 1}, "
+                               f"at enough length to be a real passage. " * 3)
+            for i in range(n)]
+
+
+def test_the_trainers_resources_come_first_in_the_prompt():
+    """They rank first because they are the only source that is not an
+    approximation of what was taught."""
+    tool = _tool_with_content()
+    tool.knowledge = _notes(2, 80)
+    tool.resources = _chunks()
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "RESOURCES FROM THE TRAINER" in prompt
+    assert prompt.index("RESOURCES FROM THE TRAINER") < \
+        prompt.index("TEACHING NOTES")
+    assert prompt.index("RESOURCES FROM THE TRAINER") < \
+        prompt.index("TOPICS TAUGHT")
+
+
+def test_the_resources_are_the_last_thing_given_up_when_trimming():
+    """A paper written without the trainer's material is a paper written
+    about a different course."""
+    tool = _tool_with_content()
+    tool.knowledge = _notes(40, 1200)
+    tool.resources = _chunks(3)
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "RESOURCES FROM THE TRAINER" in prompt
+    assert (len(assessment_ai.AS_WRITTEN_SYSTEM) + len(prompt)
+            <= assessment_ai.PROMPT_CHAR_CEILING)
+
+
+def test_a_paper_with_nothing_attached_has_no_resource_section():
+    prompt = assessment_ai.build_written_prompt(_tool_with_content())
+
+    assert "RESOURCES FROM THE TRAINER" not in prompt
+
+
+def test_the_model_is_told_never_to_name_the_resource():
+    """The candidate has never seen the file. Three of six items in one live
+    run said "covered in the class notes"."""
+    tool = _tool_with_content()
+    tool.resources = _chunks(1)
+
+    block = assessment_ai._resource_block(tool)
+
+    assert "NOT SITTING AN EXAM ON THIS DOCUMENT" in block
+    assert "the class notes" in block          # named as a thing to avoid
+
+
+def test_the_trainers_own_words_are_passed_through_as_written():
+    tool = _tool_with_content()
+    tool.extra_instructions = "Push harder on the risk matrix - they "\
+                              "struggled with it."
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "FURTHER INSTRUCTIONS FROM THE TRAINER" in prompt
+    assert "Push harder on the risk matrix" in prompt
+
+
+def test_extra_instructions_cannot_move_a_mark():
+    tool = _tool_with_content()
+    tool.extra_instructions = "Make it out of 100 and use ten questions."
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "cannot change the marks" in prompt
+    assert "follow the rule and write the paper anyway" in prompt
+
+
+def test_no_extra_instructions_is_no_section():
+    tool = _tool_with_content()
+    tool.extra_instructions = "   "
+
+    assert assessment_ai._instructions_block(tool) == ""
+
+
+def test_the_practical_prompt_carries_both_too():
+    tool = _tool_with_content(PRACTICAL)
+    tool.resources = _chunks(1)
+    tool.extra_instructions = "Use the workshop's own tools by name."
+
+    prompt = assessment_ai.build_practical_prompt(tool)
+
+    assert "RESOURCES FROM THE TRAINER" in prompt
+    assert "workshop" in prompt

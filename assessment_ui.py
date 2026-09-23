@@ -3,28 +3,29 @@
 A sibling of the Learning Plan path, and it runs in the same order the work
 actually happens in:
 
-    1  pick the performance criteria this assessment covers
+    1  paste the unit's PC weighting table, and correct what the paste lost
     2  say which CAT it is, written or practical, and out of how many marks
-    3  paste the unit's PC weighting table, and correct what the paste lost
+    3  pick the performance criteria this assessment covers
     4  read the computed distribution - every mark is final at this point
     5  read the curriculum content the paper will be set from
-    6  read what that content actually contains, scouted from reference
-       sources, and the real questions other papers have asked on it
-    7  generate, validate, repair
-    8  download
+    6  attach what the trainer actually taught from, and say anything else
+       about this paper
+    7  look up only the topics those resources do not reach
+    8  generate, validate, repair, download
 
-The performance criteria say what is assessed; the curriculum says what was
-taught. Both go to the model, because a PC on its own is one general line and
-a paper written from it alone is written from the model's own knowledge of the
-trade - plausible, and about things nobody covered.
+WHERE A QUESTION'S CONTENT COMES FROM, IN ORDER
+The performance criteria say what is assessed and what it is worth. They are
+never content: a PC is one general line, and a paper written from it is
+written from the model's own knowledge of the trade - plausible, and about
+things nobody covered.
 
-Neither of them, though, says what the taught topics actually CONTAIN. A
-curriculum key point is a heading: "Types of malware: virus, worm, trojan".
-Step 6 goes and reads about those headings, and brings back the substance a
-question can be built on - what the thing is, how the subject is normally
-broken down, what a practitioner names. That is the difference between asking
-a trainee to repeat a heading and asking them to use it. It never widens what
-may be assessed; the curriculum still decides that.
+The curriculum says which topics are in scope. It is a list of headings, and
+a paper written from headings is a paper of headings.
+
+The trainer's own resources say what was actually taught, and that is what a
+candidate can fairly be asked about - so when step 6 has anything in it, the
+questions come from there. Step 7 reads up on whatever the resources miss,
+and nothing else fills a gap the trainer has already filled.
 
 Steps 4 and 5 are kept apart on purpose. All the arithmetic happens in step 4,
 in `assessment_allocation`, in plain code. By the time the model is called it
@@ -35,7 +36,7 @@ assessment numbering deterministic.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import streamlit as st
 
@@ -45,18 +46,21 @@ import assessment_docs as docs
 import assessment_knowledge as knowledge
 import assessment_ledger as ledger_store
 import assessment_research as research
+import assessment_resources as resource_reader
 import assessment_validators as validators
 import assessment_weighting as weighting_parser
 import runlog
 from assessment_models import (CAT_1, CAT_2, CAT_3, CAT_LABELS, FINAL_CAT,
                                PRACTICAL, THEORY, Allocation, AssessmentTool,
                                CatDefinition, ElementContent, Exemplar,
-                               KnowledgeNote, Problem, UnitWeighting)
+                               KnowledgeNote, Problem,
+                               ResourceChunk, UnitWeighting)
 from models import Unit
 
 ss = st.session_state
 
-_STATE = dict(at_weighting=None, at_raw="", at_tool=None, at_problems=[])
+_STATE = dict(at_weighting=None, at_raw="", at_tool=None,
+              at_problems=[], at_resources={})
 
 
 def _ensure_state() -> None:
@@ -277,8 +281,73 @@ def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
     return content
 
 
-def _knowledge_step(unit_title: str,
-                    content: List[ElementContent]) -> List[KnowledgeNote]:
+def _resource_step(content: List[ElementContent]
+                   ) -> Tuple[List[ResourceChunk], str]:
+    """The trainer's own material, and anything else they want to say.
+
+    The most important step on the page and the only optional one. Everything
+    else the generator has is an approximation of what was taught - topic
+    headings, criteria, a reference work's account. This is the thing itself,
+    so when it is here the questions come from it.
+
+    Each file is read once and kept in session state under a signature of its
+    contents, because a Streamlit rerun happens on every keystroke in the
+    instructions box and re-reading a PowerPoint - or worse, re-transcribing a
+    recording - on each one would be unusable.
+    """
+    st.markdown("#### 6. The trainer's own notes and resources")
+    st.caption("Attach what you actually taught from and the questions will "
+               "be written from it: notes, slides, a handout, a recording of "
+               "the session. Anything a topic is not covered by is looked up "
+               "instead. PDF, Word, PowerPoint, text, audio or video.")
+    uploaded = st.file_uploader(
+        "Resources", accept_multiple_files=True, key="at_files",
+        type=["pdf", "docx", "doc", "odt", "rtf", "pptx", "txt", "md", "csv",
+              "mp3", "m4a", "wav", "webm", "mp4", "ogg", "flac"])
+
+    resources: List = []
+    for upload in uploaded or []:
+        data = upload.getvalue()
+        signature = f"{upload.name}:{len(data)}"
+        if signature not in ss.at_resources:
+            with st.spinner(f"Reading {upload.name}..."):
+                ss.at_resources[signature] = resource_reader.read(
+                    upload.name, data)
+        resources.append(ss.at_resources[signature])
+
+    for resource in resources:
+        if resource.ok:
+            st.caption(f"✔ **{resource.name}** - {len(resource.chunks)} "
+                       f"piece(s) read")
+        else:
+            st.warning(f"**{resource.name}** could not be used: "
+                       f"{resource.note}")
+
+    chosen = resource_reader.select(resources, content) if resources else []
+    if chosen:
+        st.caption(resource_reader.summarise(resources, chosen)
+                   + " - the questions are written from these.")
+        with st.expander("What the model will read", expanded=False):
+            for chunk in chosen:
+                st.markdown(f"**{chunk.label}**")
+                st.caption(chunk.text[:600]
+                           + ("..." if len(chunk.text) > 600 else ""))
+    elif resources:
+        st.info("Nothing in those files matched the topics this CAT covers, "
+                "so the questions will be written from the curriculum and "
+                "looked-up notes instead.")
+
+    extra = st.text_area(
+        "Anything else for this paper (optional)", key="at_extra", height=90,
+        placeholder="e.g. Favour the practical side - they struggled with "
+                    "earthing.\nKeep the language simple, this is a first "
+                    "attempt.\nUse the workshop's own tools by name.")
+    return chosen, (extra or "").strip()
+
+
+def _knowledge_step(unit_title: str, content: List[ElementContent],
+                    resources: Optional[List[ResourceChunk]] = None
+                    ) -> List[KnowledgeNote]:
     """The material the paper is written from, read from reference sources.
 
     This is the step to read before generating. These notes are what the
@@ -290,16 +359,24 @@ def _knowledge_step(unit_title: str,
     """
     if not content:
         return []
-    cached = knowledge._cached(unit_title) is not None
+    # With resources attached, only the topics they miss are looked up - and
+    # which topics those are depends on what was attached THIS time, so the
+    # per-unit cache is bypassed.
+    covered = ((lambda point: resource_reader.covered(resources, point))
+               if resources else None)
+    cached = covered is None and knowledge._cached(unit_title) is not None
     if cached:
         notes = knowledge.notes_for(unit_title, content)
     else:
-        with st.spinner("Reading up on the taught topics..."):
-            notes = knowledge.notes_for(unit_title, content)
+        with st.spinner("Looking up the topics your resources do not cover..."
+                        if resources else "Reading up on the taught topics..."):
+            notes = knowledge.notes_for(unit_title, content, covered=covered)
 
-    st.markdown("#### 6. The teaching notes the questions are written from")
+    st.markdown("#### 7. Looked up, for the topics the resources miss")
     if not notes:
-        st.caption("No teaching notes were found for these topics, so the "
+        st.caption("Your resources cover every assessed topic, so nothing "
+                   "needed looking up." if resources else
+                   "No teaching notes were found for these topics, so the "
                    "questions are written from the curriculum's key points "
                    "alone. They will be shallower for it.")
         return []
@@ -398,7 +475,8 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     allocations = _distribution_step(weighting, cat)
     content = _content_step(os_unit, curr_unit, weighting, allocations)
     unit_title = weighting.unit_title or os_unit.unit_title
-    notes = _knowledge_step(unit_title, content)
+    resources, extra = _resource_step(content)
+    notes = _knowledge_step(unit_title, content, resources)
     exemplars = _research_step(unit_title, content)
 
     if st.button("Generate assessment tool", type="primary", key="at_go"):
@@ -406,7 +484,8 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
             unit_title=weighting.unit_title, cdacc_code=weighting.cdacc_code,
             isced_code=weighting.isced_code, knqf_level=weighting.knqf_level,
             programme=programme, cat=cat, allocations=allocations,
-            content=content, exemplars=exemplars, knowledge=notes)
+            content=content, exemplars=exemplars, knowledge=notes,
+            resources=resources, extra_instructions=extra)
         messages: List[str] = []
         box = st.empty()
 
@@ -433,7 +512,7 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     tool = ss.at_tool
     if tool is None:
         return
-    st.markdown("#### 7. Result")
+    st.markdown("#### 8. Result")
     remaining = validators.blocking(ss.at_problems)
     warnings = [p for p in ss.at_problems if not p.blocking]
     if remaining:
