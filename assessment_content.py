@@ -181,10 +181,17 @@ def render(content: Sequence[ElementContent]) -> str:
         lines = [head]
         for topic in block.topics:
             label = " ".join(x for x in (topic.number, topic.title) if x)
-            lines.append(f"  {label}")
-            lines.extend(f"      - {point}" for point in topic.key_points)
+            # One line per sub-topic rather than one per key point. This is a
+            # list of topic names and the model reads it as one either way,
+            # but the indented form cost about a third more of a prompt that
+            # has to fit inside 8000 tokens with the teaching notes - and the
+            # notes are what the questions are made of, so they get the room.
+            if topic.key_points:
+                lines.append(f"  {label}: " + "; ".join(topic.key_points))
+            else:
+                lines.append(f"  {label}")
         blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+    return "\n".join(blocks)
 
 
 def methods(content: Sequence[ElementContent]) -> List[str]:

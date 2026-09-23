@@ -1,4 +1,4 @@
-"""The fourteen checks a generated tool has to pass, and one repair pass.
+"""The fifteen checks a generated tool has to pass, and one repair pass.
 
 The model writes prose under tight constraints and mostly holds to them; these
 checks are for the times it does not. They fall into two kinds, and the
@@ -63,6 +63,7 @@ PLACEHOLDER_KEY = "placeholder_key"
 UNFUNDED_ITEM = "unfunded_item"
 COURSE_REFERENCE = "course_reference"
 SYLLABUS_RECITATION = "syllabus_recitation"
+DUPLICATE_ITEM = "duplicate_item"
 
 # The ones a model can be asked to fix by rewriting the offending item. The
 # rest are arithmetic, coverage or allocation: rewording cannot change them -
@@ -71,7 +72,7 @@ SYLLABUS_RECITATION = "syllabus_recitation"
 REPAIRABLE_CHECKS = frozenset({BLOOM_CONFORMANCE, ITEM_INDEPENDENCE, STEM_CLUE,
                                ITEM_NOT_PC, FORMAT_COMPLIANCE,
                                PLACEHOLDER_KEY, COURSE_REFERENCE,
-                               SYLLABUS_RECITATION})
+                               SYLLABUS_RECITATION, DUPLICATE_ITEM})
 
 
 @dataclass(eq=False)
@@ -632,9 +633,14 @@ _RE_COURSE_REFERENCE = re.compile(
     r"examined|addressed|highlighted|set out)\s+"
     r"(?:in|during)\s+(?:the|this|your)\s+"
     r"(?:unit|course|module|class|lesson|curriculum|content|syllabus|"
-    r"training|programme|program|topic)"
+    r"training|programme|program|topic|teaching notes|notes|handout|"
+    r"lecture|reference notes|learning guide|manual)"
     r"|\b(?:as\s+per|according\s+to)\s+(?:the|this|your)\s+"
-    r"(?:unit|course|module|lesson|curriculum|syllabus)\b", re.I)
+    r"(?:unit|course|module|lesson|curriculum|syllabus|teaching notes|notes)\b"
+    # The notes exist so the model has something to ask about. Naming them in
+    # the question tells the candidate the answer is in a document, and it is
+    # a document they were never given.
+    r"|\bin\s+the\s+(?:teaching\s+)?notes\b", re.I)
 
 
 def _check_course_reference(tool: AssessmentTool) -> List[AssessmentProblem]:
@@ -738,6 +744,57 @@ def _check_syllabus_recitation(tool: AssessmentTool) -> List[AssessmentProblem]:
     return out
 
 
+DUPLICATE_ITEM_OVERLAP = 0.7
+
+
+def _check_duplicate_items(tool: AssessmentTool) -> List[AssessmentProblem]:
+    """16. No two items on the paper are the same question twice.
+
+    A criterion too big for one question is split into several items at the
+    same level, and each is written from the same material. Left to itself the
+    model writes the same question each time: one live paper came back with
+
+        1. Identify FOUR ICT security threats...
+        2. List FOUR types of ICT security threats...
+        3. Name FOUR common ICT security threats...
+
+    and all three marking schemes were malware, social engineering,
+    vulnerabilities, risk. A candidate answers once and is paid three times,
+    and a paper claiming to cover twelve marks of the criterion covers four.
+
+    Nothing else sees it. The marks add up, each item sits on its own row, the
+    verbs are in the right bank, and `_check_independence` is asking the
+    opposite question - whether a stem leaks ANOTHER item's answer, which is
+    about items being too different to share, not too alike.
+
+    Compared on the marking schemes rather than the stems, because the stems
+    are reworded and the answers are not. Repairable: the second and later
+    items need a different question on the same topic, which is what the
+    notes are there to supply.
+    """
+    out: List[AssessmentProblem] = []
+    keys = [(item, tokens(" ".join(p.text for p in item.marking_scheme)))
+            for item in tool.items]
+    for index, (item, mine) in enumerate(keys):
+        if not mine:
+            continue
+        for earlier, theirs in keys[:index]:
+            if not theirs:
+                continue
+            if (overlap(mine, theirs) >= DUPLICATE_ITEM_OVERLAP
+                    and overlap(theirs, mine) >= DUPLICATE_ITEM_OVERLAP):
+                out.append(_problem(
+                    DUPLICATE_ITEM,
+                    f"item {item.number} asks the same question as item "
+                    f"{earlier.number} - the two marking schemes are the same "
+                    f"answer in different words, so the candidate is paid "
+                    f"twice for one piece of knowledge. Ask something "
+                    f"different on the same topic",
+                    where=f"item {item.number}", item_number=item.number))
+                break
+    return out
+
+
 def _check_unfunded_items(tool: AssessmentTool) -> List[AssessmentProblem]:
     """13. Every item of evaluation carries at least one mark.
 
@@ -774,7 +831,8 @@ _CHECKS = (_check_pc_coverage, _check_mark_fidelity, _check_totals,
            _check_bloom_conformance, _check_independence, _check_stem_clues, _check_practical_count,
            _check_item_not_pc, _check_format, _check_marks_fit_verb,
            _check_placeholder_key, _check_unfunded_items,
-           _check_course_reference, _check_syllabus_recitation)
+           _check_course_reference, _check_syllabus_recitation,
+           _check_duplicate_items)
 
 
 def validate(tool: AssessmentTool) -> List[Problem]:
@@ -807,9 +865,10 @@ RULES
 - The corrected item must not repeat, hint at or give away the answer to any frozen item or to any other corrected item.
 - The corrected stem must not give away its own answer.
 - Every item is constructed response. Never a multiple-choice, true/false, matching or fill-in-the-blank item. Give response_type as exactly "short_response" or "extended_response".
-- Keep the item on its own performance criterion, and assess only what the CONTENT TAUGHT covers. Never introduce equipment, standards, terminology or procedures that are not in it.
+- Keep the item on its own performance criterion. Build the question and its marking scheme out of the TEACHING NOTES, which are what the trainer teaches this unit from, and stay on a topic the notes cover. A PC is the competency link and the source of the marks; it is never content.
 - Keep the stem concise - normally one sentence - and state exactly how many responses are wanted.
 - Ask about the trade, never about the course. No "covered in the unit", "as described in this module", "listed in the curriculum". Delete the phrase and ask the question directly.
+- Where a fault says two items ask the same question, the later one needs a DIFFERENT question on the same topic, with a marking scheme of different answers. Both items stay on their own rows, levels and marks.
 - Never set the question a curriculum key point already answers. Where a fault says the marking scheme is printed in the key point, rewriting the stem is NOT the fix: the corrected item must have a DIFFERENT marking scheme, holding answers that do not appear in that line. Stay on the same key point, the same Bloom level and the same marks, and ask what a competent worker has to know ABOUT those things - how one is told from another, how each arrives or is used, what is done about it.
   Wrong fix: "Identify FOUR types of malware covered in the unit" becomes "Identify FOUR common types of malware". The answer is still virus, worm, trojan, ransomware.
   Right fix: "State FOUR ways malware reaches a workstation" - infected removable media, an attachment from a phishing message, a drive-by download, software from an unofficial source.
@@ -985,7 +1044,7 @@ def _content_section(tool: AssessmentTool) -> str:
     rendered = assessment_content.render(tool.content)
     if not rendered:
         return ""
-    return ("\n\nCONTENT TAUGHT - the corrected item is set from this and "
+    return ("\n\nTEACHING NOTES - the corrected item is set from this and "
             "nothing else:\n" + rendered)
 
 

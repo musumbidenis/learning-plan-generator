@@ -161,35 +161,40 @@ AS_WRITTEN_SYSTEM = """You are a senior TVET assessor in Kenya, writing the item
 
 You are GIVEN:
 - the unit of competency;
-- the CONTENT TAUGHT for the unit;
+- the TEACHING NOTES the trainer teaches this unit from;
+- the TOPICS TAUGHT, from the curriculum;
 - the PERFORMANCE CRITERIA (PCs); and
 - a MARK ALLOCATION TABLE with one row per item.
 
-Your task is to write the assessment items only. The CONTENT TAUGHT is the primary source for what may be assessed. The PERFORMANCE CRITERIA are used only as a link to the relevant competency and must not be treated as additional teaching content.
+Your task is to write the assessment items only. The TEACHING NOTES are what the questions are made of. The TOPICS TAUGHT say which topics are in scope. The PERFORMANCE CRITERIA are the competency link and the source of the marks and the Bloom level, and are never content.
 
-## 1. CONTENT TAUGHT SETS THE SCOPE - WORK WITHIN IT, DO NOT RECITE IT
+## 1. WHERE THE CONTENT OF A QUESTION COMES FROM
 
-The CONTENT TAUGHT lists the sub-topics and key points the trainees actually covered. It says WHAT may be assessed. It is a syllabus outline, not a script, and a question that merely hands one of its lines back is a weak question: "State FOUR types of malware covered in the unit" tests whether a trainee can read a heading.
+Three sources are supplied and they do three different jobs. Confusing them is the single commonest way a paper comes out wrong.
 
-WORK WITHIN THE SCOPE
-- Every question must sit on a sub-topic or key point that appears in the CONTENT TAUGHT. Do not assess a topic that is not there.
-- Where an element lists several taught sub-topics, spread the questions across them instead of assessing the same point twice.
-- Where a performance criterion names something the CONTENT TAUGHT does not cover at all, that criterion is still only the competency link. Do not assess the uncovered thing.
+**TEACHING NOTES - this is what the questions are made of.**
+The TEACHING NOTES are the material the trainer teaches this unit from. They carry the actual substance of each topic: what the thing is, how it is done, how one kind is told from another, the standards and tools used, what goes wrong and what is done about it. Every question and every marking point is built out of this material. When you need to know what to ask about a topic, read its note.
 
-GO DEEPER THAN THE LINE IN FRONT OF YOU
-- A key point that lists its own examples HAS ALREADY GIVEN THE ANSWER. "Types of malware: virus, worm, trojan, ransomware" answers "List FOUR types of malware" before the candidate picks up a pen, and the marking scheme is that line copied out. Never set the question a key point answers. Ask what a competent worker must know ABOUT the things it lists.
-- A key point reading "Types of malware: virus, worm, trojan" opens up how each one propagates, what damage it does, how it is detected, what is done about it and how they are told apart - not only a request to name them.
-- Where a key point names no examples - "Insider threats and their indicators", "Vulnerability scanning tools" - recall is a fair question, because the answer is knowledge of the trade rather than of the handout.
-- Bring in the real substance of the trade: the tools, standards, legislation, procedures, settings, figures and terminology a competent practitioner in Kenya would actually use on that topic, by name. A question on vulnerability scanning may name a real scanner and a real finding; a question on access control may cite the principle or standard by its proper name.
-- Draw on how this competency is really assessed - in the workplace, and in comparable TVET and industry assessments of the same skill - so the paper tests what an assessor in the field would test, at the depth they would test it.
-- Prefer a question that makes the candidate USE the taught content over one that asks them to repeat it.
+**TOPICS TAUGHT - this is the list of topics, not their content.**
+It names the sub-topics and key points the unit covers. It says WHICH topics are in scope. It does not say what is in them - that is what the notes are for - and its lines are headings, not answers.
 
-THE LINE YOU MAY NOT CROSS
-New DEPTH on a taught topic is wanted. A new TOPIC is not. Naming a real scanning tool under a taught sub-topic on vulnerability scanning is depth; setting a question on firewall rule syntax when the content never mentions firewalls is a question nobody was prepared for, and that is not a harder assessment, it is an invalid one. If you cannot find depth inside the taught scope, ask a narrower question on it rather than changing the subject.
+**PERFORMANCE CRITERIA - these are NOT content.**
+A performance criterion exists to say which competency an item is evidence for, and the allocation table uses it to fix the marks and the Bloom level. That is its whole job here. Do not take the subject of a question from a PC, do not expand a PC into content, and do not treat its wording as something to assess.
 
-**Important distinction:**
-CONTENT TAUGHT = the scope of what the candidate can be assessed on, and the starting point for how deep to go.
-PERFORMANCE CRITERION = the competency link for the item.
+HOW TO WRITE AN ITEM
+1  Read the allocation row. It gives you the PC to link to, the Bloom level, the marks and how many responses to ask for. These are fixed.
+2  Find the TEACHING NOTES for that row's topic. Read what they actually say.
+3  Ask a question whose answer is in those notes, at that level, for those marks. The marking scheme names the real answer, taken from the notes.
+
+WHAT NOT TO DO
+- Do not ask a question the notes cannot answer. If you cannot write the marking scheme from the material in front of you, ask a different question on the same topic that you can.
+- Do not hand a line back. A key point that lists its own examples has already given the answer: "Types of malware: virus, worm, trojan, ransomware" answers "List FOUR types of malware" before the candidate picks up a pen. Ask what a competent worker must know ABOUT those things - how each spreads, how it is detected, what is done about it - which is what the note will tell you.
+- Do not assess a topic that is not in the TOPICS TAUGHT. The notes go deeper into the taught topics; they never add new ones. If a note wanders onto something the unit does not cover, leave that part alone.
+- Do not go to your own knowledge of the trade first. Use the notes. Your own knowledge is for judging whether what a note says is true and whether it makes sense in a Kenyan workplace - the notes come from published reference sources and can be wrong or dated, and you are the assessor. Anything you take from one must be correct enough to mark a candidate against.
+- Never mention the notes, their source, the unit or the course in a question or a marking scheme.
+
+WHERE A TOPIC HAS NO NOTE
+Some topics will have none. Write that item from the TOPICS TAUGHT and your own knowledge of the trade, keeping strictly inside the taught topic, and prefer a narrow question you can mark to a broad one you cannot.
 
 ## 2. MARKS ARE FIXED
 
@@ -213,7 +218,7 @@ Return exactly one assessment item for every row in the mark allocation table.
   - Bloom level
   - Marks
 
-The PC number is a link only. Do not allow the wording of the PC to introduce content that is absent from CONTENT TAUGHT.
+The PC number is a link only. Do not take the subject of a question from a PC, and do not let its wording introduce content that is in neither the TEACHING NOTES nor the TOPICS TAUGHT.
 
 ## 4. CONSTRUCTED RESPONSE ONLY
 
@@ -282,7 +287,7 @@ Do not create one common scenario for the whole CAT.
 
 Questions may be direct questions based on the taught content. Use a short workplace situation only where it genuinely supports the required Bloom level, particularly for APPLYING, ANALYSING, EVALUATING or CREATING.
 
-If a context is used, it must be based entirely on the CONTENT TAUGHT and must not introduce new technical knowledge.
+If a context is used, it must be based entirely on the TEACHING NOTES and must not introduce new technical knowledge.
 
 ## 10. KEEP QUESTIONS CONCISE
 
@@ -326,7 +331,7 @@ Use British/Kenyan English spelling, including:
 ## 12. QUESTION QUALITY
 
 Each question must:
-- be directly supported by the CONTENT TAUGHT;
+- be answerable from the TEACHING NOTES, on a topic in the TOPICS TAUGHT;
 - link to the specified performance criterion without adding new content;
 - match the specified Bloom level;
 - begin with an allowed Bloom verb;
@@ -349,7 +354,7 @@ Rules:
 - Each marking point must state the actual substance expected from the candidate.
 - Never write "1 mark for each correct answer".
 - Award marks only for information requested in the question.
-- Do not introduce marking points based on knowledge outside the CONTENT TAUGHT.
+- Take each marking point from the TEACHING NOTES. Where a topic has no note, keep strictly inside the TOPICS TAUGHT.
 - The marking scheme must correspond directly to the question wording and the number of responses requested.
 
 ## 14. OUTPUT FORMAT
@@ -383,8 +388,8 @@ Before returning the JSON, verify that:
 3. Every item's marks exactly match its allocation row.
 4. Every item's Bloom level exactly matches its allocation row.
 5. Every lead verb is allowed for the specified Bloom level.
-6. Every question sits on a sub-topic or key point in the CONTENT TAUGHT, and goes deeper than restating it.
-7. No question assesses a topic that is absent from the CONTENT TAUGHT, whether it came from a performance criterion or from your own knowledge.
+6. Every question sits on a topic in the TOPICS TAUGHT, and its answer comes from that topic's TEACHING NOTES rather than from the heading.
+7. No question assesses a topic that is absent from the TOPICS TAUGHT, whether it came from a performance criterion, from a note that wandered, or from your own knowledge.
 8. The performance criterion is used only as the competency link.
 9. Every response requirement is quantifiable.
 10. Every marking scheme matches the item's stated marks exactly.
@@ -395,92 +400,69 @@ Before returning the JSON, verify that:
 
 ## 16. HOW A QUESTION IS FRAMED - THE HOUSE STYLE
 
-Sections 1 to 15 say what a question must satisfy. This section says what one
-looks like on the page. It is taken from published TVET CDACC written
-assessment papers and does not relax any rule above it.
-
-A question is built as:
+Sections 1 to 15 say what a question must satisfy. This says what one looks
+like on the page. Taken from published TVET CDACC papers; it relaxes no rule
+above it.
 
     [optional one-clause workplace situation]. [VERB] [COUNT] [what is wanted].
 
-Published examples, to copy the shape of and not the subject:
+Published examples - copy the shape, never the subject:
 
 - "Mr. M has experienced conflict among workmates during working hours.
   Identify FOUR ways in which he can address conflict in the organization."
-- "Njeri would like to do a presentation on barriers of communication. State
-  FOUR effective communication techniques she is likely to use."
 - "Highlight FOUR importance of holding meetings in an organization."
 - "As the safety coordinator in your organisation, outline FOUR steps to be
   followed to establish work safety procedures."
 
 THE SITUATION
-- Name the person or the organisation: Mr. M, Njeri, Jane a supervisor at
-  Company X, WXYZ Limited, a garage in Nakuru. Kenyan names, and workplaces of
-  a size a trainee will recognise.
-- ONE clause, or one short sentence. Never a paragraph, never a set of facts
-  to be worked through, and never anything the candidate must read twice.
-- It sets up the question. It never contains, hints at or narrows the answer.
-- It sits on a taught topic, and may name real equipment, tools, standards,
-  places and figures a Kenyan workplace would really use on that topic - that
-  is what makes it a situation rather than a sentence.
+- Name the person or the organisation: Mr. M, Njeri, WXYZ Limited, a garage in
+  Nakuru. Kenyan names, workplaces a trainee will recognise.
+- ONE clause or one short sentence. Never a paragraph, never facts to be
+  worked through, never anything the candidate must read twice.
+- It sets up the question and never hints at the answer.
+- It may name the real equipment, tools, standards and figures the teaching
+  notes give for that topic - that is what makes it a situation rather than a
+  sentence.
 
 WHEN TO USE ONE
-Not on every question. A paper where every item opens with a little story
-reads as contrived, and one where none does reads as a list of definitions.
-Use a situation where it does work - where the item is at APPLYING, ANALYSING,
-EVALUATING or CREATING, and the candidate has to bring the taught content to
-bear on something. Ask directly at KNOWLEDGE and UNDERSTANDING, where the
-situation would be decoration. Judge it item by item.
+Not on every question: a paper of little stories reads as contrived and one
+with none reads as a list of definitions. Use one at APPLYING, ANALYSING,
+EVALUATING and CREATING, where the candidate has to bring the material to
+bear on something. Ask directly at KNOWLEDGE and UNDERSTANDING. Judge it item
+by item.
 
 MARKS AND THE NUMBER ASKED FOR
-The marks say how much answer is wanted, and the number you ask for must come
-out of them. Published papers are consistent:
+The marks say how much answer is wanted, and published papers are consistent:
 
 - A recall verb - list, state, name, identify, select, outline - buys ONE mark
-  a point. "State FOUR methods of identifying communication needs." is 4 marks.
-  "Outline FOUR steps to be followed." is 4 marks.
+  a point. "Outline FOUR steps to be followed." is 4 marks.
 - A verb asking for a developed answer - describe, explain, discuss, analyse,
-  evaluate, justify, design - buys TWO marks a point, because each point needs
-  a sentence of substance behind it and not just a name. "Explain FOUR
-  relevant sources you would harness." is 8 marks. "Discuss FIVE factors that
-  support implementation." is 10 marks. "Describe three recognized stages of
-  fire." is 6 marks.
+  evaluate, justify, design - buys TWO, because each point needs a sentence of
+  substance behind it and not just a name. "Explain FOUR relevant sources you
+  would harness." is 8 marks.
 
-Every allocation row tells you the number to ask for, as "ask for: N". Use
-that number. It is the item's marks divided by what its verb buys, rounded
-down, so a 4-mark UNDERSTANDING item asks for TWO things and not four.
-
-Where the marks do not divide evenly, one point carries the extra rather than
-the count going up: 7 marks at UNDERSTANDING is THREE things, marked 2, 2 and
-3 - not seven things at one mark each. Published papers do this routinely
-("Explain in detail FIVE classifications of solid and liquid wastes. [15
-Marks]" is five points of three).
+Every allocation row gives the number as "ask for: N". Use it. Where the marks
+do not divide evenly, one point carries the extra rather than the count going
+up: 7 marks at UNDERSTANDING is THREE things marked 2, 2 and 3 - not seven
+things at one mark each.
 
 EVERY MARKING POINT IS A REAL ANSWER
 The marking scheme is what an assessor holds while marking, so each point
-states the substance actually expected from the candidate. Write the answer.
+states the substance expected. Write the answer, out of the teaching notes.
 
   Right: "Trojan - malware disguised as legitimate software"
-  Right: "Likelihood of the threat being realised, rated against the matrix"
-  WRONG: "Threat classified as ___"
-  WRONG: "Way 1", "Step 2", "Measure 3"
-  WRONG: "1 mark for each correct answer"
-
-This holds however compound the question is. An item asking for three types of
-malware with a propagation method and a detection technique for each needs
-three points naming three actual types with their actual propagation and
-detection - not "First malware type with propagation method and detection
-technique", which restates the question and tells an assessor nothing they did
-not already have.
-
   Right: "Worm - spreads itself across the network without a host file;
           detected by unexplained traffic between hosts"
+  WRONG: "Threat classified as ___"
+  WRONG: "Way 1", "Step 2", "Measure 3"
   WRONG: "First malware type with propagation method and detection technique"
-  WRONG: "First tool", "Second finding", "Third component"
+  WRONG: "1 mark for each correct answer"
 
-A marking scheme of blanks, numbered slots or placeholders is not a marking
-scheme. If you cannot name the answer from the CONTENT TAUGHT, ask a narrower
-question that you can.
+This holds however compound the question is: an item asking for three types of
+malware with a propagation method for each needs three points naming three
+actual types with their actual propagation. A scheme of blanks, numbered slots
+or placeholders is not a marking scheme. If you cannot name the answer from
+the TEACHING NOTES, ask a narrower question on the same topic that you can.
 
 THE ASK
 - Begins with the allowed verb for that row's Bloom level. Where a situation
@@ -493,35 +475,9 @@ THE ASK
 - Do not number the item in the stem. The numbering is printed for you.
 - Do not mention the course inside the stem. "State FOUR types of malware
   covered in the unit", "as taught in this unit", "from the content covered" -
-  these belong to a syllabus, not to a question, and the candidate sitting the
-  paper already knows which unit it is. They are also a claim that everything
-  asked for was taught, which stops being true the moment you go deeper than
-  the syllabus line. Ask the question directly - "State FOUR types of
-  malware." - and leave the course out of it.
-
-## 17. REFERENCE NOTES - THE DEPTH, NOT THE SCOPE
-
-Each REFERENCE NOTE is attached to a key point already in the CONTENT TAUGHT,
-and carries three things:
-
-- a SUMMARY, which fixes WHICH sense of the topic was taught.
-- "normally broken down as" - the dimensions the subject is ordinarily divided
-  along: how it spreads, how it is detected, how it is prevented, what it is
-  classified by. These are the dimensions an assessor questions along, and
-  they are what turns "name three types" into "state how each one spreads".
-  Reach for these first when a question feels shallow.
-- "named in practice" - the tools, standards and real cases a practitioner
-  names. Use them so the question and its marking scheme are concrete: a real
-  scanner, a real standard, never "a suitable tool".
-
-A note is depth on a topic that was already taught. It is never a new topic,
-and a heading inside a note is not permission to assess that heading if the
-CONTENT TAUGHT does not cover it. The notes also come from a general reference
-and can be wrong or dated: you are the assessor, and anything you take from
-one must be correct enough to mark a candidate against.
-
-Never mention the notes or any reference work in a question or a marking
-scheme."""
+  these belong to a syllabus, not to a question, and the candidate already
+  knows which unit they are sitting. Ask directly and leave the course out.
+"""
 
 
 AS_PRACTICAL_SYSTEM = """You are a senior TVET assessor in Kenya, writing the practical assessment for one unit of competency under the TVET CDACC framework.
@@ -534,12 +490,12 @@ Give every item of evaluation a marks figure saying how much it is worth RELATIV
 Each item of evaluation traces to exactly ONE performance criterion. Give that one pc_number, as it is written in the list below and with no label in front of it.
 
 WHAT THE TASK MAY REQUIRE
-You are given the CONTENT TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. It sets the SCOPE of the task: every skill the candidate is asked to perform sits on a topic that appears there.
+You are given the TOPICS TAUGHT for this unit - the sub-topics and key points the curriculum sets out under each element. They set the SCOPE of the task: every skill the candidate is asked to perform sits on a topic that appears there.
 
 Within that scope, set a real job rather than a rehearsal of the syllabus. Use the tools, materials, settings, standards and quantities a Kenyan workplace would really use for that work, by name, and make the items of evaluation say what a competent assessor would actually watch for - the things that separate work done properly from work that merely got finished.
 
 REFERENCE NOTES
-Where REFERENCE NOTES are supplied, each is attached to a key point already in the CONTENT TAUGHT and was read from a public reference source. Use them for the names and the specifics - the real tools, standards, settings and classifications that make a task brief concrete and an item of evaluation checkable. They give DEPTH on what was taught; they never add a topic, and where a note runs past the taught scope the taught scope wins. They can also be wrong or dated: you are the assessor, and anything you take from one must be correct enough to judge a candidate against. Never mention the notes or their source in the brief, the checklists or the oral questions.
+The TEACHING NOTES are the material the trainer teaches this unit from, and they are what the task is built out of: the real tools, standards, settings, procedures and classifications that make a brief concrete and an item of evaluation checkable come from there, not from your own knowledge and not from the wording of a PC. They go deeper into the taught topics; they never add one, so where a note wanders onto something the TOPICS TAUGHT do not cover, leave that part alone. They can also be wrong or dated: you are the assessor, and anything you take from one must be correct enough to judge a candidate against. Never mention the notes, their source or the course in the brief, the checklists or the oral questions.
 
 The line is the same as the scope: more realism on a taught skill is wanted, a skill nobody covered is not. A task requiring a technique the trainees were never taught is not a harder assessment, it is an invalid one. Where no taught content is given for an element, work from the performance criterion alone.
 
@@ -595,9 +551,9 @@ def _content_block(tool: AssessmentTool) -> str:
     rendered = assessment_content.render(tool.content)
     if not rendered:
         return ""
-    return ("\n\nCONTENT TAUGHT, from the curriculum - the scope of this "
-            "assessment. Work within these topics and go deeper than the "
-            "lines themselves:\n" + rendered)
+    return ("\n\nTOPICS TAUGHT, from the curriculum - which topics this "
+            "assessment may cover. These are headings, not answers; what is "
+            "IN them is in the TEACHING NOTES below:\n" + rendered)
 
 
 def _knowledge_block(tool: AssessmentTool, budget: int = 0) -> str:
@@ -619,17 +575,18 @@ def _knowledge_block(tool: AssessmentTool, budget: int = 0) -> str:
                 else assessment_knowledge.render(tool.knowledge))
     if not rendered:
         return ""
-    return ("\n\nREFERENCE NOTES on the taught key points - real substance to "
-            "question on, read from published reference sources. Each note is "
-            "attached to a key point that is already in the CONTENT TAUGHT "
-            "above:\n" + rendered
-            + "\n\nThese give you DEPTH on what was taught. They do not widen "
-              "what may be assessed: the CONTENT TAUGHT still sets the scope, "
-              "and a heading inside a note is not a topic you may assess. Use "
-              "the breakdowns to find the angle a question takes, and the "
-              "named tools, standards and cases to make the question and its "
-              "marking scheme concrete. Never name the notes or their source "
-              "in a question or a marking scheme.")
+    return ("\n\nTEACHING NOTES - the material this unit is taught from. THIS "
+            "IS WHAT THE QUESTIONS ARE MADE OF. Every allocation row names "
+            "the note or notes it is written from:\n" + rendered
+            + "\n\nRead the note your row names, then ask something that note "
+              "answers, at that row's level and for its marks. Each marking "
+              "point is the real answer, out of the note. Do not reach for "
+              "your own knowledge first and do not take the subject of a "
+              "question from a performance criterion. The notes go deeper "
+              "into the taught topics and never add one, so where a note "
+              "wanders outside the TOPICS TAUGHT, leave that part alone. They "
+              "can also be wrong or dated - you are the assessor. Never name "
+              "a note or its source in a question or a marking scheme.")
 
 
 def _exemplar_block(tool: AssessmentTool, limit: int = 0) -> str:
@@ -652,12 +609,56 @@ def _exemplar_block(tool: AssessmentTool, limit: int = 0) -> str:
               "the verb falls, how the count is stated, what a question of "
               "that many marks asks for. Never copy the SUBJECT. These papers "
               "come from other colleges and other trades, and anything they "
-              "are about that is not in the CONTENT TAUGHT is out of bounds."
+              "are about that is not in the TEACHING NOTES is out of bounds."
               "\n\nThese are CANDIDATE papers, so they show you questions and "
               "no marking schemes. Yours still carries one, and every point in "
               "it still names the answer an assessor looks for - never "
               "\"Threat 1 description\", never \"First tool\". Give the scheme "
               "the same attention as the question.")
+
+
+def _notes_per_row(tool: AssessmentTool, budget: int) -> Dict[int, List[str]]:
+    """{row number: the note numbers that row is written from}.
+
+    Dealt out rather than handed round. Giving every row on an element the
+    same notes produced three items in one paper asking the same question -
+    a criterion worth twelve marks is split into three items of four, each
+    row was pointed at both of element 1's notes, and all three came back
+    listing the same four threats. A candidate answers once and is paid three
+    times, and the paper covers a third of what it claims to.
+
+    So the element's notes are dealt round-robin across the rows that sit on
+    it: first row gets the first note, second row the second, and round again
+    if there are more rows than notes. Where an element has as many notes as
+    rows, no two rows start from the same material.
+
+    Built from the notes that SURVIVED the budget, not from all of them:
+    pointing a row at a note the trim dropped is worse than not pointing at
+    all, because the model then hunts for something that is not there.
+    """
+    shown = (assessment_knowledge.fitting(tool.knowledge, budget) if budget > 0
+             else assessment_knowledge.fitting(tool.knowledge))
+    by_element: Dict[str, List[str]] = {}
+    for index, note in enumerate(shown, start=1):
+        by_element.setdefault(note.element_number, []).append(f"N{index}")
+
+    rows_of: Dict[str, List[int]] = {}
+    for row, a in enumerate(tool.allocations, start=1):
+        rows_of.setdefault(a.element_number, []).append(row)
+
+    out: Dict[int, List[str]] = {}
+    for element, rows in rows_of.items():
+        notes = by_element.get(element, [])
+        if not notes:
+            continue
+        if len(notes) <= len(rows):
+            for position, row in enumerate(rows):
+                out[row] = [notes[position % len(notes)]]
+        else:
+            # More notes than rows: share them out so none goes unused.
+            for position, row in enumerate(rows):
+                out[row] = notes[position::len(rows)]
+    return out
 
 
 def _header(tool: AssessmentTool) -> str:
@@ -672,27 +673,37 @@ def _header(tool: AssessmentTool) -> str:
             f"DURATION: {cat.duration_minutes} minutes")
 
 
-# The largest request this tier will accept, in characters of prompt, system
-# instructions included.
+# The largest prompt worth sending, in characters, system instructions
+# included.
 #
-# Groq's on-demand tier allows 8000 tokens a minute for one request and
-# REFUSES anything larger outright - HTTP 413, no paper at all. This text runs
-# at about 3.1 characters to the token, so 8000 tokens is roughly 24,800
-# characters; the ceiling sits below that with room for a unit whose content
-# is fatter than the one it was measured on.
+# Measured rather than guessed, and the guess was badly wrong. Asking Groq for
+# the token count of a real assessment prompt: 21,544 characters came to 4,891
+# prompt tokens, so this text runs at about 4.4 characters to the token, not
+# the 3.1 that was assumed here. The tier's 8000 tokens a minute is therefore
+# roughly 35,000 characters, and the full prompt - every teaching note, every
+# exemplar - is about 25,000 and goes through with room to spare. It was
+# measured doing so: 5,891 prompt tokens in, a 3,316-token paper back.
 #
-# The standing instructions are about 18,300 characters of that before
-# anything of the unit's is added, which leaves less room than it first
-# appears. Optional material therefore has to be able to give way.
-PROMPT_CHAR_CEILING = 23200
+# What had looked like a prompt too large to send was the rolling per-minute
+# window, which `ai_client` now waits out (see `_is_window_full`). So this
+# ceiling is no longer the thing shaping the prompt. It is a backstop against
+# a unit whose curriculum is so large that the prompt really would not fit,
+# and it sits below the 35,000 the tier allows because the paper coming back
+# is counted in the same minute.
+PROMPT_CHAR_CEILING = 30000
 
-# What gives way, in order. The allocation table, the taught content and the
-# standing instructions are not on this list: without them there is no paper.
-# The reference notes go first only because they are the newest and the
-# easiest to trim by degrees - both they and the exemplars improve a paper
-# that would still be valid without either.
-_FIT_STEPS = ((2000, 8), (1400, 6), (900, 4), (500, 3), (-1, 2),
-              (-1, -1))
+# What gives way, in order: (characters of teaching notes, exemplars shown).
+#
+# The exemplars go first, and go almost entirely, because the notes are now
+# what the questions are MADE of while the exemplars only show how a question
+# is phrased - and most of what they teach is already written into section 16,
+# which was distilled from the same papers. A paper written in a slightly
+# plainer style is a paper; a paper with no content to ask about is not.
+#
+# The allocation table, the topics taught and the standing instructions are
+# not on this list at all. Without them there is no paper.
+_FIT_STEPS = ((5200, 6), (4200, 4), (3400, 2), (2600, -1),
+              (1800, -1), (1200, -1), (-1, -1))
 
 
 def _fit(assemble, system: str) -> str:
@@ -701,6 +712,11 @@ def _fit(assemble, system: str) -> str:
     `assemble(notes_budget, exemplar_limit)` builds a candidate prompt, and
     `system` is the standing instructions it will be sent with - they count
     towards the same limit, and they are the larger half.
+
+    In normal use nothing is given up: an ordinary unit's full prompt is well
+    inside the ceiling, and the per-minute refusals that this once existed to
+    dodge are waited out in `ai_client` instead, which keeps the paper whole.
+    This is for the unit whose curriculum really is too big.
 
     The concessions are walked in order and the first that fits is returned.
     If none does, the smallest is sent anyway: a prompt still too large with
@@ -730,27 +746,49 @@ def build_written_prompt(tool: AssessmentTool, notes_budget: int = 0,
     model is choosing a verb for THAT row's level and a combined list invites
     it to pick from the wrong one.
     """
-    rows = []
-    for n, a in enumerate(tool.allocations, start=1):
-        verbs = ", ".join(VERB_BANK.get(a.bloom, []))
-        per_point = marks_per_response(a.bloom)
-        asked = max(1, a.marks // per_point)
-        rows.append(
-            f"{n}. element_number: {a.element_number} ({a.element_title}) | "
-            f"pc_number: {a.pc_number} | criterion: {a.pc_text} | "
-            f"bloom_level: {a.bloom} | marks: {a.marks} | "
-            f"ask for: {asked} | allowed verbs: {verbs or '(any)'}")
-    table = "\n".join(rows)
     level_note = ""
     if str(tool.knqf_level).strip() in CONSTRUCTED_RESPONSE_ONLY_LEVELS:
         level_note = ("\nThis is a KNQF level %s paper: every item is "
                       "constructed response. Selected-response formats are "
                       "not used at this level at all.\n" % tool.knqf_level)
+
+    def rows_for(notes_budget: int) -> str:
+        # Built per candidate prompt, because the notes a row may cite are
+        # the notes that survived THAT prompt's budget.
+        served = _notes_per_row(tool, notes_budget)
+        repeated = {a.pc_number for a in tool.allocations
+                    if sum(1 for b in tool.allocations
+                           if b.pc_number == a.pc_number) > 1}
+        rows = []
+        for n, a in enumerate(tool.allocations, start=1):
+            verbs = ", ".join(VERB_BANK.get(a.bloom, []))
+            per_point = marks_per_response(a.bloom)
+            asked = max(1, a.marks // per_point)
+            # Which notes this row is written from. Without it the model has
+            # to guess which of eight notes belongs to the criterion in front
+            # of it, and on a unit whose elements share vocabulary it guesses
+            # wrong.
+            notes = served.get(n, [])
+            pointer = (f" | write it from: {', '.join(notes)}"
+                       if notes else "")
+            # A criterion too big for one question is split into several rows.
+            # Saying so stops the model writing the same question three times.
+            if a.pc_number in repeated:
+                pointer += (" | this criterion carries several items - ask "
+                            "something the others do not")
+            rows.append(
+                f"{n}. element_number: {a.element_number} "
+                f"({a.element_title}) | pc_number: {a.pc_number} | "
+                f"criterion: {a.pc_text} | bloom_level: {a.bloom} | "
+                f"marks: {a.marks} | ask for: {asked} | "
+                f"allowed verbs: {verbs or '(any)'}{pointer}")
+        return "\n".join(rows)
+
     def assemble(notes_budget: int, exemplar_limit: int) -> str:
         return f"""{_header(tool)}{_content_block(tool)}{_knowledge_block(tool, notes_budget)}{_exemplar_block(tool, exemplar_limit)}
 
 MARK ALLOCATION TABLE - one item per row, in this order, at these marks:
-{table}
+{rows_for(notes_budget)}
 
 ITEMS REQUIRED: {len(tool.allocations)}
 {level_note}

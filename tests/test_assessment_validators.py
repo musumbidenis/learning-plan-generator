@@ -681,7 +681,7 @@ def test_a_repair_is_shown_the_taught_content():
 
     prompt = av.build_repair_prompt(tool, {1: ["wrong verb"]})
 
-    assert "CONTENT TAUGHT" in prompt
+    assert "TEACHING NOTES" in prompt
     assert "Torque wrench calibration" in prompt
 
 
@@ -1074,3 +1074,88 @@ def test_with_no_curriculum_read_nothing_can_be_recited():
 
     assert not [p for p in av.validate(tool)
                 if getattr(p, "check", "") == "syllabus_recitation"]
+
+
+# --------------------------------------------------------------------------- #
+# 16. no two items are the same question twice
+# --------------------------------------------------------------------------- #
+def test_the_same_question_asked_twice_is_caught():
+    """A criterion too big for one item is split into several at the same
+    level, all written from the same material. One live paper came back with
+    "Identify FOUR ICT security threats", "List FOUR types of ICT security
+    threats" and "Name FOUR common ICT security threats" - and one answer."""
+    tool = _written()
+    answers = ["Malware such as a virus or worm",
+               "Social engineering including phishing",
+               "Vulnerabilities found by scanning",
+               "Risks rated on a likelihood matrix"]
+    for item in tool.items[:2]:
+        item.marking_scheme = [MarkingPoint(text=a, marks=1) for a in answers]
+    tool.items[0].stem = "Identify FOUR ICT security threats."
+    tool.items[1].stem = "List FOUR types of ICT security threat."
+
+    found = [p for p in av.validate(tool)
+             if getattr(p, "check", "") == "duplicate_item"]
+
+    assert len(found) == 1
+    assert found[0].item_number == tool.items[1].number
+    assert found[0].repairable
+
+
+def test_two_items_on_one_topic_asking_different_things_are_fine():
+    """The fix this check asks for, and it must not be flagged in turn."""
+    tool = _written()
+    tool.items[0].marking_scheme = [
+        MarkingPoint(text="Virus", marks=1), MarkingPoint(text="Worm", marks=1),
+        MarkingPoint(text="Trojan", marks=1),
+        MarkingPoint(text="Ransomware", marks=1)]
+    tool.items[1].marking_scheme = [
+        MarkingPoint(text="Infected removable media", marks=1),
+        MarkingPoint(text="Attachment from a phishing message", marks=1),
+        MarkingPoint(text="Drive-by download from a website", marks=1),
+        MarkingPoint(text="Software from an unofficial source", marks=1)]
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "duplicate_item"]
+
+
+def test_only_the_later_item_is_reported():
+    """The first one is not the fault; three identical items give two
+    findings, not three."""
+    tool = _written()
+    same = [MarkingPoint(text="Likelihood of the threat", marks=1),
+            MarkingPoint(text="Impact on the asset", marks=1),
+            MarkingPoint(text="Combined risk rating", marks=1)]
+    for item in tool.items[:3]:
+        item.marking_scheme = [MarkingPoint(text=p.text, marks=p.marks)
+                               for p in same]
+
+    found = [p for p in av.validate(tool)
+             if getattr(p, "check", "") == "duplicate_item"]
+
+    assert len(found) == 2
+    assert tool.items[0].number not in {p.item_number for p in found}
+
+
+def test_an_item_with_no_marking_scheme_is_not_a_duplicate_of_another():
+    tool = _written()
+    tool.items[0].marking_scheme = []
+    tool.items[1].marking_scheme = []
+
+    assert not [p for p in av.validate(tool)
+                if getattr(p, "check", "") == "duplicate_item"]
+
+
+@pytest.mark.parametrize("stem", [
+    "Identify FOUR ICT security threats mentioned in the teaching notes.",
+    "List FOUR controls given in the notes.",
+    "State THREE steps set out in the learning guide.",
+])
+def test_naming_the_teaching_notes_in_a_stem_is_caught(stem):
+    """The notes exist so the model has something to ask about. Naming them
+    tells the candidate the answer is in a document they never saw."""
+    tool = _written()
+    tool.items[0].stem = stem
+
+    assert any(getattr(p, "check", "") == "course_reference"
+               for p in av.validate(tool))

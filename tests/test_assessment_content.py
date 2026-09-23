@@ -189,7 +189,7 @@ def test_the_block_carries_the_numbers_a_trainer_can_point_at():
 
     assert "ELEMENT 1 - Identify ICT security threats" in rendered
     assert "1.1 Identification of ICT security threats" in rendered
-    assert "- Types of malware" in rendered
+    assert "Types of malware" in rendered
     assert "50 hours" in rendered
 
 

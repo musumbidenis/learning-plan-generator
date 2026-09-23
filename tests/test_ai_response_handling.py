@@ -1274,3 +1274,29 @@ def test_a_method_written_with_a_fancy_hyphen_still_counts():
         "with a partner, then the pair reports one to the room.")
 
     assert ai_client.validate_rows([row]) == {}
+
+
+# --------------------------------------------------------------------------- #
+# A 413 that is really the per-minute window
+# --------------------------------------------------------------------------- #
+class _Resp:
+    def __init__(self, text):
+        self.text = text
+        self.headers = {}
+
+
+def test_a_413_about_tokens_per_minute_is_rate_limiting():
+    """Groq says "Request too large ... on tokens per minute (TPM): Limit
+    8000, Requested 8174" when the last minute is simply spent. Measured: the
+    same request, unchanged, goes through once the window clears."""
+    resp = _Resp("Request too large for model `openai/gpt-oss-120b` in "
+                 "organization `org_x` service tier `on_demand` on tokens "
+                 "per minute (TPM): Limit 8000, Requested 8174")
+
+    assert ai_client._is_window_full(resp)
+
+
+def test_a_413_about_anything_else_is_left_to_fail():
+    """A request that genuinely will never fit is not helped by waiting."""
+    assert not ai_client._is_window_full(_Resp("Payload too large"))
+    assert not ai_client._is_window_full(_Resp(""))

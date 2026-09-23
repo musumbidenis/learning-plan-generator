@@ -514,6 +514,23 @@ def _is_exhausted(resp) -> bool:
     return _wait_wanted(resp) > _RATE_LIMIT_BUDGET
 
 
+def _is_window_full(resp) -> bool:
+    """Whether a 413 is the per-minute window rather than an oversized prompt.
+
+    Groq answers 413 "Request too large for model ... on tokens per minute
+    (TPM): Limit 8000, Requested 8174" when what is actually wrong is that the
+    last minute is already spent. The same request, unchanged, goes through
+    once the window clears - measured on a 5,891-token prompt that was refused
+    twice and then accepted in full.
+
+    The wording is the only thing separating it from a request that genuinely
+    will never fit, so the wording is what is checked, and a 413 with no
+    mention of the per-minute limit is left to fail.
+    """
+    body = (getattr(resp, "text", "") or "").lower()
+    return "tokens per minute" in body or "tpm" in body
+
+
 def _retry_after(resp) -> float:
     """The server's own wait in seconds, capped at what we will sit through."""
     return max(0.0, min(_wait_wanted(resp), _MAX_RETRY_AFTER))
@@ -867,7 +884,16 @@ def _chat_json_once(prompt: str, api_key: str, model: str, schema: dict,
         # more each, so the per-minute token limit is met routinely - and it
         # clears in seconds. Failing the whole generation on it threw away
         # every batch already produced.
-        if resp.status_code == 429:
+        #
+        # Groq says this twice, in two status codes. 429 is the ordinary "you
+        # have used your minute". 413 says "Request too large ... on tokens
+        # per minute (TPM)", which reads like a prompt that will never fit and
+        # is nothing of the sort: measured, the same request succeeds on an
+        # empty window and is refused on a full one. Both are the rolling
+        # window, so both wait. Anything else with a 413 really is too large
+        # and falls through.
+        if resp.status_code == 429 or (resp.status_code == 413
+                                       and _is_window_full(resp)):
             # The free tier also caps requests per DAY, per model. That reset
             # is hours away, so sitting through the backoff wastes a minute and
             # fails anyway; another model has its own daily allowance.

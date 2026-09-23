@@ -279,12 +279,12 @@ def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
 
 def _knowledge_step(unit_title: str,
                     content: List[ElementContent]) -> List[KnowledgeNote]:
-    """Real substance on the taught key points, read from reference sources.
+    """The material the paper is written from, read from reference sources.
 
-    Shown for the same reason the content is shown: the trainer is the only
-    person who can see at a glance that a key point has drawn the wrong
-    article. A note that is plainly about the wrong subject is a warning that
-    the questions built on it will be too.
+    This is the step to read before generating. These notes are what the
+    questions are MADE of - not a hint, not extra colour - so a key point that
+    has drawn the wrong article is a question about the wrong subject, and the
+    trainer is the only person who can see that at a glance.
 
     Scouted once per unit and cached, like the exemplars.
     """
@@ -297,25 +297,31 @@ def _knowledge_step(unit_title: str,
         with st.spinner("Reading up on the taught topics..."):
             notes = knowledge.notes_for(unit_title, content)
 
-    st.markdown("#### 6. What the questions are set from, in depth")
+    st.markdown("#### 6. The teaching notes the questions are written from")
     if not notes:
-        st.caption("No reference notes were found for these topics, so the "
+        st.caption("No teaching notes were found for these topics, so the "
                    "questions are written from the curriculum's key points "
                    "alone. They will be shallower for it.")
         return []
     st.caption(knowledge.summarise(notes)
-               + " - depth on what was taught, never a new topic.")
-    with st.expander(f"{len(notes)} reference note(s)", expanded=False):
-        for note in notes:
-            label = " ".join(x for x in (note.topic_number, note.key_point)
-                             if x)
+               + " - the questions are made of this. Read it before "
+                 "generating: a note on the wrong subject is a question on "
+                 "the wrong subject.")
+    with st.expander(f"{len(notes)} teaching note(s)", expanded=False):
+        for index, note in enumerate(knowledge.fitting(notes), start=1):
+            label = knowledge.label_of(note, index)
             st.markdown(f"**{label}**")
             st.markdown(note.summary)
+            for fact in note.facts:
+                st.markdown(f"- {fact}")
+            # Shown to the trainer, deliberately NOT sent to the model - a
+            # bare list of names is raw material for invention. See
+            # `assessment_knowledge.render`.
             if note.covers:
-                st.caption("Normally broken down as: "
-                           + " | ".join(note.covers))
+                st.caption("The source also covers: " + " | ".join(note.covers))
             if note.named:
-                st.caption("Named in practice: " + ", ".join(note.named))
+                st.caption("Names in the source (not sent to the model): "
+                           + ", ".join(note.named))
             if note.source_url:
                 st.caption(f"[{note.source_title}]({note.source_url})")
             st.divider()

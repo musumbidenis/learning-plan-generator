@@ -264,7 +264,12 @@ class KnowledgeNote:
     key_point: str                   # the curriculum line this backs
     element_number: str = ""
     topic_number: str = ""           # the sub-topic it sits under, '1.2'
-    summary: str = ""                # a few sentences of real substance
+    summary: str = ""                # what the thing is, in a line or two
+    # The teaching body: one line per section of the source, "Detection: a
+    # signature scan compares a file against known patterns". This is what a
+    # question is made from - a heading says what a topic divides into, but
+    # only these say something an assessor can mark an answer against.
+    facts: List[str] = field(default_factory=list)
     covers: List[str] = field(default_factory=list)   # the topic's dimensions
     named: List[str] = field(default_factory=list)    # tools, standards, cases
     source_title: str = ""

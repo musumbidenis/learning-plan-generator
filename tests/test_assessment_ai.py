@@ -424,13 +424,13 @@ def _tool_with_content(assessment_type=THEORY):
     return tool
 
 
-def test_the_written_prompt_carries_the_taught_content():
-    """A PC is one general line. Without the content behind it the model sets
+def test_the_written_prompt_carries_the_taught_topics():
+    """A PC is one general line. Without the topics behind it the model sets
     the paper from its own knowledge of the trade, and the questions land on
     things nobody taught."""
     prompt = assessment_ai.build_written_prompt(_tool_with_content())
 
-    assert "CONTENT TAUGHT" in prompt
+    assert "TOPICS TAUGHT" in prompt
     assert "1.1 Identification of servicing tools" in prompt
     assert "Torque wrench and its calibration" in prompt
 
@@ -459,39 +459,40 @@ def test_a_unit_with_no_curriculum_read_still_gets_a_prompt():
     assert "MARK ALLOCATION TABLE" in prompt
 
 
-def test_the_taught_content_bounds_the_topics_not_the_depth():
-    """The scope is the topics. Within them the paper is expected to go
-    further than the syllabus line - a question that hands a key point back is
-    testing whether a trainee can read a heading."""
+def test_the_topics_bound_the_paper_and_the_notes_fill_it():
+    """The two halves of the change: the curriculum says WHICH topics, the
+    notes say what is in them."""
     written = assessment_ai.AS_WRITTEN_SYSTEM
 
-    assert "CONTENT TAUGHT SETS THE SCOPE" in written
-    assert "Do not assess a topic that is not there" in written
-    assert "GO DEEPER THAN THE LINE IN FRONT OF YOU" in written
+    assert "WHERE THE CONTENT OF A QUESTION COMES FROM" in written
+    assert "Do not assess a topic that is not in the TOPICS TAUGHT" in written
+    assert "this is what the questions are made of" in written.lower()
+    assert "Do not hand a line back" in written
 
 
 def test_a_topic_nobody_covered_is_still_out_of_bounds():
-    """The one boundary kept when the content stopped being a script: depth on
-    a taught topic is wanted, a new topic is a question nobody was prepared
-    for."""
+    """The boundary that survives the notes becoming the content: they go
+    deeper into what was taught and never add a topic to it."""
     written = assessment_ai.AS_WRITTEN_SYSTEM
 
-    assert "THE LINE YOU MAY NOT CROSS" in written
-    assert "invalid one" in written
-    assert "invalid one" in assessment_ai.AS_PRACTICAL_SYSTEM
+    assert "never add one" in assessment_ai._knowledge_block(
+        _tool_with_notes())
+    assert "Do not assess a topic that is not in the TOPICS TAUGHT" in written
+    assert "they never add new ones" in written
+    assert "never add one" in assessment_ai.AS_PRACTICAL_SYSTEM
 
 
 def test_the_paper_is_told_to_name_real_tools_and_standards():
     written = assessment_ai.AS_WRITTEN_SYSTEM
 
-    assert "real substance of the trade" in written
-    assert "comparable TVET and industry assessments" in written
+    assert "the standards and tools used" in written
+    assert "the real tools, standards" in assessment_ai.AS_PRACTICAL_SYSTEM
 
 
 def test_a_performance_criterion_is_a_link_not_a_source():
     """The distinction the instructions turn on: a PC says which competency an
     item belongs to; it does not licence assessing its wording."""
-    assert "PERFORMANCE CRITERION = the competency link for the item" in \
+    assert "PERFORMANCE CRITERIA - these are NOT content" in \
         assessment_ai.AS_WRITTEN_SYSTEM
 
 
@@ -662,11 +663,19 @@ def test_apportionment_never_loses_or_invents_a_mark():
 # --------------------------------------------------------------------------- #
 def _notes(count=6, summary_chars=300):
     from assessment_models import KnowledgeNote
-    return [KnowledgeNote(key_point=f"Key point {n}", topic_number="1.1",
-                          element_number="1", summary="S" * summary_chars,
-                          covers=["Propagation", "Detection"],
-                          named=["NIST", "CVE"], source_title="Article")
-            for n in range(count)]
+    return [KnowledgeNote(
+        key_point=f"Key point {n}", topic_number="1.1", element_number="1",
+        summary="S" * summary_chars,
+        facts=["Detection: a signature scan compares a file to known patterns",
+               "Prevention: patching and least privilege"],
+        covers=["Propagation", "Detection"], named=["NIST", "CVE"],
+        source_title="Article") for n in range(count)]
+
+
+def _tool_with_notes(assessment_type=THEORY):
+    tool = _tool_with_content(assessment_type)
+    tool.knowledge = _notes(2, 80)
+    return tool
 
 
 def test_the_written_prompt_carries_the_reference_notes():
@@ -675,18 +684,65 @@ def test_the_written_prompt_carries_the_reference_notes():
 
     prompt = assessment_ai.build_written_prompt(tool)
 
-    assert "REFERENCE NOTES" in prompt
-    assert "normally broken down as: Propagation | Detection" in prompt
-    assert "named in practice: NIST, CVE" in prompt
+    assert "TEACHING NOTES" in prompt
+    assert "THIS IS WHAT THE QUESTIONS ARE MADE OF" in prompt
+    assert "Detection: a signature scan compares a file to known patterns" \
+        in prompt
 
 
-def test_the_notes_are_framed_as_depth_and_not_as_scope():
+def test_the_notes_are_the_content_and_the_topics_are_the_scope():
+    """The whole point of the change. The notes say what a question is about;
+    the topics say which topics are allowed."""
+    prompt = assessment_ai.build_written_prompt(_tool_with_notes())
+
+    assert "THIS IS WHAT THE QUESTIONS ARE MADE OF" in prompt
+    assert "never add one" in prompt
+    assert "TOPICS TAUGHT" in prompt
+
+
+def test_a_bare_list_of_names_never_reaches_the_model():
+    """It is raw material for invention. A note built from an article with no
+    sections fell back to its name list and the paper asked for FOUR
+    vulnerability scanning tools, marking "OSS (Open Source Scanner)" and
+    "CIS scanner" - neither of which is a tool."""
+    from assessment_models import KnowledgeNote
     tool = _tool_with_content()
-    tool.knowledge = _notes(1, 80)
+    tool.knowledge = [KnowledgeNote(
+        key_point="Vulnerability scanning tools", topic_number="1.1",
+        element_number="1", summary="A scanner assesses systems for known "
+        "weaknesses, and is run authenticated or unauthenticated.",
+        facts=[], covers=["Overview", "Strengths"],
+        named=["OSS", "CIS", "Critical Security Controls"],
+        source_title="Vulnerability scanner")]
 
     prompt = assessment_ai.build_written_prompt(tool)
 
-    assert "do not widen" in prompt.lower()
+    assert "A scanner assesses systems" in prompt
+    assert "Critical Security Controls" not in prompt
+    assert "OSS" not in prompt
+
+
+def test_each_row_is_pointed_at_the_notes_it_is_written_from():
+    tool = _tool_with_notes()
+
+    prompt = assessment_ai.build_written_prompt(tool)
+
+    assert "write it from: N" in prompt
+
+
+def test_rows_on_one_criterion_do_not_all_get_the_same_note():
+    """Three rows all pointed at the same material came back as the same
+    question three times."""
+    tool = _tool_with_content()
+    tool.knowledge = _notes(3, 60)
+    for note in tool.knowledge:
+        note.element_number = tool.allocations[0].element_number
+    for alloc in tool.allocations:
+        alloc.element_number = tool.allocations[0].element_number
+
+    served = assessment_ai._notes_per_row(tool, 0)
+
+    assert len({tuple(v) for v in served.values()}) > 1
 
 
 def test_a_unit_with_no_notes_gets_no_notes_section():
@@ -708,13 +764,13 @@ def test_an_oversized_prompt_is_trimmed_to_fit():
     assert "MARK ALLOCATION TABLE" in prompt      # never the part that goes
 
 
-def test_trimming_gives_up_the_notes_before_the_taught_content():
+def test_trimming_never_gives_up_the_taught_topics():
     tool = _tool_with_content()
-    tool.knowledge = _notes(30, 900)
+    tool.knowledge = _notes(60, 2000)
 
     prompt = assessment_ai.build_written_prompt(tool)
 
-    assert "CONTENT TAUGHT" in prompt
+    assert "TOPICS TAUGHT" in prompt
     assert "Torque wrench and its calibration" in prompt
 
 

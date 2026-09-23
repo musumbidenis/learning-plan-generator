@@ -137,23 +137,28 @@ TITLE_WEIGHT = 0.15
 # How much of an article survives into the prompt, and how much of the prompt
 # the notes may take in total.
 #
-# The budget is not a tidiness rule, it is the binding constraint. The Groq
-# tier this runs on allows 8000 tokens a minute for one request, the standing
-# instructions already spend about 4600 of them, and the first version of this
-# block - five notes at full length - pushed a request to 8070 and was refused
-# outright. A note that makes the paper fail to generate is worth less than no
-# note, so the block is trimmed to fit and the notes that do not fit are
-# dropped whole.
+# These notes are what the questions are made of, so they get real room. The
+# budget is a backstop rather than a squeeze: a measured full prompt for an
+# ordinary unit comes to about 5,900 tokens against the tier's 8,000, and the
+# refusals that once looked like a size limit were the rolling per-minute
+# window, which is now waited out rather than trimmed around.
 #
-# What gets cut is the summary. A 120B model does not need three sentences
-# explaining what malware is; it needs to know WHICH sense of the topic is
-# meant, and then the breakdown and the names, which are the parts it does not
-# have. One sentence pins the sense.
+# Within a note the room goes to the facts. A 120B model does not need three
+# sentences explaining what malware is - it needs to know WHICH sense of the
+# topic is meant, and then what each part of it actually says, which is the
+# half it does not have.
 SUMMARY_SENTENCES = 2
-SUMMARY_CHARS = 260
+SUMMARY_CHARS = 230
 MAX_COVERS = 6
-MAX_NAMED = 8
-NOTE_BLOCK_CHARS = 2600
+MAX_NAMED = 6
+
+# The teaching body of a note: one line per section of the article. This is
+# the part a question is actually made from, so it gets the room.
+MAX_FACTS = 4
+FACT_CHARS = 210
+MIN_FACT_CHARS = 60
+
+NOTE_BLOCK_CHARS = 5200
 
 CACHE_DAYS = 45
 
@@ -181,6 +186,14 @@ _SKIP_HEADINGS = frozenset((
     "bibliography", "sources", "gallery", "citations", "footnotes",
     "literature", "in popular culture", "etymology", "terminology",
     "explanatory notes", "works cited", "general references",
+))
+
+# Sections about a subject's past rather than its practice. A trainee is
+# assessed on the work, not on when it was invented.
+_BACKSTORY_HEADINGS = frozenset((
+    "history", "background", "origins", "reception", "criticism",
+    "controversy", "timeline", "in fiction", "cultural references",
+    "notable examples", "legal issues", "legislation and regulation",
 ))
 
 # Words that open a sentence often enough to be mistaken for names, and the
@@ -453,6 +466,44 @@ def _covers(text: str) -> List[str]:
     return out[:MAX_COVERS]
 
 
+def _facts(text: str) -> List[str]:
+    """"Heading: what that section actually says" - the body of the note.
+
+    The headings alone say what a topic is divided into; they do not say
+    anything a question can be marked against. "Detection" is a dimension;
+    "signature scanning compares a file against known patterns, heuristics
+    look at behaviour" is something a candidate can be asked for and an
+    assessor can mark.
+
+    So each section gives up its opening sentence. That is where an
+    encyclopaedia puts the claim and the rest of the section supports it,
+    which makes the first sentence the densest line in the section and the
+    only one worth the prompt's very limited room.
+
+    History and reception sections are skipped. They are about the subject's
+    past rather than its practice, and a trainee is being assessed on the
+    work.
+    """
+    out: List[str] = []
+    pieces = _RE_HEADING.split(text or "")
+    # split() with one group gives [lead, heading, body, heading, body, ...]
+    for index in range(1, len(pieces) - 1, 2):
+        heading = " ".join(pieces[index].split())
+        low = heading.lower()
+        if low in _SKIP_HEADINGS or low in _BACKSTORY_HEADINGS:
+            continue
+        body = " ".join(pieces[index + 1].split())
+        if len(body) < MIN_FACT_CHARS:
+            continue                       # a heading with subheadings under it
+        said = _RE_SENTENCE.split(body)[0]
+        if len(said) > FACT_CHARS:
+            said = said[:FACT_CHARS].rsplit(" ", 1)[0] + "..."
+        out.append(f"{heading}: {said}")
+        if len(out) >= MAX_FACTS:
+            break
+    return out
+
+
 def _before_apparatus(text: str) -> str:
     """The article up to its references and reading lists.
 
@@ -553,8 +604,8 @@ def note_for(key_point: str, vocab: set,
             continue
         return KnowledgeNote(
             key_point=key_point, element_number=element_number,
-            topic_number=topic_number, summary=summary, covers=_covers(body),
-            named=_named(body), source_title=title,
+            topic_number=topic_number, summary=summary, facts=_facts(body),
+            covers=_covers(body), named=_named(body), source_title=title,
             source_url=PAGE_URL % title.replace(" ", "_"))
 
     runlog.log(f"Knowledge: nothing trustworthy for '{key_point}' "
@@ -567,23 +618,27 @@ def note_for(key_point: str, vocab: set,
 # --------------------------------------------------------------------------- #
 def key_points(content: Sequence[ElementContent],
                limit: int = MAX_NOTES) -> List[Tuple[str, str, str]]:
-    """(element number, topic number, key point), spread across the elements.
+    """(element number, topic number, key point), spread across the sub-topics.
 
-    Round-robin rather than in order. A unit whose first element lists twenty
-    key points would otherwise use the whole budget before the second element
-    is reached, and the items assessing that second element would be the
-    shallow ones - the exact fault this module exists to remove.
+    Round-robin rather than in order, and across SUB-TOPICS rather than across
+    elements. Spreading by element looked right and was not: an element with
+    two sub-topics of four key points each spent its whole share on the first
+    sub-topic, and on a real unit that left "Assessment of vulnerabilities"
+    with no note while "Identification of threats" had four. The item on the
+    risk rating matrix then had nothing to be written from - which is the
+    exact fault this module exists to remove, moved one level down.
+
+    Every sub-topic gets a note before any sub-topic gets a second.
     """
     queues: List[List[Tuple[str, str, str]]] = []
     for block in content:
-        rows: List[Tuple[str, str, str]] = []
         for topic in block.topics:
-            for point in topic.key_points:
-                rows.append((block.element_number, topic.number, point))
-            if not topic.key_points and topic.title:
-                rows.append((block.element_number, topic.number, topic.title))
-        if rows:
-            queues.append(rows)
+            rows = [(block.element_number, topic.number, point)
+                    for point in topic.key_points]
+            if not rows and topic.title:
+                rows = [(block.element_number, topic.number, topic.title)]
+            if rows:
+                queues.append(rows)
 
     out: List[Tuple[str, str, str]] = []
     depth = 0
@@ -630,6 +685,7 @@ def _cached(unit_title: str) -> Optional[List[KnowledgeNote]]:
             element_number=str(row.get("element_number", "")),
             topic_number=str(row.get("topic_number", "")),
             summary=str(row.get("summary", "")),
+            facts=[str(x) for x in row.get("facts", [])],
             covers=[str(x) for x in row.get("covers", [])],
             named=[str(x) for x in row.get("named", [])],
             source_title=str(row.get("source_title", "")),
@@ -693,6 +749,28 @@ def notes_for(unit_title: str, content: Sequence[ElementContent],
     return notes
 
 
+def label_of(note: KnowledgeNote, index: int) -> str:
+    """How one note is headed, and how a row cites it.
+
+    The number is what makes a row's pointer cheap. A row that says "write it
+    from N1, N2" costs a dozen characters; one that repeats the key points in
+    full costs two hundred, on every row, in a prompt with nothing to spare.
+    """
+    topic = " ".join(x for x in (note.topic_number, note.key_point) if x)
+    return f"N{index}. {topic}"
+
+
+def fitting(notes: Sequence[KnowledgeNote],
+            budget: int = NOTE_BLOCK_CHARS) -> List[KnowledgeNote]:
+    """The notes that fit the budget, in order.
+
+    Separate from `render` so the allocation rows can cite exactly the notes
+    the model was actually shown. Pointing a row at a note that the budget
+    dropped is worse than not pointing at all.
+    """
+    return [note for note, _text in _blocks(notes, budget)]
+
+
 def render(notes: Sequence[KnowledgeNote],
            budget: int = NOTE_BLOCK_CHARS) -> str:
     """The notes as the model reads them, within the prompt's character budget.
@@ -703,26 +781,46 @@ def render(notes: Sequence[KnowledgeNote],
     to the model: a paper written from four notes is a paper written from four
     notes.
     """
+    return "\n\n".join(text for _note, text in _blocks(notes, budget))
+
+
+def _blocks(notes: Sequence[KnowledgeNote],
+            budget: int) -> List[Tuple[KnowledgeNote, str]]:
+    """[(note, how it is written out)] for the notes that fit."""
     if not notes:
-        return ""
-    blocks: List[str] = []
+        return []
+    blocks: List[Tuple[KnowledgeNote, str]] = []
     spent = 0
-    for note in notes:
-        label = " ".join(x for x in (note.topic_number, note.key_point) if x)
-        lines = [f"- {label}"]
+    for index, note in enumerate(notes, start=1):
+        lines = [f"- {label_of(note, index)}"]
         if note.summary:
             lines.append(f"    {note.summary}")
-        if note.covers:
-            lines.append("    normally broken down as: "
-                         + " | ".join(note.covers))
-        if note.named:
-            lines.append("    named in practice: " + ", ".join(note.named))
+        # Only the summary and the facts reach the model. `covers` and `named`
+        # are kept on the note for the trainer to read in the UI and are
+        # deliberately NOT sent.
+        #
+        # A bare list of names is not knowledge, it is raw material for
+        # invention. The Vulnerability scanner article has no sections, so a
+        # note built from it fell back to its name list - OSS, CIS, Critical
+        # Security Controls, Effective Cyber Defense - and the paper came back
+        # asking for FOUR vulnerability scanning tools and marking "OSS (Open
+        # Source Scanner)", "CIS scanner", "Critical Security Controls
+        # scanner". None of those is a tool. The real answers are Nessus,
+        # OpenVAS and Nmap, and a trainee giving them would have been marked
+        # wrong against that scheme.
+        #
+        # In a fact the same names arrive inside a sentence that says what
+        # they are - "the NIST/ANSI/INCITS RBAC standard recognises three
+        # levels" - and a sentence cannot be misread into a product. So a note
+        # with no facts is sent thin rather than padded, and a thin note is
+        # better than a confident wrong one.
+        lines.extend(f"    {fact}" for fact in note.facts)
         block = "\n".join(lines)
         if spent + len(block) > budget and blocks:
             break
-        blocks.append(block)
+        blocks.append((note, block))
         spent += len(block) + 2
-    return "\n\n".join(blocks)
+    return blocks
 
 
 def summarise(notes: Sequence[KnowledgeNote]) -> str:

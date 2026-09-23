@@ -163,9 +163,10 @@ def test_the_breakdown_is_the_articles_own_headings_without_the_apparatus():
 def test_names_exclude_sentence_openings_and_ordinary_capitalised_words():
     named = know._named(MALWARE)
 
-    assert "CVE" in named and "NIST" in named
+    assert "CVE" in named                 # an acronym, said in the body
     assert "Types" not in named           # a heading, and a common word
     assert "Organisations" not in named   # written in lower case further down
+    assert "Researchers" not in named
 
 
 def test_names_stop_before_the_bibliography():
@@ -321,3 +322,109 @@ def test_a_definition_of_terms_key_point_is_housekeeping():
 ])
 def test_a_real_subject_is_not_mistaken_for_housekeeping(key_point):
     assert not know._is_housekeeping(know.subject_of(key_point))
+
+
+# --------------------------------------------------------------------------- #
+# The teaching body of a note
+# --------------------------------------------------------------------------- #
+def test_each_section_gives_up_its_opening_sentence():
+    """Headings say what a topic divides into; only these say something an
+    assessor can mark an answer against."""
+    facts = know._facts(MALWARE)
+
+    assert any(f.startswith("Detection:") for f in facts)
+    assert any("signature" in f.lower() or "CVE" in f for f in facts)
+
+
+def test_the_past_is_not_the_practice():
+    """A trainee is assessed on the work, not on when it was invented."""
+    facts = know._facts(MALWARE)
+
+    assert not any(f.startswith("History:") for f in facts)
+
+
+def test_a_source_with_no_sections_yields_no_facts():
+    """Vulnerability scanner is a real article with no headings at all. The
+    note is then thin, and thin is the correct outcome."""
+    assert know._facts("A vulnerability scanner is a program. " * 40) == []
+
+
+def test_a_note_reaches_the_model_as_its_summary_and_its_facts():
+    note = KnowledgeNote(
+        key_point="Types of malware", topic_number="1.1",
+        summary="Malware is software designed to cause disruption.",
+        facts=["Detection: antivirus uses signature scanning",
+               "Prevention: patching and least privilege"],
+        covers=["History", "Types"], named=["CVE", "NIST"],
+        source_title="Malware")
+
+    rendered = know.render([note])
+
+    assert "Malware is software designed" in rendered
+    assert "Detection: antivirus uses signature scanning" in rendered
+
+
+def test_a_bare_list_of_names_is_kept_off_the_prompt():
+    """It is raw material for invention rather than knowledge: a note that
+    fell back to one produced "OSS (Open Source Scanner)" and "CIS scanner"
+    as vulnerability scanning tools, and neither is a tool."""
+    note = KnowledgeNote(
+        key_point="Vulnerability scanning tools", topic_number="1.2",
+        summary="A vulnerability scanner assesses systems for known "
+                "weaknesses.",
+        facts=[], covers=["Overview", "Strengths"],
+        named=["OSS", "CIS", "Critical Security Controls"],
+        source_title="Vulnerability scanner")
+
+    rendered = know.render([note])
+
+    assert "assesses systems for known weaknesses" in rendered
+    assert "OSS" not in rendered
+    assert "Critical Security Controls" not in rendered
+    assert "Overview" not in rendered
+    # but the trainer still sees them in the UI
+    assert note.named and note.covers
+
+
+def test_the_notes_are_numbered_so_a_row_can_cite_one():
+    notes = [KnowledgeNote(key_point="Malware", topic_number="1.1",
+                           summary="s" * 40),
+             KnowledgeNote(key_point="Phishing", topic_number="1.1",
+                           summary="s" * 40)]
+
+    rendered = know.render(notes)
+
+    assert "N1. 1.1 Malware" in rendered
+    assert "N2. 1.1 Phishing" in rendered
+
+
+def test_fitting_reports_exactly_the_notes_that_were_rendered():
+    """A row must not be pointed at a note the budget dropped."""
+    notes = [KnowledgeNote(key_point=f"K{n}", summary="s" * 400)
+             for n in range(6)]
+
+    shown = know.fitting(notes, budget=900)
+    rendered = know.render(notes, budget=900)
+
+    assert 0 < len(shown) < len(notes)
+    for note in shown:
+        assert note.key_point in rendered
+
+
+# --------------------------------------------------------------------------- #
+# Which key points get looked up, revisited
+# --------------------------------------------------------------------------- #
+def test_key_points_are_spread_across_the_sub_topics():
+    """Spreading by element was not enough. An element with two sub-topics of
+    four key points spent its whole share on the first, and the item on
+    "Assessment of vulnerabilities" had nothing to be written from."""
+    content = [ElementContent(
+        element_number="1", element_title="Identify threats", topics=[
+            ContentTopic("1.1", "Identification", ["a", "b", "c", "d"]),
+            ContentTopic("1.2", "Assessment", ["e", "f", "g", "h"])])]
+
+    chosen = know.key_points(content, limit=4)
+    topics = [topic for _element, topic, _point in chosen]
+
+    assert topics.count("1.2") == 2
+    assert topics.count("1.1") == 2
