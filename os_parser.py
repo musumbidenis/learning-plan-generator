@@ -426,6 +426,60 @@ def _extract_assessment_methods(unit_pages: List[Page]) -> List[str]:
     return out
 
 
+_RE_CRITICAL = re.compile(r"Critical\s+aspects", re.I)
+# Where the critical aspects stop: the evidence guide's next row, 'Resource
+# implications', whose label is numbered '2.' and often split over two lines.
+_RE_CRITICAL_END = re.compile(r"\n\s*2\.\s*Resource|Resource\s*\n?\s*"
+                              r"implications|The\s+following\s+resources",
+                              re.I)
+# A page footer the text layer glued onto the end of an item's line.
+_RE_INLINE_FOOTER = re.compile(r"\S?\s*20\d{2}\s*,?\s*TVET\s+CDACC\s*\d*",
+                               re.I)
+# The left column's label, interleaved with the list by the text layer:
+# 'of Competency 1.1 Applied ...' or 'Competency' alone on a line.
+_RE_CRITICAL_LABEL = re.compile(r"^\s*(of\s+)?competency\b\s*", re.I)
+
+
+def _split_critical(block: str) -> List[str]:
+    """The numbered items of a critical-aspects block, footers removed."""
+    lines = [_RE_CRITICAL_LABEL.sub("", _RE_INLINE_FOOTER.sub("", line))
+             for line in block.splitlines() if not is_noise_line(line)]
+    return [text for _num, text in _split_numbered_cell(" ".join(lines))]
+
+
+def _critical_from_table(tables) -> List[str]:
+    for table in tables:
+        row = table.row_matching(_RE_CRITICAL)
+        if row is not None and len(row) >= 2:
+            items = _split_critical(row[1])
+            if items:
+                return items
+    return []
+
+
+def _extract_critical_aspects(unit_pages: List[Page]) -> List[str]:
+    """The evidence guide's 'Critical aspects of competency', one per item.
+
+    These are what the PC weighting tool ranks elements by: CDACC names them
+    the preferred ranking factor, and each paraphrases one or more PCs in the
+    past tense ('1.1 Applied self-management skills as per ...'). The block
+    runs from its label to the 'Resource implications' row below it.
+    """
+    full = "\n".join(p.text for p in unit_pages)
+    start = _RE_CRITICAL.search(full)
+    if not start:
+        return []
+    block = full[start.end():]
+    end = _RE_CRITICAL_END.search(block)
+    block = block[:end.start()] if end else block[:3000]
+    # Drop the rest of the label line's lead-in: 'of Competency Assessment
+    # requires evidence that the candidate:'.
+    colon = block.find(":")
+    if 0 <= colon < 200:
+        block = block[colon + 1:]
+    return _split_critical(block)
+
+
 # Bulleted line in the Required-Skills/Knowledge lists. Bullets render as •/●/▪,
 # or as the mangled replacement glyph (U+FFFD) when the font isn't embedded.
 _RE_BULLET = re.compile(r"^\s*[•●▪◦·�‣⁌•●▪○·\*]\s*(.+)")
@@ -497,6 +551,8 @@ def _build_unit(unit_pages: List[Page], cover_level: str) -> Unit:
     unit.assessment_methods = (_methods_from_table(tables)
                                or _extract_assessment_methods(unit_pages))
     unit.required_knowledge = _extract_required_knowledge(unit_pages)
+    unit.critical_aspects = (_critical_from_table(tables)
+                             or _extract_critical_aspects(unit_pages))
     return unit
 
 

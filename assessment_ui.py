@@ -3,7 +3,8 @@
 A sibling of the Learning Plan path, and it runs in the same order the work
 actually happens in:
 
-    1  paste the unit's PC weighting table, and correct what the paste lost
+    1  paste the unit's PC weighting table and correct what the paste lost,
+       or build one from the OS by CDACC's method
     2  say which CAT it is, written or practical, and out of how many marks
     3  pick the performance criteria this assessment covers
     4  read the computed distribution - every mark is final at this point
@@ -36,6 +37,8 @@ assessment numbering deterministic.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import List, Optional, Tuple
 
 import streamlit as st
@@ -45,6 +48,7 @@ import assessment_content as content_builder
 import assessment_docs as docs
 import assessment_knowledge as knowledge
 import assessment_ledger as ledger_store
+import assessment_pc_tool as pc_tool
 import assessment_research as research
 import assessment_resources as resource_reader
 import assessment_validators as validators
@@ -90,16 +94,54 @@ def _show(problems: List[Problem]) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# 3. the pasted weighting table
+# 3. the weighting table - pasted from CDACC's, or built from the OS
 # --------------------------------------------------------------------------- #
+_PASTE = "Paste CDACC's weighting table"
+_BUILD = "Build it from the OS (CDACC method)"
+
+
 def _weighting_step(os_unit: Unit) -> Optional[UnitWeighting]:
+    """The unit's weighting, whichever way it arrives, checked the same way.
+
+    CDACC's published table wins where it exists; the builder is for units
+    and programmes it does not cover, or for formative CATs. Both end in the
+    same `UnitWeighting`, so nothing after this step knows which was used.
+    """
+    st.markdown("#### 1. The unit's PC weighting table")
+    source = st.radio("Where the weighting comes from", [_PASTE, _BUILD],
+                      horizontal=True, key="at_weighting_source",
+                      help="Use CDACC's published weighting where there is "
+                           "one. Build it only for units it does not cover.")
+    weighting = (_pasted_weighting() if source == _PASTE
+                 else _built_weighting(os_unit))
+    if weighting is None:
+        return None
+
+    if not weighting.unit_title:
+        weighting.unit_title = os_unit.unit_title
+    if not weighting.cdacc_code:
+        weighting.cdacc_code = os_unit.os_code
+    if not weighting.isced_code:
+        weighting.isced_code = os_unit.isced_code
+    if not weighting.knqf_level:
+        weighting.knqf_level = os_unit.level
+
+    ok = _show(weighting_parser.validate(weighting))
+    st.caption(f"{len(weighting.pcs)} performance criteria · "
+               f"theory {weighting.grand_total(THEORY)} · "
+               f"practical {weighting.grand_total(PRACTICAL)}"
+               + (f" · ratio {weighting.ratio[0]}:{weighting.ratio[1]}"
+                  if weighting.ratio else ""))
+    return weighting if ok else None
+
+
+def _pasted_weighting() -> Optional[UnitWeighting]:
     """Paste the table, then correct it.
 
     Paste out of a PDF is lossy and the trainer has to be able to fix a cell,
     so what is parsed is shown as an editable grid rather than accepted
     silently. Everything downstream is computed from these numbers.
     """
-    st.markdown("#### 1. The unit's PC weighting table")
     st.caption("Paste it from the Word or PDF document - tabs, pipes or "
                "spaces all read. Correct anything the paste lost in the grid "
                "below before going on.")
@@ -137,23 +179,138 @@ def _weighting_step(os_unit: Unit) -> Optional[UnitWeighting]:
             pc.text = str(row["Text"])
             pc.theory_weight = int(row["Theory"] or 0)
             pc.practical_weight = int(row["Practical"] or 0)
+    return weighting
 
-    if not weighting.unit_title:
-        weighting.unit_title = os_unit.unit_title
-    if not weighting.cdacc_code:
-        weighting.cdacc_code = os_unit.os_code
-    if not weighting.isced_code:
-        weighting.isced_code = os_unit.isced_code
-    if not weighting.knqf_level:
-        weighting.knqf_level = os_unit.level
 
-    ok = _show(weighting_parser.validate(weighting))
-    st.caption(f"{len(weighting.pcs)} performance criteria · "
-               f"theory {weighting.grand_total(THEORY)} · "
-               f"practical {weighting.grand_total(PRACTICAL)}"
-               + (f" · ratio {weighting.ratio[0]}:{weighting.ratio[1]}"
-                  if weighting.ratio else ""))
-    return weighting if ok else None
+def _built_weighting(os_unit: Unit) -> Optional[UnitWeighting]:
+    """CDACC's method, run on the OS, with every judgement open to correction.
+
+    The trainer confirms three things - the ratio, which PCs each critical
+    aspect covers, and what kind of PC each one is - and the arithmetic
+    follows. The grid at the end is the tool itself; its marks may be moved
+    between PCs (the method leaves that to the developer), and the grid
+    resets whenever a judgement above it changes, because its figures were
+    computed from them.
+    """
+    if not _show(pc_tool.check(os_unit)):
+        st.info("This unit's OS did not read cleanly enough to weight. Paste "
+                "CDACC's table instead.")
+        return None
+    unit_key = os_unit.os_code or os_unit.unit_title
+    valid = {pc.number for pc in os_unit.all_pcs}
+
+    st.caption("Built by TVET CDACC's method: elements are ranked by the "
+               "critical aspects of competency they cover, and weight % = "
+               "rank / total of ranks x 100. Check each judgement below; the "
+               "marks follow from them.")
+    level_ratio = pc_tool.default_ratio(os_unit.level)
+    c1, c2, c3 = st.columns(3)
+    theory = c1.number_input("Theory ratio", min_value=0, max_value=10,
+                             value=level_ratio[0], key=f"at_rt_{unit_key}")
+    practical = c2.number_input("Practical ratio", min_value=0, max_value=10,
+                                value=level_ratio[1], key=f"at_rp_{unit_key}")
+    factor = c3.number_input("Factor (0 = choose by the method)", min_value=0,
+                             max_value=pc_tool.MAX_FACTOR, value=0,
+                             key=f"at_factor_{unit_key}")
+    st.caption(f"CDACC's 2022 ratio for Level {os_unit.level or '?'} is "
+               f"{level_ratio[0]}:{level_ratio[1]}. Use the ratio in the "
+               "current CDACC weighting or assessment requirements for your "
+               "programme where it differs - the 2026 ICT figures do.")
+    if theory + practical == 0:
+        st.error("The ratio cannot be 0:0.")
+        return None
+
+    st.markdown("**Critical aspects of competency, and the PCs each covers**")
+    aspect_rows = st.data_editor(
+        [{"No.": a.number, "Critical aspect": a.text, "PCs": ", ".join(a.pcs)}
+         for a in pc_tool.map_aspects(os_unit)],
+        key=f"at_aspects_{unit_key}", width="stretch", num_rows="dynamic",
+        column_config={"PCs": st.column_config.TextColumn(
+            help="PC numbers, e.g. 1.2, 1.3")})
+    aspects = []
+    for row in aspect_rows:
+        text = str(row.get("Critical aspect") or "").strip()
+        if not text:
+            continue
+        numbers = [n for n in re.findall(r"\d+\.\d+", str(row.get("PCs") or ""))
+                   if n in valid]
+        aspects.append(pc_tool.CriticalAspect(number=str(len(aspects) + 1),
+                                              text=text, pcs=numbers))
+    unmapped = [a.number for a in aspects if not a.pcs]
+    if unmapped:
+        st.warning(f"Critical aspect {', '.join(unmapped)} is not mapped to "
+                   "any PC, so it ranks nothing. Enter the PC numbers it "
+                   "covers.")
+
+    st.markdown("**What kind of PC each one is**")
+    facet_rows = st.data_editor(
+        [{"PC": f.number, "Performance criterion": f.text, "K / P": f.nature,
+          "Product": f.product, "Creativity": f.creativity}
+         for f in pc_tool.read_facets(os_unit)],
+        key=f"at_facets_{unit_key}", width="stretch", num_rows="fixed",
+        disabled=["PC", "Performance criterion"],
+        column_config={
+            "K / P": st.column_config.SelectboxColumn(
+                options=list(pc_tool.NATURES), required=True,
+                help="K = knowledge only (no practical marks), P = "
+                     "performance only (no theory marks), K+P = both"),
+            "Product": st.column_config.CheckboxColumn(
+                help="Ends in something that can be handed in - a report, "
+                     "a drawing, a built item"),
+            "Creativity": st.column_config.CheckboxColumn(
+                help="Needs innovation rather than a standard procedure")})
+    facets = [pc_tool.PCFacets(number=str(r["PC"]), element_number="",
+                               text=str(r["Performance criterion"]),
+                               nature=str(r["K / P"] or pc_tool.BOTH_PC),
+                               product=bool(r["Product"]),
+                               creativity=bool(r["Creativity"]))
+              for r in facet_rows]
+
+    tool = pc_tool.build(os_unit, aspects, facets,
+                         (int(theory), int(practical)),
+                         factor=int(factor) or None)
+    st.info(tool.factor_reason)
+    st.markdown("**Sheet 1 - element ranking**")
+    st.dataframe([{"Element": f"{e.number}. {e.title}",
+                   "Critical aspects": e.critical, "Rank": e.rank,
+                   "Weight %": e.weight, "x factor": e.marks,
+                   "Theory": e.theory, "Practical": e.practical,
+                   "Why": e.reason} for e in tool.elements],
+                 width="stretch", hide_index=True)
+
+    st.markdown("**Sheet 2 - the PC weighting tool**")
+    rows = [{"PC": p.number, "Performance criterion": p.text,
+             "Theory": p.theory, "Practical": p.practical, "Why": p.reason}
+            for p in tool.pcs]
+    # The key carries the computed figures, so a changed judgement above
+    # starts the grid again rather than replaying old edits onto new rows.
+    signature = hashlib.md5(repr([(r["PC"], r["Theory"], r["Practical"])
+                                  for r in rows]).encode()).hexdigest()[:10]
+    edited = st.data_editor(rows, key=f"at_tool_{unit_key}_{signature}",
+                            width="stretch", num_rows="fixed",
+                            disabled=["PC", "Performance criterion", "Why"])
+    by_number = {p.number: p for p in tool.pcs}
+    for row in edited:
+        pc = by_number.get(str(row["PC"]))
+        if pc is not None:
+            pc.theory = int(row["Theory"] or 0)
+            pc.practical = int(row["Practical"] or 0)
+    for el in tool.elements:
+        pcs = tool.pcs_of(el.number)
+        got = (sum(p.theory for p in pcs), sum(p.practical for p in pcs))
+        if got != (el.theory, el.practical):
+            st.warning(f"**{el.number}** - its PCs now carry {got[0]} theory "
+                       f"and {got[1]} practical against the {el.theory} and "
+                       f"{el.practical} its rank gives it.")
+
+    st.download_button(
+        "Download the PC weighting tool (.docx)",
+        data=docs.build_weighting_tool(tool),
+        file_name=f"PC Weighting Tool - {os_unit.unit_title.title()}.docx",
+        mime="application/vnd.openxmlformats-officedocument."
+             "wordprocessingml.document",
+        key=f"at_tool_doc_{unit_key}")
+    return tool.to_weighting()
 
 
 # --------------------------------------------------------------------------- #
@@ -177,6 +334,11 @@ def _cat_step(weighting: UnitWeighting) -> Optional[CatDefinition]:
     all_numbers = [pc.number for pc in weighting.pcs]
     default = ledger_store.default_selection(ledger, cat_id, assessment_type,
                                              all_numbers)
+    # A PC weighted 0 for this type is one the table says is never assessed
+    # this way (CDACC's own tools give hands-on PCs 0 theory), so it is not
+    # ticked for the trainer; ticked, it would get a 0-mark question.
+    default = [n for n in default
+               if weighting.pc(n).weight_for(assessment_type) > 0]
 
     st.markdown("#### 3. Performance criteria to assess")
     if cat_id == FINAL_CAT:

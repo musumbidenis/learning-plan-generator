@@ -615,3 +615,108 @@ def build_assessors_tool(tool: AssessmentTool) -> bytes:
     else:
         _add_marking_scheme(doc, tool, usable)
     return _to_bytes(doc)
+
+
+# --------------------------------------------------------------------------- #
+# 5. The PC weighting tool, when it was built rather than pasted
+# --------------------------------------------------------------------------- #
+WEIGHTING_TOOL_TITLE = "PERFORMANCE CRITERIA WEIGHTING TOOL"
+RANKING_HEADERS = ("Element", "Critical Aspects", "Product / Process",
+                   "Creativity", "No. of PCs", "K / P", "Rank",
+                   "Weight %", "Weight x Factor", "Theory", "Practical",
+                   "Justification")
+RANKING_WIDTHS = [4.2, 1.6, 1.6, 1.6, 1.3, 1.6, 1.2, 1.4, 1.6, 1.4, 1.5, 8.0]
+PC_TOOL_HEADERS = ("Element", "Ranking", "Weighting (100%)", "Weight by Factor",
+                   "Theory", "Practical", "Performance Criteria",
+                   "PC Theory", "PC Practical", "Justification")
+PC_TOOL_WIDTHS = [3.4, 1.3, 1.6, 1.6, 1.3, 1.5, 6.8, 1.3, 1.5, 6.4]
+
+
+def _num_or_half(value: float) -> str:
+    """A rank: '4', or '1.5' where tied ranks were averaged."""
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def build_weighting_tool(tool) -> bytes:
+    """The PC weighting tool built by `assessment_pc_tool`, as a document.
+
+    Sheet 1 is the ranking working sheet, Sheet 2 the tool in the layout the
+    Understanding CBET template uses, with a justification column CDACC's own
+    format lacks - the reason for every mark, for validation.
+    """
+    doc = Document()
+    usable = _setup_page(doc, landscape=True)
+    _add_title(doc, WEIGHTING_TOOL_TITLE)
+    header = _new_table(doc, [usable / 2.0, usable / 2.0])
+    t, p = tool.ratio
+    pairs = [("Unit of Competency", tool.unit_title),
+             ("TVET CDACC Unit Code", tool.cdacc_code),
+             ("ISCED Unit Code", tool.isced_code),
+             ("KNQF Level", tool.knqf_level),
+             ("Theory : Practical Ratio", f"{t}:{p}"),
+             ("Factor", str(tool.factor))]
+    for idx in range(0, len(pairs), 2):
+        for cell, (label, value) in zip(header.add_row().cells,
+                                        pairs[idx:idx + 2]):
+            _set_label_value_cell(cell, label, value)
+    _add_lines(doc, [
+        "Method: TVET CDACC, Performance Criteria Weighting (2022). Elements "
+        "are ranked by the critical aspects of competency they cover, ties "
+        "broken by product/process, creativity, number of PCs and knowledge/"
+        "performance; weight % = rank / total of ranks x 100.",
+        tool.factor_reason])
+
+    _add_heading(doc, "Sheet 1 - Element ranking")
+    table = _new_table(doc, _scaled(RANKING_WIDTHS, usable))
+    _add_row(table, RANKING_HEADERS, header=True, shade=HEADER_FILL)
+    _set_repeat_header(table.rows[-1])
+    for el in tool.elements:
+        _add_row(table, [
+            f"{el.number}. {el.title}", el.critical,
+            "Product" if el.product else "Process",
+            "Yes" if el.creativity else "No", el.n_pcs,
+            "P" if el.performance_only else "K+P", _num_or_half(el.rank),
+            el.weight, el.marks, el.theory, el.practical, el.reason])
+    _add_row(table, [
+        "TOTAL", sum(e.critical for e in tool.elements), "", "",
+        sum(e.n_pcs for e in tool.elements), "",
+        _num_or_half(tool.rank_total), sum(e.weight for e in tool.elements),
+        sum(e.marks for e in tool.elements),
+        sum(e.theory for e in tool.elements),
+        sum(e.practical for e in tool.elements), ""],
+        header=True, shade=HEADER_FILL)
+
+    _add_heading(doc, "Sheet 2 - PC weighting tool")
+    table = _new_table(doc, _scaled(PC_TOOL_WIDTHS, usable))
+    _add_row(table, PC_TOOL_HEADERS, header=True, shade=HEADER_FILL)
+    _set_repeat_header(table.rows[-1])
+    for el in tool.elements:
+        for idx, pc in enumerate(tool.pcs_of(el.number)):
+            lead = ([f"{el.number}. {el.title}", _num_or_half(el.rank),
+                     el.weight, el.marks, el.theory, el.practical]
+                    if idx == 0 else [""] * 6)
+            _add_row(table, lead + [f"{pc.number} {pc.text}", pc.theory,
+                                    pc.practical, pc.reason])
+        pcs = tool.pcs_of(el.number)
+        _add_row(table, [f"Sub-total: Element {el.number}", "", "", "",
+                         "", "", "", sum(x.theory for x in pcs),
+                         sum(x.practical for x in pcs), ""],
+                 header=True, shade=HEADER_FILL)
+    _add_row(table, [
+        "GRAND TOTAL", _num_or_half(tool.rank_total),
+        sum(e.weight for e in tool.elements),
+        sum(e.marks for e in tool.elements),
+        sum(e.theory for e in tool.elements),
+        sum(e.practical for e in tool.elements), "",
+        sum(x.theory for x in tool.pcs), sum(x.practical for x in tool.pcs),
+        ""], header=True, shade=HEADER_FILL)
+
+    if tool.aspects:
+        _add_heading(doc, "Critical aspects of competency, mapped to PCs")
+        table = _new_table(doc, _scaled([1.0, 12.0, 4.0], usable))
+        _add_row(table, ("No.", "Critical aspect", "Performance criteria"),
+                 header=True, shade=HEADER_FILL)
+        for aspect in tool.aspects:
+            _add_row(table, [aspect.number, aspect.text,
+                             ", ".join(aspect.pcs) or "Not mapped"])
+    return _to_bytes(doc)

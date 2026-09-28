@@ -49,6 +49,9 @@ class Unit:
     # "Required Knowledge" bullets - underpinning theory; used to enrich the plan
     # (esp. the OS-only fallback when no curriculum content exists for the unit).
     required_knowledge: List[str] = field(default_factory=list)
+    # Evidence-Guide "Critical aspects of competency" - what the PC weighting
+    # tool ranks elements by (assessment_pc_tool).
+    critical_aspects: List[str] = field(default_factory=list)
 
     @property
     def all_pcs(self) -> List[PerformanceCriterion]:
