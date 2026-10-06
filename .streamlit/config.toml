@@ -1,0 +1,41 @@
+# App theme. Streamlit themes only a handful of global tokens - one accent, a
+# ground, a widget fill, text, border and the fonts - and every widget inherits
+# from them, so these few lines are the whole look. Anything beyond this is CSS
+# over Streamlit's own markup, and app.py keeps that to the short block at its
+# foot.
+#
+# The palette is warm paper and a deep institutional teal rather than Streamlit's
+# white-and-red default: these documents go out on RVNP letterhead, and the app
+# should look like it belongs to the same office.
+
+[theme]
+base = "light"
+
+primaryColor = "#1F5C4A"              # deep teal-green - buttons, focus, accents
+backgroundColor = "#FAF8F4"           # warm paper, not stark white
+secondaryBackgroundColor = "#F3F0E6"  # widget + table-header fill
+textColor = "#1C2320"
+linkColor = "#1F5C4A"
+
+borderColor = "#E8E2D4"
+dataframeBorderColor = "#E8E2D4"
+dataframeHeaderBackgroundColor = "#F3F0E6"
+showWidgetBorder = true
+
+# Lora for headings over IBM Plex Sans for everything else: an academic pairing
+# that reads as institutional rather than as another dashboard.
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+headingFont = "Lora:https://fonts.googleapis.com/css2?family=Lora:wght@500;600;700&display=swap, serif"
+codeFont = "monospace"
+
+baseRadius = "0.6rem"
+buttonRadius = "0.55rem"
+
+# st.metric is how the unit's size is reported; the default value size competes
+# with the headings above it.
+metricValueFontSize = "1.9rem"
+metricValueFontWeight = 600
+
+[server]
+# A 130-page curriculum in .docx form is a large upload.
+maxUploadSize = 300

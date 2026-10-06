@@ -54,6 +54,7 @@ import assessment_resources as resource_reader
 import assessment_validators as validators
 import assessment_weighting as weighting_parser
 import runlog
+import ui
 from assessment_models import (CAT_1, CAT_2, CAT_3, CAT_LABELS, FINAL_CAT,
                                PRACTICAL, THEORY, Allocation, AssessmentTool,
                                CatDefinition, ElementContent, Exemplar,
@@ -107,7 +108,7 @@ def _weighting_step(os_unit: Unit) -> Optional[UnitWeighting]:
     and programmes it does not cover, or for formative CATs. Both end in the
     same `UnitWeighting`, so nothing after this step knows which was used.
     """
-    st.markdown("#### 1. The unit's PC weighting table")
+    ui.section(1, "The unit's PC weighting table", step=True)
     source = st.radio("Where the weighting comes from", [_PASTE, _BUILD],
                       horizontal=True, key="at_weighting_source",
                       help="Use CDACC's published weighting where there is "
@@ -317,7 +318,7 @@ def _built_weighting(os_unit: Unit) -> Optional[UnitWeighting]:
 # 1-2. what to assess, and how much it is worth
 # --------------------------------------------------------------------------- #
 def _cat_step(weighting: UnitWeighting) -> Optional[CatDefinition]:
-    st.markdown("#### 2. The assessment")
+    ui.section(2, "The assessment", step=True)
     c1, c2, c3 = st.columns(3)
     cat_id = c1.selectbox("Assessment", _CAT_ORDER, index=0,
                           format_func=lambda c: CAT_LABELS[c], key="at_cat")
@@ -340,7 +341,7 @@ def _cat_step(weighting: UnitWeighting) -> Optional[CatDefinition]:
     default = [n for n in default
                if weighting.pc(n).weight_for(assessment_type) > 0]
 
-    st.markdown("#### 3. Performance criteria to assess")
+    ui.section(3, "Performance criteria to assess", step=True)
     if cat_id == FINAL_CAT:
         st.caption("A Final CAT is comprehensive: every PC is back in play.")
     else:
@@ -382,7 +383,7 @@ def _distribution_step(weighting: UnitWeighting,
     allocations = alloc.allocate(weighting, cat)
     allocations = alloc.assign_bloom(allocations, weighting.knqf_level,
                                      cat.total_marks)
-    st.markdown("#### 4. Mark distribution")
+    ui.section(4, "Mark distribution", step=True)
     st.caption("Computed here, in plain arithmetic. The model is given these "
                "numbers and never changes them.")
     st.dataframe(
@@ -416,7 +417,7 @@ def _content_step(os_unit: Unit, curr_unit, weighting: UnitWeighting,
     content = content_builder.content_for(
         curr_unit, elements, {a.element_number for a in allocations})
 
-    st.markdown("#### 5. What the paper is set from")
+    ui.section(5, "What the paper is set from", step=True)
     if not content:
         st.warning(
             "No curriculum content matched these elements, so the questions "
@@ -457,7 +458,7 @@ def _resource_step(content: List[ElementContent]
     instructions box and re-reading a PowerPoint - or worse, re-transcribing a
     recording - on each one would be unusable.
     """
-    st.markdown("#### 6. The trainer's own notes and resources")
+    ui.section(6, "The trainer's own notes and resources", step=True)
     st.caption("Attach what you actually taught from and the questions will "
                "be written from it: notes, slides, a handout, a recording of "
                "the session. Anything a topic is not covered by is looked up "
@@ -534,7 +535,7 @@ def _knowledge_step(unit_title: str, content: List[ElementContent],
                         if resources else "Reading up on the taught topics..."):
             notes = knowledge.notes_for(unit_title, content, covered=covered)
 
-    st.markdown("#### 7. Looked up, for the topics the resources miss")
+    ui.section(7, "Looked up, for the topics the resources miss", step=True)
     if not notes:
         st.caption("Your resources cover every assessed topic, so nothing "
                    "needed looking up." if resources else
@@ -674,7 +675,7 @@ def render(os_unit: Unit, curr_unit=None, programme: str = "") -> None:
     tool = ss.at_tool
     if tool is None:
         return
-    st.markdown("#### 8. Result")
+    ui.section(8, "Result", step=True)
     remaining = validators.blocking(ss.at_problems)
     warnings = [p for p in ss.at_problems if not p.blocking]
     if remaining:

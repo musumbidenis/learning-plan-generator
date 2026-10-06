@@ -41,6 +41,7 @@ import os_parser
 import planner
 import runlog
 import session_plan_builder
+import ui
 import unit_index
 import unit_match
 import word_reader
@@ -58,7 +59,9 @@ DEFAULT_SP_DURATION = 120
 # session before giving up so the app never hangs indefinitely.
 SP_MAX_ATTEMPTS = 8
 
-st.set_page_config(page_title="Learning Plan Generator", layout="wide")
+st.set_page_config(page_title="Learning Plan Generator", page_icon="📘",
+                   layout="wide")
+ui.style()
 
 ss = st.session_state
 _DEFAULTS = dict(
@@ -339,35 +342,41 @@ def render_preview_and_generate() -> None:
         return
 
     # ----- plan details ----------------------------------------------------- #
+    # One bordered block: the fields that go on the document's header, kept
+    # together and apart from the extraction above them.
     st.subheader("Plan details")
-    d1, d2, d3, d4 = st.columns(4)
-    trainer = d1.text_input("Trainer name", key="f_trainer")
-    institution = d2.text_input("Institution",
-                                value="The Rift Valley National Polytechnic",
-                                key="f_inst")
-    course = d3.text_input("Course", key="f_course",
-                           placeholder="e.g. ICT Technician")
-    level = d4.text_input("Level", value=os_unit.level or "", key="f_level")
+    with st.container(border=True):
+        d1, d2, d3, d4 = st.columns(4)
+        trainer = d1.text_input("Trainer name", key="f_trainer")
+        institution = d2.text_input("Institution",
+                                    value="The Rift Valley National Polytechnic",
+                                    key="f_inst")
+        course = d3.text_input("Course", key="f_course",
+                               placeholder="e.g. ICT Technician")
+        level = d4.text_input("Level", value=os_unit.level or "", key="f_level")
 
-    d5, d6, d7 = st.columns(3)
-    num_trainees = d5.text_input("Number of trainees", value="25", key="f_num")
-    class_code = d6.text_input("Class code", key="f_class")
-    date_prep = d7.date_input("Date of preparation", _dt.date.today(), key="f_date")
+        d5, d6, d7 = st.columns(3)
+        num_trainees = d5.text_input("Number of trainees", value="25",
+                                     key="f_num")
+        class_code = d6.text_input("Class code", key="f_class")
+        date_prep = d7.date_input("Date of preparation", _dt.date.today(),
+                                  key="f_date")
 
-    s1, s2, s3 = st.columns(3)
-    term_weeks = s1.number_input("Term length (weeks)", 1, 30, 12, key="f_weeks")
-    spw = s2.number_input("Sessions per week", 1, 10, 2, key="f_spw")
-    cat_count = s3.number_input("Number of CATs", 0, 10, 2, key="f_cats")
+        s1, s2, s3 = st.columns(3)
+        term_weeks = s1.number_input("Term length (weeks)", 1, 30, 12,
+                                     key="f_weeks")
+        spw = s2.number_input("Sessions per week", 1, 10, 2, key="f_spw")
+        cat_count = s3.number_input("Number of CATs", 0, 10, 2, key="f_cats")
 
-    default_cats: List[int] = []
-    if cat_count:
-        step = max(1, int(term_weeks) // (int(cat_count) + 1))
-        default_cats = sorted({min(int(term_weeks), step * (i + 1))
-                               for i in range(int(cat_count))})
-        default_cats[-1] = int(term_weeks)
-    cat_weeks_str = st.text_input("CAT weeks (comma-separated)",
-                                  value=", ".join(map(str, default_cats)),
-                                  key="f_catweeks")
+        default_cats: List[int] = []
+        if cat_count:
+            step = max(1, int(term_weeks) // (int(cat_count) + 1))
+            default_cats = sorted({min(int(term_weeks), step * (i + 1))
+                                   for i in range(int(cat_count))})
+            default_cats[-1] = int(term_weeks)
+        cat_weeks_str = st.text_input("CAT weeks (comma-separated)",
+                                      value=", ".join(map(str, default_cats)),
+                                      key="f_catweeks")
     try:
         cat_weeks = [int(x) for x in cat_weeks_str.split(",") if x.strip()]
     except ValueError:
@@ -1039,7 +1048,7 @@ _SRC_UPLOAD = "Upload files"
 
 def render_create_flow() -> None:
     # ----- 1. Where do the two documents come from? ------------------------ #
-    st.header("1. Source documents")
+    ui.section(1, "Source documents")
 
     if drive_client.is_configured():
         source = st.radio("Where are the Occupational Standard and Curriculum?",
@@ -1060,12 +1069,12 @@ def render_create_flow() -> None:
     if not ss.os_refs and not ss.cu_refs:
         return
 
-    st.header("2. Choose the unit")
+    ui.section(2, "Choose the unit")
     os_ref, cu_ref = render_unit_selection()
 
     # ----- 3. Generate Learning Plan --------------------------------------- #
     if os_ref is not None and cu_ref is not None:
-        st.header("3. Generate Learning Plan")
+        ui.section(3, "Generate Learning Plan")
 
         cur_key = (ss.os_sig, os_ref.isced_code, os_ref.title,
                    ss.cu_sig, cu_ref.isced_code, cu_ref.title)
@@ -1097,14 +1106,15 @@ def render_create_flow() -> None:
 # --------------------------------------------------------------------------- #
 # Header + mode dispatch
 # --------------------------------------------------------------------------- #
-st.markdown(
-    "<h1 style='text-align:center; margin-bottom:0.5rem;'>Learning Plan Generator</h1>",
-    unsafe_allow_html=True)
+ui.page_header("Learning Plan Generator",
+               "The Rift Valley National Polytechnic &middot; KSTVET Learning "
+               "Plans and Assessment Tools &middot; REF KTTC/TP/LP/F07")
 
 _MODE_CREATE = "Create a Learning Plan (from OS + Curriculum)"
 _MODE_UPLOAD = "Upload a Learning Plan → Session Plans"
-_mode = st.radio("What would you like to do?", [_MODE_CREATE, _MODE_UPLOAD],
-                 horizontal=True, key="mode")
+_mode = st.segmented_control(
+    "What would you like to do?", [_MODE_CREATE, _MODE_UPLOAD],
+    default=_MODE_CREATE, key="mode", label_visibility="collapsed")
 st.divider()
 
 if _mode == _MODE_UPLOAD:
@@ -1116,17 +1126,4 @@ else:
 # =========================================================================== #
 # Footer (centered, fixed to the bottom of the screen)
 # =========================================================================== #
-st.markdown(
-    "<style>"
-    "  .block-container { padding-bottom: 4.5rem; }"   # keep content clear of footer
-    "  .app-footer {"
-    "    position: fixed; left: 0; bottom: 0; width: 100%;"
-    "    text-align: center; color: gray; font-size: 0.85rem; padding: 8px 0;"
-    "    border-top: 1px solid rgba(128,128,128,0.25);"
-    "    background-color: rgba(127,127,127,0.06);"
-    "    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);"
-    "    z-index: 1000;"
-    "  }"
-    "</style>"
-    "<div class='app-footer'>Made with &#10084;&#65039; by Musumbi &#128081;</div>",
-    unsafe_allow_html=True)
+ui.footer()
