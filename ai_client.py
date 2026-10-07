@@ -1660,6 +1660,99 @@ def _generate_batch(unit: Unit, chunk: List[Session], api_key: str,
     return rows + [{}] * (len(chunk) - len(rows))
 
 
+# --------------------------------------------------------------------------- #
+# Load testing
+# --------------------------------------------------------------------------- #
+# A load test is meant to measure THIS app - the PDF parsing, the per-session
+# state, the reruns, the document building - and not Groq's queue. Left real,
+# every virtual user would be spending the same per-minute token allowance (see
+# LP_MAX_PARALLEL), so the run would describe Groq's rate limiter rather than
+# anything in this codebase, and thirty users would burn a day's allowance in
+# ten minutes.
+#
+# LOADTEST_MOCK=1 substitutes exactly one thing: the network call. Everything
+# else on the path - plan_sessions, merge_ai_into_sessions, the safety nets, the
+# preview and doc_builder - runs for real, which is the part worth measuring.
+# With the variable unset, which is every normal run, nothing here is reached.
+LOADTEST_MOCK_SECONDS = 8.0
+
+
+def loadtest_mock_enabled() -> bool:
+    """Whether to answer generation from a sample instead of calling Groq."""
+    return _config("LOADTEST_MOCK") == "1"
+
+
+def _mock_row(session: Session) -> dict:
+    """One schema-shaped row for `session`, worded off its own title and PCs.
+
+    Built from the session rather than returned as a constant, so a mocked plan
+    still varies from session to session: the validators, the preview and the
+    document builder then see the shape and the spread of a real answer.
+    """
+    title = (session.session_title or "the topic").strip()
+    topic = (title[0].lower() + title[1:]) if title else "the topic"
+    pcs = [p for p in (session.pcs or []) if p][:2]
+    return {
+        "session_id": session.session_id,
+        "session_title": title,
+        "learning_outcomes": {
+            "stem": "By the end of the session, the trainee should be able to:",
+            "items": [f"explain the principles underlying {topic}",
+                      f"apply {topic} to a workplace task",
+                      f"evaluate the outcome of {topic} against the standard"],
+        },
+        "key_points": [
+            {"heading": title.upper(),
+             "points": (session.key_points[:4] or [
+                 f"Definition and scope of {topic}",
+                 f"Tools, materials and equipment used in {topic}",
+                 f"Workplace procedure for {topic}",
+                 f"Safety and quality considerations in {topic}"])},
+        ],
+        "trainee_activities": [
+            f"Brainstorm in pairs on where {topic} is met on the job",
+            f"Practical exercise: carry out {topic} under supervision",
+            "Group presentation of findings to the class",
+            "Individual written exercise from the trainer's handout",
+        ],
+        "resources": [
+            "Trainer's notes and whiteboard",
+            "Workshop tools, materials and PPE as listed in the unit",
+            "Projector and sample worked examples",
+        ],
+        "assessments": {
+            "knowledge_checks": [f"Oral questions on {topic}",
+                                 "Short written test (10 marks)"],
+            "skills": pcs or [f"Observation checklist while performing {topic}"],
+            "attitudes": ["Observation of teamwork, timekeeping and care of "
+                          "tools"],
+        },
+    }
+
+
+def _mock_generate(unit: Unit, sessions: List[Session],
+                   progress_cb=None) -> List[Session]:
+    """Stand in for `generate_sessions`, pausing as a real generation would.
+
+    The pause is spread across the progress lines rather than taken in one
+    lump, so the page redraws while it waits exactly as it does on a real run -
+    which is itself part of what a load test is measuring.
+    """
+    to_generate = [s for s in sessions if not s.is_cat]
+    runlog.log(f"AI: LOADTEST_MOCK=1 - {len(to_generate)} session(s) answered "
+               "from a sample; Groq not called", level="WARN")
+    steps = ("AI: LOADTEST_MOCK=1 - answering from a sample, not calling Groq",
+             f"AI: generating sessions 1-{len(to_generate)} of "
+             f"{len(to_generate)} (batch 1/1)",
+             "AI: sample plan merged")
+    pause = LOADTEST_MOCK_SECONDS / len(steps)
+    for line in steps:
+        _emit_progress(progress_cb, line)
+        time.sleep(pause)
+    return merge_ai_into_sessions(sessions, [_mock_row(s) for s in to_generate],
+                                  unit)
+
+
 def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
                       model: Optional[str] = None, progress_cb=None) -> List[Session]:
     """Run the grounded AI calls and merge the result into the skeleton.
@@ -1667,6 +1760,10 @@ def generate_sessions(unit: Unit, sessions: List[Session], api_key: str = "",
     The model is `model` or `GROQ_MODEL` where the account can call it, and
     otherwise the most capable model that does answer - see `resolve_model`.
     """
+    # Checked before the key is touched: a mocked run must not need one.
+    if loadtest_mock_enabled():
+        return _mock_generate(unit, sessions, progress_cb)
+
     # Key semantics: api_key=None  -> use the configured (.env / hard-coded) key
     if api_key is None:
         api_key = load_api_key()
